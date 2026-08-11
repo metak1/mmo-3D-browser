@@ -6,10 +6,10 @@ export class ProjectileAvatar {
   readonly mesh: THREE.Mesh;
   private targetPosition = new THREE.Vector3();
 
-  constructor() {
+  constructor(color: number, emissive: number) {
     this.mesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.18, 8, 8),
-      new THREE.MeshStandardMaterial({ color: 0xd15fe0, emissive: 0x8a2fb0, emissiveIntensity: 0.6 }),
+      new THREE.MeshStandardMaterial({ color, emissive, emissiveIntensity: 0.6 }),
     );
     this.mesh.position.y = 0.7;
   }

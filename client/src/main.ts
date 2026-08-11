@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { Room } from "colyseus.js";
 import {
   CastMessage,
+  ENEMY_STATS,
   EnemyKind,
   InputMessage,
   MAP_HALF_EXTENT,
@@ -15,16 +16,49 @@ import { EnemyAvatar } from "./game/Enemy";
 import { ProjectileAvatar } from "./game/Projectile";
 import { InputController } from "./game/InputController";
 import { connectToWorld } from "./network/connection";
+import { makeDraggable } from "./ui/DraggablePanel";
 
 const REMOTE_COLOR = 0xe8734a;
 const LOCAL_COLOR = 0x4ac0e8;
+const PLAYER_PROJECTILE_COLOR = 0xff9a3c;
+const PLAYER_PROJECTILE_EMISSIVE = 0xb35a12;
+const ENEMY_PROJECTILE_COLOR = 0xd15fe0;
+const ENEMY_PROJECTILE_EMISSIVE = 0x8a2fb0;
 const INPUT_SEND_INTERVAL_MS = 1000 / 20;
 const SERVER_RECONCILE_LERP = 0.02;
 const RECONCILE_SNAP_DISTANCE = 3; // large corrections (e.g. death/respawn teleport) snap instead of creeping
-const SPELL_IDS: SpellId[] = [1, 2];
+const SPELL_IDS: SpellId[] = [1, 2, 3];
 
 const hud = document.getElementById("hud")!;
 const container = document.getElementById("app")!;
+
+const playerHpFill = document.querySelector<HTMLElement>("[data-player-hp-fill]")!;
+const playerHpLabel = document.querySelector<HTMLElement>("[data-player-hp-label]")!;
+const playerCastBarEl = document.querySelector<HTMLElement>("[data-player-cast-bar]")!;
+const playerCastFill = document.querySelector<HTMLElement>("[data-player-cast-fill]")!;
+const playerCastLabel = document.querySelector<HTMLElement>("[data-player-cast-label]")!;
+
+const targetPanel = document.getElementById("target-panel")!;
+const targetNameEl = document.querySelector<HTMLElement>("[data-target-name]")!;
+const targetHpFill = document.querySelector<HTMLElement>("[data-target-hp-fill]")!;
+const targetHpLabel = document.querySelector<HTMLElement>("[data-target-hp-label]")!;
+const targetCastBarEl = document.querySelector<HTMLElement>("[data-target-cast-bar]")!;
+const targetCastFill = document.querySelector<HTMLElement>("[data-target-cast-fill]")!;
+
+makeDraggable(document.getElementById("player-panel")!, "player");
+makeDraggable(document.getElementById("target-panel")!, "target");
+makeDraggable(document.getElementById("spell-panel")!, "spells");
+
+function hpColor(fraction: number): string {
+  return fraction > 0.5 ? "#4fd166" : fraction > 0.25 ? "#e0b23c" : "#e0503c";
+}
+
+function updateHpBar(fillEl: HTMLElement, labelEl: HTMLElement, hp: number, maxHp: number) {
+  const fraction = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 0;
+  fillEl.style.width = `${fraction * 100}%`;
+  fillEl.style.background = hpColor(fraction);
+  labelEl.textContent = `${Math.ceil(hp)}/${Math.ceil(maxHp)}`;
+}
 
 async function main() {
   const gameScene = new GameScene(container);
@@ -32,13 +66,21 @@ async function main() {
 
   const avatars = new Map<string, PlayerAvatar>();
   const enemies = new Map<string, EnemyAvatar>();
+  const enemySchemaById = new Map<string, { kind: string; hp: number; maxHp: number; isCasting: boolean }>();
   const projectiles = new Map<string, ProjectileAvatar>();
 
   let room: Room | undefined;
   let localSessionId: string | null = null;
   let currentTargetId: string | null = null;
+
   let localHp = 0;
   let localMaxHp = 0;
+  let localCastSpellId = 0;
+  let localCastActive = false;
+  let localCastStartRef = 0;
+
+  let targetCastActive = false;
+  let targetCastStartRef = 0;
 
   const localPredicted = new THREE.Vector3(0, 0, 0);
   const localServerPosition = new THREE.Vector3(0, 0, 0);
@@ -56,13 +98,34 @@ async function main() {
 
   function updateHud() {
     if (!localSessionId) return;
-    hud.textContent = `Connected as ${localSessionId} — HP ${localHp}/${localMaxHp}`;
+    hud.textContent = `Connected as ${localSessionId}`;
   }
 
-  function selectTarget(id: string | null) {
+  function setTarget(id: string | null) {
     if (currentTargetId) enemies.get(currentTargetId)?.setSelected(false);
     currentTargetId = id;
-    if (currentTargetId) enemies.get(currentTargetId)?.setSelected(true);
+    targetCastActive = false;
+    targetCastBarEl.hidden = true;
+
+    if (!id) {
+      targetPanel.hidden = true;
+      return;
+    }
+
+    enemies.get(id)?.setSelected(true);
+    targetPanel.hidden = false;
+
+    const schema = enemySchemaById.get(id);
+    if (!schema) return;
+
+    targetNameEl.textContent = schema.kind === "melee" ? "Melee Enemy" : "Caster Enemy";
+    updateHpBar(targetHpFill, targetHpLabel, schema.hp, schema.maxHp);
+
+    if (schema.isCasting) {
+      targetCastActive = true;
+      targetCastStartRef = performance.now();
+      targetCastBarEl.hidden = false;
+    }
   }
 
   function castSpell(spellId: SpellId) {
@@ -80,6 +143,7 @@ async function main() {
   window.addEventListener("keydown", (e) => {
     if (e.code === "Digit1") castSpell(1);
     else if (e.code === "Digit2") castSpell(2);
+    else if (e.code === "Digit3") castSpell(3);
   });
 
   const raycaster = new THREE.Raycaster();
@@ -95,13 +159,13 @@ async function main() {
     const hits = raycaster.intersectObjects(enemyGroups, true);
 
     if (hits.length === 0) {
-      selectTarget(null);
+      setTarget(null);
       return;
     }
 
     let obj: THREE.Object3D | null = hits[0].object;
     while (obj && !obj.userData.enemyId) obj = obj.parent;
-    selectTarget((obj?.userData.enemyId as string) ?? null);
+    setTarget((obj?.userData.enemyId as string) ?? null);
   });
 
   try {
@@ -122,6 +186,7 @@ async function main() {
         localHp = player.hp;
         localMaxHp = player.maxHp;
         updateHud();
+        updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
       }
 
       $(player).onChange(() => {
@@ -131,7 +196,20 @@ async function main() {
           localServerPosition.set(player.x, player.y, player.z);
           localHp = player.hp;
           localMaxHp = player.maxHp;
-          updateHud();
+          updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
+
+          if (player.castSpellId !== localCastSpellId) {
+            localCastSpellId = player.castSpellId;
+            if (localCastSpellId !== 0) {
+              localCastActive = true;
+              localCastStartRef = performance.now();
+              playerCastLabel.textContent = SPELLS[localCastSpellId as SpellId].name;
+              playerCastBarEl.hidden = false;
+            } else {
+              localCastActive = false;
+              playerCastBarEl.hidden = true;
+            }
+          }
           return;
         }
         avatar.setTarget(player.x, player.y, player.z, player.rotationY);
@@ -154,10 +232,24 @@ async function main() {
       avatar.setHp(enemy.hp, enemy.maxHp);
       avatar.addTo(gameScene.scene);
       enemies.set(enemyId, avatar);
+      enemySchemaById.set(enemyId, enemy);
 
       $(enemy).onChange(() => {
         avatar.setTarget(enemy.x, enemy.z);
         avatar.setHp(enemy.hp, enemy.maxHp);
+
+        if (enemyId === currentTargetId) {
+          updateHpBar(targetHpFill, targetHpLabel, enemy.hp, enemy.maxHp);
+
+          if (enemy.isCasting && !targetCastActive) {
+            targetCastActive = true;
+            targetCastStartRef = performance.now();
+            targetCastBarEl.hidden = false;
+          } else if (!enemy.isCasting && targetCastActive) {
+            targetCastActive = false;
+            targetCastBarEl.hidden = true;
+          }
+        }
       });
     });
 
@@ -167,11 +259,16 @@ async function main() {
         avatar.removeFrom(gameScene.scene);
         enemies.delete(enemyId);
       }
-      if (currentTargetId === enemyId) currentTargetId = null;
+      enemySchemaById.delete(enemyId);
+      if (currentTargetId === enemyId) setTarget(null);
     });
 
     $(room.state).projectiles.onAdd((projectile, projectileId) => {
-      const avatar = new ProjectileAvatar();
+      const isPlayerSourced = projectile.source === "player";
+      const avatar = new ProjectileAvatar(
+        isPlayerSourced ? PLAYER_PROJECTILE_COLOR : ENEMY_PROJECTILE_COLOR,
+        isPlayerSourced ? PLAYER_PROJECTILE_EMISSIVE : ENEMY_PROJECTILE_EMISSIVE,
+      );
       avatar.setTarget(projectile.x, projectile.z);
       avatar.snapToTarget();
       gameScene.scene.add(avatar.mesh);
@@ -243,6 +340,17 @@ async function main() {
 
     for (const avatar of enemies.values()) avatar.update();
     for (const avatar of projectiles.values()) avatar.update();
+
+    if (localCastActive && localCastSpellId !== 0) {
+      const durationMs = SPELLS[localCastSpellId as SpellId].castTimeMs;
+      const fraction = Math.max(0, Math.min(1, (performance.now() - localCastStartRef) / durationMs));
+      playerCastFill.style.width = `${fraction * 100}%`;
+    }
+
+    if (targetCastActive) {
+      const fraction = Math.max(0, Math.min(1, (performance.now() - targetCastStartRef) / ENEMY_STATS.caster.castTimeMs));
+      targetCastFill.style.width = `${fraction * 100}%`;
+    }
 
     for (const spellId of SPELL_IDS) {
       const el = cooldownEls.get(spellId);

@@ -8,8 +8,10 @@ import {
   MAP_HALF_EXTENT,
   PLAYER_MAX_HP,
   PLAYER_SPEED,
+  PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
   SPELLS,
+  SpellId,
 } from "@mmo/shared";
 import { Enemy, Player, Projectile, WorldState } from "./schema/WorldState.js";
 
@@ -29,6 +31,17 @@ interface EnemySpawnPoint {
   z: number;
 }
 
+interface PendingPlayerCast {
+  spellId: SpellId;
+  targetId: string;
+  fireAt: number;
+}
+
+interface PendingEnemyCast {
+  targetSessionId: string;
+  fireAt: number;
+}
+
 const SPAWN_POINTS: EnemySpawnPoint[] = [
   { id: "melee-1", kind: "melee", x: 8, z: 8 },
   { id: "melee-2", kind: "melee", x: -8, z: 8 },
@@ -41,6 +54,8 @@ export class WorldRoom extends Room<WorldState> {
   private lastCastAt = new Map<string, number>(); // key: `${sessionId}:${spellId}`
   private lastMeleeAttackAt = new Map<string, number>(); // key: enemyId
   private lastCasterAttackAt = new Map<string, number>(); // key: enemyId
+  private pendingPlayerCast = new Map<string, PendingPlayerCast>(); // key: sessionId
+  private pendingEnemyCast = new Map<string, PendingEnemyCast>(); // key: enemyId
   private projectileAge = new Map<string, number>(); // key: projectileId, value: ms alive
   private projectileSeq = 0;
 
@@ -52,6 +67,10 @@ export class WorldRoom extends Room<WorldState> {
     }
 
     this.onMessage("input", (client, message: InputMessage) => {
+      if (message.moveX !== 0 || message.moveZ !== 0) {
+        this.cancelPlayerCast(client.sessionId);
+      }
+
       this.lastInput.set(client.sessionId, {
         moveX: clamp(message.moveX, -1, 1),
         moveZ: clamp(message.moveZ, -1, 1),
@@ -76,6 +95,7 @@ export class WorldRoom extends Room<WorldState> {
   }
 
   onLeave(client: Client) {
+    this.cancelPlayerCast(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.lastInput.delete(client.sessionId);
     console.log(`[WorldRoom] ${client.sessionId} left`);
@@ -95,6 +115,7 @@ export class WorldRoom extends Room<WorldState> {
   private handleCast(client: Client, message: CastMessage) {
     const player = this.state.players.get(client.sessionId);
     if (!player || player.hp <= 0) return;
+    if (player.castSpellId !== 0) return; // already casting
 
     const spell = SPELLS[message.spellId];
     if (!spell) return;
@@ -111,10 +132,30 @@ export class WorldRoom extends Room<WorldState> {
     if (dist > spell.range + RANGE_BUFFER) return;
 
     this.lastCastAt.set(cooldownKey, now);
-    target.hp = Math.max(0, target.hp - spell.damage);
 
+    if (spell.castTimeMs > 0) {
+      player.castSpellId = message.spellId;
+      this.pendingPlayerCast.set(client.sessionId, {
+        spellId: message.spellId,
+        targetId: message.targetId,
+        fireAt: now + spell.castTimeMs,
+      });
+    } else {
+      this.applySpellDamage(target, spell.damage, message.targetId);
+    }
+  }
+
+  private cancelPlayerCast(sessionId: string) {
+    if (!this.pendingPlayerCast.has(sessionId)) return;
+    this.pendingPlayerCast.delete(sessionId);
+    const player = this.state.players.get(sessionId);
+    if (player) player.castSpellId = 0;
+  }
+
+  private applySpellDamage(target: Enemy, damage: number, targetId: string) {
+    target.hp = Math.max(0, target.hp - damage);
     if (target.hp === 0) {
-      this.killEnemy(message.targetId);
+      this.killEnemy(targetId);
     }
   }
 
@@ -122,6 +163,7 @@ export class WorldRoom extends Room<WorldState> {
     this.state.enemies.delete(enemyId);
     this.lastMeleeAttackAt.delete(enemyId);
     this.lastCasterAttackAt.delete(enemyId);
+    this.pendingEnemyCast.delete(enemyId);
 
     const point = SPAWN_POINTS.find((p) => p.id === enemyId);
     if (!point) return;
@@ -129,7 +171,8 @@ export class WorldRoom extends Room<WorldState> {
     this.clock.setTimeout(() => this.spawnEnemy(point), ENEMY_RESPAWN_MS);
   }
 
-  private respawnPlayer(player: Player) {
+  private respawnPlayer(sessionId: string, player: Player) {
+    this.cancelPlayerCast(sessionId);
     player.hp = player.maxHp;
     player.x = 0;
     player.y = 0;
@@ -138,7 +181,9 @@ export class WorldRoom extends Room<WorldState> {
 
   private tick(dt: number) {
     this.tickPlayerMovement(dt);
+    this.tickPlayerCasts();
     this.tickEnemyAttacks();
+    this.tickPendingEnemyCasts();
     this.tickProjectiles(dt);
   }
 
@@ -159,6 +204,29 @@ export class WorldRoom extends Room<WorldState> {
     }
   }
 
+  private tickPlayerCasts() {
+    const now = Date.now();
+
+    for (const [sessionId, pending] of this.pendingPlayerCast) {
+      if (now < pending.fireAt) continue;
+      this.pendingPlayerCast.delete(sessionId);
+
+      const player = this.state.players.get(sessionId);
+      if (player) player.castSpellId = 0;
+      if (!player || player.hp <= 0) continue;
+
+      const spell = SPELLS[pending.spellId];
+      const target = this.state.enemies.get(pending.targetId);
+      if (!target || target.hp <= 0) continue; // target gone, cast fizzles
+
+      if (spell.projectileSpeed) {
+        this.spawnProjectile(player.x, player.z, "player", pending.targetId, spell.damage, spell.projectileSpeed);
+      } else {
+        this.applySpellDamage(target, spell.damage, pending.targetId);
+      }
+    }
+  }
+
   private tickEnemyAttacks() {
     const now = Date.now();
 
@@ -170,27 +238,28 @@ export class WorldRoom extends Room<WorldState> {
         const lastAttack = this.lastMeleeAttackAt.get(enemyId) ?? 0;
         if (now - lastAttack < stats.intervalMs) continue;
 
-        for (const player of this.state.players.values()) {
+        for (const [sessionId, player] of this.state.players) {
           if (player.hp <= 0) continue;
           const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
           if (dist <= stats.range) {
-            this.damagePlayer(player, stats.damage);
+            this.damagePlayer(sessionId, player, stats.damage);
             this.lastMeleeAttackAt.set(enemyId, now);
             break;
           }
         }
       } else {
+        if (this.pendingEnemyCast.has(enemyId)) continue; // already winding up
+
         const stats = ENEMY_STATS.caster;
         const lastAttack = this.lastCasterAttackAt.get(enemyId) ?? 0;
         if (now - lastAttack < stats.cooldownMs) continue;
 
-        for (const player of this.state.players.values()) {
+        for (const [sessionId, player] of this.state.players) {
           if (player.hp <= 0) continue;
-          const dx = player.x - enemy.x;
-          const dz = player.z - enemy.z;
-          const dist = Math.hypot(dx, dz);
-          if (dist <= stats.range && dist > 0) {
-            this.spawnProjectile(enemy.x, enemy.z, dx / dist, dz / dist, stats.damage);
+          const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
+          if (dist <= stats.range) {
+            enemy.isCasting = true;
+            this.pendingEnemyCast.set(enemyId, { targetSessionId: sessionId, fireAt: now + stats.castTimeMs });
             this.lastCasterAttackAt.set(enemyId, now);
             break;
           }
@@ -199,13 +268,40 @@ export class WorldRoom extends Room<WorldState> {
     }
   }
 
-  private spawnProjectile(x: number, z: number, dirX: number, dirZ: number, damage: number) {
+  private tickPendingEnemyCasts() {
+    const now = Date.now();
+
+    for (const [enemyId, pending] of this.pendingEnemyCast) {
+      if (now < pending.fireAt) continue;
+      this.pendingEnemyCast.delete(enemyId);
+
+      const enemy = this.state.enemies.get(enemyId);
+      if (enemy) enemy.isCasting = false;
+      if (!enemy || enemy.hp <= 0) continue;
+
+      const player = this.state.players.get(pending.targetSessionId);
+      if (!player || player.hp <= 0) continue; // target gone, cast fizzles
+
+      const stats = ENEMY_STATS.caster;
+      this.spawnProjectile(enemy.x, enemy.z, "enemy", pending.targetSessionId, stats.damage, stats.projectileSpeed);
+    }
+  }
+
+  private spawnProjectile(
+    x: number,
+    z: number,
+    source: "enemy" | "player",
+    targetId: string,
+    damage: number,
+    speed: number,
+  ) {
     const projectile = new Projectile();
     projectile.x = x;
     projectile.z = z;
-    projectile.dirX = dirX;
-    projectile.dirZ = dirZ;
+    projectile.source = source;
+    projectile.targetId = targetId;
     projectile.damage = damage;
+    projectile.speed = speed;
 
     const id = `proj-${this.projectileSeq++}`;
     this.state.projectiles.set(id, projectile);
@@ -213,40 +309,64 @@ export class WorldRoom extends Room<WorldState> {
   }
 
   private tickProjectiles(dt: number) {
-    const stats = ENEMY_STATS.caster;
-
     for (const [id, projectile] of this.state.projectiles) {
-      projectile.x += projectile.dirX * stats.projectileSpeed * dt;
-      projectile.z += projectile.dirZ * stats.projectileSpeed * dt;
+      let targetX: number;
+      let targetZ: number;
+
+      if (projectile.source === "enemy") {
+        const player = this.state.players.get(projectile.targetId);
+        if (!player || player.hp <= 0) {
+          this.removeProjectile(id);
+          continue;
+        }
+        targetX = player.x;
+        targetZ = player.z;
+      } else {
+        const enemy = this.state.enemies.get(projectile.targetId);
+        if (!enemy || enemy.hp <= 0) {
+          this.removeProjectile(id);
+          continue;
+        }
+        targetX = enemy.x;
+        targetZ = enemy.z;
+      }
+
+      const dx = targetX - projectile.x;
+      const dz = targetZ - projectile.z;
+      const dist = Math.hypot(dx, dz);
+
+      if (dist <= PROJECTILE_HIT_RADIUS) {
+        if (projectile.source === "enemy") {
+          const player = this.state.players.get(projectile.targetId)!;
+          this.damagePlayer(projectile.targetId, player, projectile.damage);
+        } else {
+          const enemy = this.state.enemies.get(projectile.targetId)!;
+          this.applySpellDamage(enemy, projectile.damage, projectile.targetId);
+        }
+        this.removeProjectile(id);
+        continue;
+      }
+
+      projectile.x += (dx / dist) * projectile.speed * dt;
+      projectile.z += (dz / dist) * projectile.speed * dt;
 
       const age = (this.projectileAge.get(id) ?? 0) + dt * 1000;
       this.projectileAge.set(id, age);
-
-      let hit = false;
-      for (const player of this.state.players.values()) {
-        if (player.hp <= 0) continue;
-        const dist = Math.hypot(player.x - projectile.x, player.z - projectile.z);
-        if (dist <= stats.hitRadius) {
-          this.damagePlayer(player, projectile.damage);
-          hit = true;
-          break;
-        }
-      }
-
-      const outOfBounds =
-        Math.abs(projectile.x) > MAP_HALF_EXTENT + 5 || Math.abs(projectile.z) > MAP_HALF_EXTENT + 5;
-
-      if (hit || outOfBounds || age > PROJECTILE_MAX_LIFETIME_MS) {
-        this.state.projectiles.delete(id);
-        this.projectileAge.delete(id);
+      if (age > PROJECTILE_MAX_LIFETIME_MS) {
+        this.removeProjectile(id);
       }
     }
   }
 
-  private damagePlayer(player: Player, amount: number) {
+  private removeProjectile(id: string) {
+    this.state.projectiles.delete(id);
+    this.projectileAge.delete(id);
+  }
+
+  private damagePlayer(sessionId: string, player: Player, amount: number) {
     player.hp = Math.max(0, player.hp - amount);
     if (player.hp === 0) {
-      this.respawnPlayer(player);
+      this.respawnPlayer(sessionId, player);
     }
   }
 }

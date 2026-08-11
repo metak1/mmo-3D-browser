@@ -1,0 +1,88 @@
+const STORAGE_PREFIX = "mmo:panel:";
+
+interface StoredPosition {
+  left: number;
+  top: number;
+}
+
+// Panels keep their CSS-authored default position (including the hotbar's centering
+// transform) until the user actually drags or has a saved position — that way we
+// never need to measure a possibly-hidden element's layout (e.g. the target panel
+// starts `hidden` and has no meaningful bounding rect until it's first shown).
+export function makeDraggable(panel: HTMLElement, key: string) {
+  const lockBtn = panel.querySelector<HTMLElement>("[data-lock]");
+  const lockKey = `${STORAGE_PREFIX}${key}:locked`;
+  const posKey = `${STORAGE_PREFIX}${key}:pos`;
+
+  let locked = localStorage.getItem(lockKey) === "1";
+
+  const savedPos = localStorage.getItem(posKey);
+  if (savedPos) {
+    try {
+      const pos: StoredPosition = JSON.parse(savedPos);
+      panel.style.left = `${pos.left}px`;
+      panel.style.top = `${pos.top}px`;
+      panel.style.transform = "none";
+    } catch {
+      // ignore malformed storage, fall back to CSS default
+    }
+  }
+
+  function applyLockVisual() {
+    panel.classList.toggle("locked", locked);
+    if (lockBtn) lockBtn.textContent = locked ? "🔒" : "🔓";
+  }
+  applyLockVisual();
+
+  lockBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    locked = !locked;
+    localStorage.setItem(lockKey, locked ? "1" : "0");
+    applyLockVisual();
+  });
+
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let startLeft = 0;
+  let startTop = 0;
+
+  panel.addEventListener("mousedown", (event) => {
+    if (locked) return;
+    if ((event.target as HTMLElement).closest("[data-lock]")) return;
+
+    const rect = panel.getBoundingClientRect();
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+    panel.style.transform = "none";
+
+    dragging = true;
+    startX = event.clientX;
+    startY = event.clientY;
+    startLeft = rect.left;
+    startTop = rect.top;
+    panel.classList.add("dragging");
+    event.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (event) => {
+    if (!dragging) return;
+
+    const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+    const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+    const newLeft = Math.min(Math.max(0, startLeft + (event.clientX - startX)), maxLeft);
+    const newTop = Math.min(Math.max(0, startTop + (event.clientY - startY)), maxTop);
+
+    panel.style.left = `${newLeft}px`;
+    panel.style.top = `${newTop}px`;
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    panel.classList.remove("dragging");
+
+    const pos: StoredPosition = { left: parseFloat(panel.style.left), top: parseFloat(panel.style.top) };
+    localStorage.setItem(posKey, JSON.stringify(pos));
+  });
+}
