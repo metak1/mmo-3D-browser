@@ -1,0 +1,20 @@
+{
+  "name": "@mmo/client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@mmo/shared": "*",
+    "colyseus.js": "^0.16.22",
+    "three": "^0.171.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.171.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}
