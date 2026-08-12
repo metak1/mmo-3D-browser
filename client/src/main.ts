@@ -2,6 +2,8 @@ import * as THREE from "three";
 import type { Room } from "colyseus.js";
 import {
   CastMessage,
+  CLASSES,
+  ClassId,
   ENEMY_STATS,
   EnemyKind,
   InputMessage,
@@ -9,6 +11,7 @@ import {
   PLAYER_SPEED,
   SPELLS,
   SpellId,
+  xpForNextLevel,
 } from "@mmo/shared";
 import { GameScene } from "./game/Scene";
 import { PlayerAvatar } from "./game/Player";
@@ -16,6 +19,7 @@ import { EnemyAvatar } from "./game/Enemy";
 import { ProjectileAvatar } from "./game/Projectile";
 import { InputController } from "./game/InputController";
 import { connectToWorld } from "./network/connection";
+import * as api from "./network/api";
 import { makeDraggable } from "./ui/DraggablePanel";
 
 const REMOTE_COLOR = 0xe8734a;
@@ -45,9 +49,56 @@ const targetHpLabel = document.querySelector<HTMLElement>("[data-target-hp-label
 const targetCastBarEl = document.querySelector<HTMLElement>("[data-target-cast-bar]")!;
 const targetCastFill = document.querySelector<HTMLElement>("[data-target-cast-fill]")!;
 
+const playerLevelEl = document.querySelector<HTMLElement>("[data-player-level]")!;
+const playerClassEl = document.querySelector<HTMLElement>("[data-player-class]")!;
+const characterClassEl = document.querySelector<HTMLElement>("[data-character-class]")!;
+const xpFill = document.querySelector<HTMLElement>("[data-xp-fill]")!;
+const xpLabel = document.querySelector<HTMLElement>("[data-xp-label]")!;
+const statEls = {
+  strength: document.querySelector<HTMLElement>("[data-stat-strength]")!,
+  dexterity: document.querySelector<HTMLElement>("[data-stat-dexterity]")!,
+  intellect: document.querySelector<HTMLElement>("[data-stat-intellect]")!,
+  vitality: document.querySelector<HTMLElement>("[data-stat-vitality]")!,
+  luck: document.querySelector<HTMLElement>("[data-stat-luck]")!,
+  armor: document.querySelector<HTMLElement>("[data-stat-armor]")!,
+};
+
 makeDraggable(document.getElementById("player-panel")!, "player");
 makeDraggable(document.getElementById("target-panel")!, "target");
 makeDraggable(document.getElementById("spell-panel")!, "spells");
+makeDraggable(document.getElementById("character-panel")!, "character");
+makeDraggable(document.getElementById("xp-panel")!, "xp");
+
+interface PlayerStatsSnapshot {
+  classId: string;
+  level: number;
+  xp: number;
+  strength: number;
+  dexterity: number;
+  intellect: number;
+  vitality: number;
+  luck: number;
+  armor: number;
+}
+
+function updateCharacterPanel(player: PlayerStatsSnapshot) {
+  const className = CLASSES[player.classId as ClassId]?.name ?? player.classId;
+  playerClassEl.textContent = className;
+  characterClassEl.textContent = className;
+  playerLevelEl.textContent = `Lv. ${player.level}`;
+
+  const needed = xpForNextLevel(player.level);
+  const fraction = needed > 0 ? Math.max(0, Math.min(1, player.xp / needed)) : 0;
+  xpFill.style.width = `${fraction * 100}%`;
+  xpLabel.textContent = `${player.xp} / ${needed} XP`;
+
+  statEls.strength.textContent = `${player.strength}`;
+  statEls.dexterity.textContent = `${player.dexterity}`;
+  statEls.intellect.textContent = `${player.intellect}`;
+  statEls.vitality.textContent = `${player.vitality}`;
+  statEls.luck.textContent = `${player.luck}`;
+  statEls.armor.textContent = `${player.armor}`;
+}
 
 function hpColor(fraction: number): string {
   return fraction > 0.5 ? "#4fd166" : fraction > 0.25 ? "#e0b23c" : "#e0503c";
@@ -60,7 +111,7 @@ function updateHpBar(fillEl: HTMLElement, labelEl: HTMLElement, hp: number, maxH
   labelEl.textContent = `${Math.ceil(hp)}/${Math.ceil(maxHp)}`;
 }
 
-async function main() {
+async function main(token: string, characterId: number) {
   const gameScene = new GameScene(container);
   const input = new InputController();
 
@@ -140,10 +191,13 @@ async function main() {
     room.send("cast", message);
   }
 
+  const characterPanel = document.getElementById("character-panel")!;
+
   window.addEventListener("keydown", (e) => {
     if (e.code === "Digit1") castSpell(1);
     else if (e.code === "Digit2") castSpell(2);
     else if (e.code === "Digit3") castSpell(3);
+    else if (e.code === "KeyP") characterPanel.hidden = !characterPanel.hidden;
   });
 
   const raycaster = new THREE.Raycaster();
@@ -169,7 +223,7 @@ async function main() {
   });
 
   try {
-    const connection = await connectToWorld();
+    const connection = await connectToWorld(token, characterId);
     room = connection.room;
     const $ = connection.$;
     localSessionId = room.sessionId;
@@ -187,6 +241,7 @@ async function main() {
         localMaxHp = player.maxHp;
         updateHud();
         updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
+        updateCharacterPanel(player);
       }
 
       $(player).onChange(() => {
@@ -197,6 +252,7 @@ async function main() {
           localHp = player.hp;
           localMaxHp = player.maxHp;
           updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
+          updateCharacterPanel(player);
 
           if (player.castSpellId !== localCastSpellId) {
             localCastSpellId = player.castSpellId;
@@ -371,4 +427,196 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-main();
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+// --- Auth / character-select / character-create bootstrap flow ---
+
+const TOKEN_STORAGE_KEY = "mmo:authToken";
+
+const authScreen = document.getElementById("auth-screen")!;
+const authTitle = document.querySelector<HTMLElement>("[data-auth-title]")!;
+const authForm = document.querySelector<HTMLFormElement>("[data-auth-form]")!;
+const authEmailField = document.querySelector<HTMLInputElement>("[data-auth-email-field]")!;
+const authError = document.querySelector<HTMLElement>("[data-auth-error]")!;
+const authSubmit = document.querySelector<HTMLButtonElement>("[data-auth-submit]")!;
+const authToggle = document.querySelector<HTMLButtonElement>("[data-auth-toggle]")!;
+
+const characterSelectScreen = document.getElementById("character-select-screen")!;
+const characterListEl = document.getElementById("character-list")!;
+const createCharacterBtn = document.querySelector<HTMLButtonElement>("[data-create-character-btn]")!;
+const logoutBtn = document.querySelector<HTMLButtonElement>("[data-logout-btn]")!;
+
+const characterCreateScreen = document.getElementById("character-create")!;
+const classSelectOptionsEl = document.getElementById("class-select-options")!;
+const characterNameInput = document.getElementById("character-name-input") as HTMLInputElement;
+const createError = document.querySelector<HTMLElement>("[data-create-error]")!;
+const createSubmit = document.querySelector<HTMLButtonElement>("[data-create-submit]")!;
+const createCancel = document.querySelector<HTMLButtonElement>("[data-create-cancel]")!;
+
+let authToken: string | null = null;
+let authMode: "login" | "register" = "login";
+let selectedClassId: ClassId | null = null;
+
+function hideAllOverlays() {
+  authScreen.hidden = true;
+  characterSelectScreen.hidden = true;
+  characterCreateScreen.hidden = true;
+}
+
+function showAuthScreen() {
+  hideAllOverlays();
+  authScreen.hidden = false;
+  authError.textContent = "";
+}
+
+async function showCharacterSelect() {
+  hideAllOverlays();
+  characterSelectScreen.hidden = false;
+  characterListEl.textContent = "Loading…";
+
+  try {
+    const { characters } = await api.listCharacters(authToken!);
+    characterListEl.innerHTML = "";
+
+    if (characters.length === 0) {
+      characterListEl.textContent = "No characters yet — create one to get started.";
+      return;
+    }
+
+    for (const character of characters) {
+      const row = document.createElement("button");
+      row.className = "character-row";
+      row.innerHTML = `
+        <span class="character-name">${character.name}</span>
+        <span class="character-meta">${CLASSES[character.class_id].name} · Lv. ${character.level}</span>
+      `;
+      row.addEventListener("click", () => {
+        hideAllOverlays();
+        main(authToken!, character.id);
+      });
+      characterListEl.appendChild(row);
+    }
+  } catch (err) {
+    characterListEl.textContent = err instanceof Error ? err.message : "Failed to load characters";
+  }
+}
+
+function showCharacterCreate() {
+  hideAllOverlays();
+  characterCreateScreen.hidden = false;
+  characterNameInput.value = "";
+  createError.textContent = "";
+  selectedClassId = null;
+  for (const card of classSelectOptionsEl.querySelectorAll(".class-card")) {
+    card.classList.remove("selected");
+  }
+}
+
+for (const [classId, def] of Object.entries(CLASSES) as [ClassId, (typeof CLASSES)[ClassId]][]) {
+  const card = document.createElement("button");
+  card.className = "class-card";
+  card.dataset.classId = classId;
+  card.innerHTML = `<div class="class-name">${def.name}</div><div class="class-stat">${capitalize(def.mainStat)}</div>`;
+  card.addEventListener("click", () => {
+    selectedClassId = classId;
+    for (const other of classSelectOptionsEl.querySelectorAll(".class-card")) {
+      other.classList.remove("selected");
+    }
+    card.classList.add("selected");
+  });
+  classSelectOptionsEl.appendChild(card);
+}
+
+createSubmit.addEventListener("click", async () => {
+  const name = characterNameInput.value.trim();
+  if (!name) {
+    createError.textContent = "Enter a character name";
+    return;
+  }
+  if (!selectedClassId) {
+    createError.textContent = "Choose a class";
+    return;
+  }
+
+  createError.textContent = "";
+  try {
+    const { character } = await api.createCharacter(authToken!, name, selectedClassId);
+    hideAllOverlays();
+    main(authToken!, character.id);
+  } catch (err) {
+    createError.textContent = err instanceof Error ? err.message : "Failed to create character";
+  }
+});
+
+createCancel.addEventListener("click", () => {
+  showCharacterSelect();
+});
+
+createCharacterBtn.addEventListener("click", () => {
+  showCharacterCreate();
+});
+
+logoutBtn.addEventListener("click", () => {
+  authToken = null;
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+  authMode = "login";
+  applyAuthMode();
+  showAuthScreen();
+});
+
+function applyAuthMode() {
+  authTitle.textContent = authMode === "login" ? "Log in" : "Register";
+  authSubmit.textContent = authMode === "login" ? "Log In" : "Register";
+  authToggle.textContent = authMode === "login" ? "Need an account? Register" : "Already have an account? Log in";
+  authEmailField.hidden = authMode === "login";
+  authEmailField.required = authMode === "register";
+}
+
+authToggle.addEventListener("click", () => {
+  authMode = authMode === "login" ? "register" : "login";
+  authError.textContent = "";
+  applyAuthMode();
+});
+
+authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const formData = new FormData(authForm);
+  const username = String(formData.get("username") ?? "").trim();
+  const password = String(formData.get("password") ?? "");
+  const email = String(formData.get("email") ?? "").trim();
+
+  authError.textContent = "";
+  authSubmit.disabled = true;
+
+  try {
+    const response =
+      authMode === "login" ? await api.login(username, password) : await api.register(username, email, password);
+    authToken = response.token;
+    localStorage.setItem(TOKEN_STORAGE_KEY, authToken);
+    await showCharacterSelect();
+  } catch (err) {
+    authError.textContent = err instanceof Error ? err.message : "Something went wrong";
+  } finally {
+    authSubmit.disabled = false;
+  }
+});
+
+applyAuthMode();
+
+const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+if (storedToken) {
+  api
+    .me(storedToken)
+    .then(() => {
+      authToken = storedToken;
+      return showCharacterSelect();
+    })
+    .catch(() => {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      showAuthScreen();
+    });
+} else {
+  showAuthScreen();
+}

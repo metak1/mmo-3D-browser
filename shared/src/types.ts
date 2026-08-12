@@ -12,7 +12,66 @@ export interface InputMessage {
 
 export type EnemyKind = "melee" | "caster";
 
-export const PLAYER_MAX_HP = 100;
+export interface PlayerStats {
+  strength: number;
+  dexterity: number;
+  intellect: number;
+  vitality: number;
+  luck: number;
+  armor: number;
+}
+
+export const BASE_STATS: PlayerStats = {
+  strength: 5,
+  dexterity: 5,
+  intellect: 5,
+  vitality: 10,
+  luck: 5,
+  armor: 0,
+};
+
+export const VITALITY_TO_HP = 10; // maxHp = vitality * VITALITY_TO_HP (level 1 => 100 hp)
+export const VITALITY_PER_LEVEL = 2;
+export const MAIN_STAT_PER_LEVEL = 3; // your class's main stat gains this per level
+export const BASE_XP_PER_LEVEL = 100;
+export const MAX_LEVEL = 60;
+
+export type MainStat = "strength" | "dexterity" | "intellect";
+export type ClassId = "warrior" | "rogue" | "ranger" | "oracle" | "mage";
+
+export interface ClassDef {
+  name: string;
+  mainStat: MainStat;
+}
+
+export const CLASSES: Record<ClassId, ClassDef> = {
+  warrior: { name: "Warrior", mainStat: "strength" },
+  rogue: { name: "Rogue", mainStat: "dexterity" },
+  ranger: { name: "Ranger", mainStat: "dexterity" },
+  oracle: { name: "Oracle", mainStat: "intellect" },
+  mage: { name: "Mage", mainStat: "intellect" },
+};
+
+export const DEFAULT_CLASS_ID: ClassId = "warrior";
+export const MAIN_STAT_START_BONUS = 5; // extra points in your class's main stat at level 1
+
+export const DAMAGE_STAT_FACTOR = 0.3; // flat damage bonus = floor((str+dex+int) * factor)
+export const CRIT_PER_LUCK = 1.5; // % crit chance per luck point
+export const MAX_CRIT_CHANCE = 75; // %
+export const CRIT_MULTIPLIER = 1.5;
+
+export const XP_PER_ENEMY_KIND: Record<EnemyKind, number> = {
+  melee: 20,
+  caster: 30,
+};
+
+export function xpForNextLevel(level: number): number {
+  return BASE_XP_PER_LEVEL * level;
+}
+
+export function critChanceFromLuck(luck: number): number {
+  return Math.min(MAX_CRIT_CHANCE, luck * CRIT_PER_LUCK) / 100;
+}
 
 export type SpellId = 1 | 2 | 3;
 

@@ -9,6 +9,19 @@ interface StoredPosition {
 // transform) until the user actually drags or has a saved position — that way we
 // never need to measure a possibly-hidden element's layout (e.g. the target panel
 // starts `hidden` and has no meaningful bounding rect until it's first shown).
+// Pins a panel by its top-left corner only. Some panels are authored with a CSS
+// `bottom` (e.g. the hotbar, originally bottom-anchored) — leaving that in place
+// while also setting an inline `top` would give the element both constraints at
+// once, which stretches its height instead of moving it. Clearing `bottom`/`right`
+// here keeps `left`/`top` as the single source of truth once a panel goes dynamic.
+function pinToTopLeft(panel: HTMLElement, left: number, top: number) {
+  panel.style.left = `${left}px`;
+  panel.style.top = `${top}px`;
+  panel.style.bottom = "auto";
+  panel.style.right = "auto";
+  panel.style.transform = "none";
+}
+
 export function makeDraggable(panel: HTMLElement, key: string) {
   const lockBtn = panel.querySelector<HTMLElement>("[data-lock]");
   const lockKey = `${STORAGE_PREFIX}${key}:locked`;
@@ -20,9 +33,7 @@ export function makeDraggable(panel: HTMLElement, key: string) {
   if (savedPos) {
     try {
       const pos: StoredPosition = JSON.parse(savedPos);
-      panel.style.left = `${pos.left}px`;
-      panel.style.top = `${pos.top}px`;
-      panel.style.transform = "none";
+      pinToTopLeft(panel, pos.left, pos.top);
     } catch {
       // ignore malformed storage, fall back to CSS default
     }
@@ -52,9 +63,7 @@ export function makeDraggable(panel: HTMLElement, key: string) {
     if ((event.target as HTMLElement).closest("[data-lock]")) return;
 
     const rect = panel.getBoundingClientRect();
-    panel.style.left = `${rect.left}px`;
-    panel.style.top = `${rect.top}px`;
-    panel.style.transform = "none";
+    pinToTopLeft(panel, rect.left, rect.top);
 
     dragging = true;
     startX = event.clientX;

@@ -1,14 +1,26 @@
 import { Schema, MapSchema, type } from "@colyseus/schema";
-import { PLAYER_MAX_HP } from "@mmo/shared";
+import { BASE_STATS, DEFAULT_CLASS_ID, VITALITY_TO_HP } from "@mmo/shared";
+
+const BASE_MAX_HP = BASE_STATS.vitality * VITALITY_TO_HP;
 
 export class Player extends Schema {
   @type("number") x = 0;
   @type("number") y = 0;
   @type("number") z = 0;
   @type("number") rotationY = 0;
-  @type("number") hp = PLAYER_MAX_HP;
-  @type("number") maxHp = PLAYER_MAX_HP;
+  @type("number") hp = BASE_MAX_HP;
+  @type("number") maxHp = BASE_MAX_HP;
   @type("number") castSpellId = 0;
+
+  @type("string") classId: string = DEFAULT_CLASS_ID;
+  @type("number") level = 1;
+  @type("number") xp = 0;
+  @type("number") strength = BASE_STATS.strength;
+  @type("number") dexterity = BASE_STATS.dexterity;
+  @type("number") intellect = BASE_STATS.intellect;
+  @type("number") vitality = BASE_STATS.vitality;
+  @type("number") luck = BASE_STATS.luck;
+  @type("number") armor = BASE_STATS.armor;
 }
 
 export class Enemy extends Schema {
@@ -27,6 +39,7 @@ export class Projectile extends Schema {
   @type("number") speed = 0;
   @type("string") source = "enemy";
   @type("string") targetId = "";
+  @type("string") ownerId = "";
 }
 
 export class WorldState extends Schema {

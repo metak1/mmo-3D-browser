@@ -15,6 +15,136 @@
         width: 100vw;
         height: 100vh;
       }
+      .overlay-screen {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        background: rgba(8, 9, 14, 0.92);
+        color: #e6e6e6;
+        font: 14px/1.4 -apple-system, system-ui, sans-serif;
+        z-index: 10;
+      }
+      .overlay-screen[hidden] {
+        display: none;
+      }
+      .overlay-screen h1 {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 600;
+      }
+      .overlay-error {
+        color: #e0503c;
+        font-size: 12px;
+        min-height: 14px;
+      }
+      #class-select-options {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        justify-content: center;
+        max-width: 720px;
+      }
+      .class-card {
+        width: 130px;
+        padding: 16px 12px;
+        border: 2px solid #4a5578;
+        border-radius: 10px;
+        background: rgba(20, 22, 32, 0.85);
+        color: #e6e6e6;
+        font: inherit;
+        cursor: pointer;
+        text-align: center;
+      }
+      .class-card:hover,
+      .class-card.selected {
+        border-color: #c9a63c;
+        background: rgba(40, 36, 20, 0.85);
+      }
+      .class-card .class-name {
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .class-card .class-stat {
+        font-size: 11px;
+        color: #a7b0c8;
+      }
+      .auth-form {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        width: 260px;
+      }
+      .auth-form input,
+      .overlay-input {
+        padding: 8px 10px;
+        border: 2px solid #4a5578;
+        border-radius: 6px;
+        background: rgba(20, 22, 32, 0.85);
+        color: #e6e6e6;
+        font: inherit;
+      }
+      .auth-form input:focus,
+      .overlay-input:focus {
+        outline: none;
+        border-color: #c9a63c;
+      }
+      .overlay-button {
+        padding: 9px 10px;
+        border: 2px solid #4a5578;
+        border-radius: 6px;
+        background: rgba(20, 22, 32, 0.85);
+        color: #e6e6e6;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .overlay-button:hover {
+        border-color: #c9a63c;
+        background: rgba(40, 36, 20, 0.85);
+      }
+      .overlay-link {
+        background: none;
+        border: none;
+        color: #a7b0c8;
+        font: inherit;
+        text-decoration: underline;
+        cursor: pointer;
+        padding: 0;
+      }
+      #character-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        width: 320px;
+      }
+      .character-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px 14px;
+        border: 2px solid #4a5578;
+        border-radius: 8px;
+        background: rgba(20, 22, 32, 0.85);
+        cursor: pointer;
+        text-align: left;
+        color: #e6e6e6;
+        font: inherit;
+      }
+      .character-row:hover {
+        border-color: #c9a63c;
+        background: rgba(40, 36, 20, 0.85);
+      }
+      .character-row .character-name {
+        font-weight: 600;
+      }
+      .character-row .character-meta {
+        font-size: 11px;
+        color: #a7b0c8;
+      }
       #hud {
         position: fixed;
         top: 12px;
@@ -74,6 +204,33 @@
       #target-panel[hidden] {
         display: none;
       }
+      #character-panel {
+        top: 208px;
+      }
+      #character-panel[hidden] {
+        display: none;
+      }
+      .level-tag {
+        font-weight: 400;
+        color: #c9a63c;
+      }
+      .xp-bar .bar-fill {
+        background: #c9a63c;
+      }
+      .stat-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2px 10px;
+        margin-top: 6px;
+        font-size: 11px;
+      }
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+      }
+      .stat-row .stat-label {
+        color: #a7b0c8;
+      }
       .unit-name {
         font-weight: 600;
         margin-bottom: 4px;
@@ -110,9 +267,14 @@
         display: none;
       }
       #spell-panel {
-        bottom: 20px;
+        bottom: 90px;
         left: 50%;
         width: auto;
+        transform: translateX(-50%);
+      }
+      #xp-panel {
+        bottom: 20px;
+        left: 50%;
         transform: translateX(-50%);
       }
       #hotbar {
@@ -159,11 +321,53 @@
   </head>
   <body>
     <div id="app"></div>
+
+    <div id="auth-screen" class="overlay-screen">
+      <h1 data-auth-title>Log in</h1>
+      <form class="auth-form" data-auth-form>
+        <input type="text" name="username" placeholder="Username" autocomplete="username" required />
+        <input type="email" name="email" placeholder="Email" autocomplete="email" data-auth-email-field hidden />
+        <input
+          type="password"
+          name="password"
+          placeholder="Password"
+          autocomplete="current-password"
+          required
+        />
+        <div class="overlay-error" data-auth-error></div>
+        <button type="submit" class="overlay-button" data-auth-submit>Log In</button>
+        <button type="button" class="overlay-link" data-auth-toggle>Need an account? Register</button>
+      </form>
+    </div>
+
+    <div id="character-select-screen" class="overlay-screen" hidden>
+      <h1>Select your character</h1>
+      <div id="character-list"></div>
+      <button type="button" class="overlay-button" data-create-character-btn>Create New Character</button>
+      <button type="button" class="overlay-link" data-logout-btn>Log out</button>
+    </div>
+
+    <div id="character-create" class="overlay-screen" hidden>
+      <h1>Create your character</h1>
+      <input
+        type="text"
+        id="character-name-input"
+        class="overlay-input"
+        placeholder="Character name"
+        maxlength="32"
+        style="text-align: center; width: 260px"
+      />
+      <div id="class-select-options"></div>
+      <div class="overlay-error" data-create-error></div>
+      <button type="button" class="overlay-button" data-create-submit>Create Character</button>
+      <button type="button" class="overlay-link" data-create-cancel>Back to character select</button>
+    </div>
+
     <div id="hud">Connecting…</div>
 
     <div id="player-panel" class="unit-panel">
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
-      <div class="unit-name">You</div>
+      <div class="unit-name"><span data-player-class>You</span> <span class="level-tag" data-player-level></span></div>
       <div class="bar hp-bar">
         <div class="bar-fill" data-player-hp-fill></div>
         <span class="bar-label" data-player-hp-label></span>
@@ -171,6 +375,20 @@
       <div class="bar cast-bar" data-player-cast-bar hidden>
         <div class="bar-fill" data-player-cast-fill></div>
         <span class="bar-label" data-player-cast-label></span>
+      </div>
+    </div>
+
+    <div id="character-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Character</div>
+      <div class="stat-row"><span class="stat-label">Class</span><span data-character-class></span></div>
+      <div class="stat-grid">
+        <div class="stat-row"><span class="stat-label">Strength</span><span data-stat-strength></span></div>
+        <div class="stat-row"><span class="stat-label">Dexterity</span><span data-stat-dexterity></span></div>
+        <div class="stat-row"><span class="stat-label">Intellect</span><span data-stat-intellect></span></div>
+        <div class="stat-row"><span class="stat-label">Vitality</span><span data-stat-vitality></span></div>
+        <div class="stat-row"><span class="stat-label">Luck</span><span data-stat-luck></span></div>
+        <div class="stat-row"><span class="stat-label">Armor</span><span data-stat-armor></span></div>
       </div>
     </div>
 
@@ -206,6 +424,15 @@
           <div class="cooldown" data-cooldown="3"></div>
           <span class="name" data-name="3"></span>
         </div>
+      </div>
+    </div>
+
+    <div id="xp-panel" class="unit-panel">
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">XP</div>
+      <div class="bar xp-bar">
+        <div class="bar-fill" data-xp-fill></div>
+        <span class="bar-label" data-xp-label></span>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

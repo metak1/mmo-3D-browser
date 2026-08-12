@@ -1,22 +1,36 @@
 import { Room, Client } from "@colyseus/core";
 import {
   CastMessage,
+  CLASSES,
+  ClassId,
+  CRIT_MULTIPLIER,
+  DAMAGE_STAT_FACTOR,
+  DEFAULT_CLASS_ID,
   ENEMY_RESPAWN_MS,
   ENEMY_STATS,
   EnemyKind,
   InputMessage,
+  MAIN_STAT_PER_LEVEL,
   MAP_HALF_EXTENT,
-  PLAYER_MAX_HP,
+  MAX_LEVEL,
   PLAYER_SPEED,
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
   SPELLS,
   SpellId,
+  VITALITY_PER_LEVEL,
+  VITALITY_TO_HP,
+  XP_PER_ENEMY_KIND,
+  critChanceFromLuck,
+  xpForNextLevel,
 } from "@mmo/shared";
+import { verifyToken } from "../auth/jwt.js";
+import { getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
 import { Enemy, Player, Projectile, WorldState } from "./schema/WorldState.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const RANGE_BUFFER = 1; // small allowance for latency between client input and server check
+const AUTOSAVE_INTERVAL_MS = 30_000;
 
 interface PlayerInput {
   moveX: number;
@@ -58,6 +72,7 @@ export class WorldRoom extends Room<WorldState> {
   private pendingEnemyCast = new Map<string, PendingEnemyCast>(); // key: enemyId
   private projectileAge = new Map<string, number>(); // key: projectileId, value: ms alive
   private projectileSeq = 0;
+  private characterIdBySession = new Map<string, number>();
 
   onCreate() {
     this.setState(new WorldState());
@@ -81,24 +96,107 @@ export class WorldRoom extends Room<WorldState> {
     this.onMessage("cast", (client, message: CastMessage) => this.handleCast(client, message));
 
     this.setSimulationInterval(() => this.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
+    this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
   }
 
-  onJoin(client: Client) {
+  async onJoin(client: Client, options?: { token?: string; characterId?: number }) {
+    if (!options?.token || !options?.characterId) {
+      throw new Error("Missing token or characterId");
+    }
+
+    let userId: number;
+    try {
+      userId = verifyToken(options.token).userId;
+    } catch {
+      throw new Error("Invalid or expired session");
+    }
+
+    const character = await getCharacterForUser(options.characterId, userId);
+    if (!character) {
+      throw new Error("Character not found");
+    }
+
+    const classId = this.resolveClassId(character.class_id);
+
     const player = new Player();
     player.x = 0;
     player.y = 0;
     player.z = 0;
-    player.hp = PLAYER_MAX_HP;
-    player.maxHp = PLAYER_MAX_HP;
+    player.classId = classId;
+    player.level = character.level;
+    player.xp = character.xp;
+    player.strength = character.strength;
+    player.dexterity = character.dexterity;
+    player.intellect = character.intellect;
+    player.vitality = character.vitality;
+    player.luck = character.luck;
+    player.armor = character.armor;
+    player.maxHp = player.vitality * VITALITY_TO_HP;
+    player.hp = player.maxHp;
+
     this.state.players.set(client.sessionId, player);
-    console.log(`[WorldRoom] ${client.sessionId} joined`);
+    this.characterIdBySession.set(client.sessionId, character.id);
+    console.log(`[WorldRoom] ${client.sessionId} joined as ${character.name} (${classId}, lv ${player.level})`);
   }
 
-  onLeave(client: Client) {
+  private resolveClassId(raw: unknown): ClassId {
+    if (typeof raw === "string" && Object.prototype.hasOwnProperty.call(CLASSES, raw)) {
+      return raw as ClassId;
+    }
+    return DEFAULT_CLASS_ID;
+  }
+
+  private bumpMainStat(player: Player, mainStat: "strength" | "dexterity" | "intellect", amount: number) {
+    switch (mainStat) {
+      case "strength":
+        player.strength += amount;
+        break;
+      case "dexterity":
+        player.dexterity += amount;
+        break;
+      case "intellect":
+        player.intellect += amount;
+        break;
+    }
+  }
+
+  async onLeave(client: Client) {
+    await this.saveCharacter(client.sessionId);
+
     this.cancelPlayerCast(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.lastInput.delete(client.sessionId);
+    this.characterIdBySession.delete(client.sessionId);
     console.log(`[WorldRoom] ${client.sessionId} left`);
+  }
+
+  private async saveCharacter(sessionId: string) {
+    const player = this.state.players.get(sessionId);
+    const characterId = this.characterIdBySession.get(sessionId);
+    if (!player || !characterId) return;
+
+    try {
+      await saveCharacterProgress(characterId, {
+        level: player.level,
+        xp: player.xp,
+        stats: {
+          strength: player.strength,
+          dexterity: player.dexterity,
+          intellect: player.intellect,
+          vitality: player.vitality,
+          luck: player.luck,
+          armor: player.armor,
+        },
+      });
+    } catch (err) {
+      console.error(`[WorldRoom] failed to save character ${characterId}:`, err);
+    }
+  }
+
+  private async autosaveAll() {
+    for (const sessionId of this.characterIdBySession.keys()) {
+      await this.saveCharacter(sessionId);
+    }
   }
 
   private spawnEnemy(point: EnemySpawnPoint) {
@@ -141,7 +239,8 @@ export class WorldRoom extends Room<WorldState> {
         fireAt: now + spell.castTimeMs,
       });
     } else {
-      this.applySpellDamage(target, spell.damage, message.targetId);
+      const damage = this.computePlayerDamage(player, spell.damage);
+      this.applySpellDamage(target, damage, message.targetId, client.sessionId);
     }
   }
 
@@ -152,11 +251,36 @@ export class WorldRoom extends Room<WorldState> {
     if (player) player.castSpellId = 0;
   }
 
-  private applySpellDamage(target: Enemy, damage: number, targetId: string) {
+  private applySpellDamage(target: Enemy, damage: number, targetId: string, killerSessionId: string) {
+    const kind = target.kind as EnemyKind;
     target.hp = Math.max(0, target.hp - damage);
     if (target.hp === 0) {
       this.killEnemy(targetId);
+      const killer = this.state.players.get(killerSessionId);
+      if (killer) this.grantXp(killer, XP_PER_ENEMY_KIND[kind]);
     }
+  }
+
+  private grantXp(player: Player, amount: number) {
+    player.xp += amount;
+
+    while (player.level < MAX_LEVEL && player.xp >= xpForNextLevel(player.level)) {
+      player.xp -= xpForNextLevel(player.level);
+      player.level += 1;
+      player.vitality += VITALITY_PER_LEVEL;
+      this.bumpMainStat(player, CLASSES[this.resolveClassId(player.classId)].mainStat, MAIN_STAT_PER_LEVEL);
+      player.maxHp = player.vitality * VITALITY_TO_HP;
+      player.hp = player.maxHp;
+    }
+  }
+
+  private computePlayerDamage(player: Player, baseDamage: number): number {
+    const statBonus = Math.floor((player.strength + player.dexterity + player.intellect) * DAMAGE_STAT_FACTOR);
+    let damage = baseDamage + statBonus;
+    if (Math.random() < critChanceFromLuck(player.luck)) {
+      damage = Math.round(damage * CRIT_MULTIPLIER);
+    }
+    return damage;
   }
 
   private killEnemy(enemyId: string) {
@@ -219,10 +343,12 @@ export class WorldRoom extends Room<WorldState> {
       const target = this.state.enemies.get(pending.targetId);
       if (!target || target.hp <= 0) continue; // target gone, cast fizzles
 
+      const damage = this.computePlayerDamage(player, spell.damage);
+
       if (spell.projectileSpeed) {
-        this.spawnProjectile(player.x, player.z, "player", pending.targetId, spell.damage, spell.projectileSpeed);
+        this.spawnProjectile(player.x, player.z, "player", pending.targetId, damage, spell.projectileSpeed, sessionId);
       } else {
-        this.applySpellDamage(target, spell.damage, pending.targetId);
+        this.applySpellDamage(target, damage, pending.targetId, sessionId);
       }
     }
   }
@@ -283,7 +409,7 @@ export class WorldRoom extends Room<WorldState> {
       if (!player || player.hp <= 0) continue; // target gone, cast fizzles
 
       const stats = ENEMY_STATS.caster;
-      this.spawnProjectile(enemy.x, enemy.z, "enemy", pending.targetSessionId, stats.damage, stats.projectileSpeed);
+      this.spawnProjectile(enemy.x, enemy.z, "enemy", pending.targetSessionId, stats.damage, stats.projectileSpeed, "");
     }
   }
 
@@ -294,6 +420,7 @@ export class WorldRoom extends Room<WorldState> {
     targetId: string,
     damage: number,
     speed: number,
+    ownerId: string,
   ) {
     const projectile = new Projectile();
     projectile.x = x;
@@ -302,6 +429,7 @@ export class WorldRoom extends Room<WorldState> {
     projectile.targetId = targetId;
     projectile.damage = damage;
     projectile.speed = speed;
+    projectile.ownerId = ownerId;
 
     const id = `proj-${this.projectileSeq++}`;
     this.state.projectiles.set(id, projectile);
@@ -341,7 +469,7 @@ export class WorldRoom extends Room<WorldState> {
           this.damagePlayer(projectile.targetId, player, projectile.damage);
         } else {
           const enemy = this.state.enemies.get(projectile.targetId)!;
-          this.applySpellDamage(enemy, projectile.damage, projectile.targetId);
+          this.applySpellDamage(enemy, projectile.damage, projectile.targetId, projectile.ownerId);
         }
         this.removeProjectile(id);
         continue;
@@ -364,7 +492,8 @@ export class WorldRoom extends Room<WorldState> {
   }
 
   private damagePlayer(sessionId: string, player: Player, amount: number) {
-    player.hp = Math.max(0, player.hp - amount);
+    const mitigated = Math.max(1, amount - player.armor);
+    player.hp = Math.max(0, player.hp - mitigated);
     if (player.hp === 0) {
       this.respawnPlayer(sessionId, player);
     }
