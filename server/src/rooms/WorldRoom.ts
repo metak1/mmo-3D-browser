@@ -3,6 +3,9 @@ import {
   AILMENTS,
   AcceptQuestMessage,
   AilmentKind,
+  BOSS_ARENA_CENTER,
+  BOSS_ENRAGE_DAMAGE_MULTIPLIER,
+  BOSS_PHASE_2_HP_FRACTION,
   CastMessage,
   CLASSES,
   ClassId,
@@ -66,6 +69,9 @@ import { Enemy, LootBag, Player, Projectile, WorldState } from "./schema/WorldSt
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const RANGE_BUFFER = 1; // small allowance for latency between client input and server check
 const AUTOSAVE_INTERVAL_MS = 30_000;
+const BOSS_RESPAWN_MS = 60_000; // a boss should feel rarer than a trash mob's ENEMY_RESPAWN_MS
+const BOSS_ENRAGE_MS = 90_000; // time since first damage taken before the boss enrages
+const BOSS_GUARANTEED_DROPS = 3; // bypasses LOOT_DROP_CHANCE - a group should always walk away with something
 
 interface PlayerInput {
   moveX: number;
@@ -78,6 +84,7 @@ interface EnemySpawnPoint {
   kind: EnemyKind;
   x: number;
   z: number;
+  respawnMs?: number; // falls back to ENEMY_RESPAWN_MS when unset
 }
 
 // A cast's target, resolved once at cast-start time from the raw CastMessage. Cast-time
@@ -105,6 +112,7 @@ const SPAWN_POINTS: EnemySpawnPoint[] = [
   { id: "melee-2", kind: "melee", x: -8, z: 8 },
   { id: "caster-1", kind: "caster", x: 8, z: -8 },
   { id: "caster-2", kind: "caster", x: -8, z: -8 },
+  { id: "boss-1", kind: "boss", x: BOSS_ARENA_CENTER.x, z: BOSS_ARENA_CENTER.z, respawnMs: BOSS_RESPAWN_MS },
 ];
 
 // One generic radius-scan reused by every AoE spell (enemies-near-point for damage,
@@ -524,13 +532,21 @@ export class WorldRoom extends Room<WorldState> {
 
   private applySpellDamage(target: Enemy, damage: number, targetId: string, killerSessionId: string) {
     const kind = target.kind as EnemyKind;
+    // Starts the enrage clock on the boss's first hit taken, never reset until it dies
+    // (spawnEnemy always creates a fresh Enemy(), so a respawned boss starts clean).
+    if (kind === "boss" && target.enragesAt === 0) target.enragesAt = Date.now() + BOSS_ENRAGE_MS;
+
     target.hp = Math.max(0, target.hp - damage);
     if (target.hp === 0) {
       const deathX = target.x;
       const deathZ = target.z;
       this.killEnemy(targetId);
       this.grantKillRewards(killerSessionId, kind, deathX, deathZ);
-      this.maybeDropLoot(deathX, deathZ);
+      if (kind === "boss") {
+        for (let i = 0; i < BOSS_GUARANTEED_DROPS; i++) this.maybeDropLoot(deathX, deathZ, true);
+      } else {
+        this.maybeDropLoot(deathX, deathZ, false);
+      }
     }
   }
 
@@ -624,8 +640,8 @@ export class WorldRoom extends Room<WorldState> {
     this.removeFromParty(player);
   }
 
-  private maybeDropLoot(x: number, z: number) {
-    if (Math.random() >= LOOT_DROP_CHANCE) return;
+  private maybeDropLoot(x: number, z: number, guaranteed: boolean) {
+    if (!guaranteed && Math.random() >= LOOT_DROP_CHANCE) return;
     const itemId = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
     this.dropLoot(x, z, encodeItemToken(itemId, rollRarity()));
   }
@@ -841,7 +857,7 @@ export class WorldRoom extends Room<WorldState> {
     const point = SPAWN_POINTS.find((p) => p.id === enemyId);
     if (!point) return;
 
-    this.clock.setTimeout(() => this.spawnEnemy(point), ENEMY_RESPAWN_MS);
+    this.clock.setTimeout(() => this.spawnEnemy(point), point.respawnMs ?? ENEMY_RESPAWN_MS);
   }
 
   private respawnPlayer(sessionId: string, player: Player) {
@@ -906,40 +922,63 @@ export class WorldRoom extends Room<WorldState> {
     }
   }
 
+  // Phase and enrage are derived from already-synced fields (hp/maxHp, enragesAt) rather
+  // than a separate synced flag - client and server independently compute the same
+  // threshold locally, so they can never disagree on what "phase 2"/"enraged" means.
+  private isBossPhase2(enemy: Enemy): boolean {
+    return enemy.kind === "boss" && enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION;
+  }
+
+  private isBossEnraged(enemy: Enemy): boolean {
+    return enemy.kind === "boss" && enemy.enragesAt !== 0 && Date.now() >= enemy.enragesAt;
+  }
+
   private tickEnemyAttacks() {
     const now = Date.now();
 
     for (const [enemyId, enemy] of this.state.enemies) {
       if (enemy.hp <= 0) continue;
+      const isBoss = enemy.kind === "boss";
+      const enrageMultiplier = this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1;
 
-      if (enemy.kind === "melee") {
-        const stats = ENEMY_STATS.melee;
+      // Melee pattern: always active for "melee", and for "boss" in every phase.
+      if (enemy.kind === "melee" || isBoss) {
+        const range = isBoss ? ENEMY_STATS.boss.meleeRange : ENEMY_STATS.melee.range;
+        const interval = isBoss ? ENEMY_STATS.boss.meleeIntervalMs : ENEMY_STATS.melee.intervalMs;
+        const damage = isBoss ? ENEMY_STATS.boss.meleeDamage : ENEMY_STATS.melee.damage;
+
         const lastAttack = this.lastMeleeAttackAt.get(enemyId) ?? 0;
-        if (now - lastAttack < stats.intervalMs) continue;
-
-        for (const [sessionId, player] of this.state.players) {
-          if (player.hp <= 0) continue;
-          const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
-          if (dist <= stats.range) {
-            this.damagePlayer(sessionId, player, stats.damage);
-            this.lastMeleeAttackAt.set(enemyId, now);
-            break;
+        if (now - lastAttack >= interval) {
+          for (const [sessionId, player] of this.state.players) {
+            if (player.hp <= 0) continue;
+            const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
+            if (dist <= range) {
+              this.damagePlayer(sessionId, player, damage * enrageMultiplier);
+              this.lastMeleeAttackAt.set(enemyId, now);
+              break;
+            }
           }
         }
-      } else {
+      }
+
+      // Ranged/AoE pattern: always active for "caster"; for "boss" only once phase 2 starts.
+      if (enemy.kind === "caster" || (isBoss && this.isBossPhase2(enemy))) {
         if (this.pendingEnemyCast.has(enemyId)) continue; // already winding up
         if ((this.interruptLockoutUntil.get(enemyId) ?? 0) > now) continue; // recently interrupted
 
-        const stats = ENEMY_STATS.caster;
+        const range = isBoss ? ENEMY_STATS.boss.aoeRange : ENEMY_STATS.caster.range;
+        const cooldownMs = isBoss ? ENEMY_STATS.boss.aoeCooldownMs : ENEMY_STATS.caster.cooldownMs;
+        const castTimeMs = isBoss ? ENEMY_STATS.boss.aoeCastTimeMs : ENEMY_STATS.caster.castTimeMs;
+
         const lastAttack = this.lastCasterAttackAt.get(enemyId) ?? 0;
-        if (now - lastAttack < stats.cooldownMs) continue;
+        if (now - lastAttack < cooldownMs) continue;
 
         for (const [sessionId, player] of this.state.players) {
           if (player.hp <= 0) continue;
           const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
-          if (dist <= stats.range) {
+          if (dist <= range) {
             enemy.isCasting = true;
-            this.pendingEnemyCast.set(enemyId, { targetSessionId: sessionId, fireAt: now + stats.castTimeMs });
+            this.pendingEnemyCast.set(enemyId, { targetSessionId: sessionId, fireAt: now + castTimeMs });
             this.lastCasterAttackAt.set(enemyId, now);
             break;
           }
@@ -962,8 +1001,23 @@ export class WorldRoom extends Room<WorldState> {
       const player = this.state.players.get(pending.targetSessionId);
       if (!player || player.hp <= 0) continue; // target gone, cast fizzles
 
-      const stats = ENEMY_STATS.caster;
-      this.spawnProjectile(enemy.x, enemy.z, "enemy", pending.targetSessionId, stats.damage, stats.projectileSpeed, "");
+      const isBoss = enemy.kind === "boss";
+      const enrageMultiplier = this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1;
+      const baseDamage = isBoss ? ENEMY_STATS.boss.aoeDamage : ENEMY_STATS.caster.damage;
+      const projectileSpeed = isBoss ? ENEMY_STATS.boss.aoeProjectileSpeed : ENEMY_STATS.caster.projectileSpeed;
+
+      // ownerId lets tickProjectiles recognize a boss-sourced projectile on impact (to
+      // splash instead of single-target); harmless for non-boss enemies since nothing
+      // else reads ownerId on enemy-sourced projectiles.
+      this.spawnProjectile(
+        enemy.x,
+        enemy.z,
+        "enemy",
+        pending.targetSessionId,
+        baseDamage * enrageMultiplier,
+        projectileSpeed,
+        enemyId,
+      );
     }
   }
 
@@ -1020,8 +1074,18 @@ export class WorldRoom extends Room<WorldState> {
       if (dist <= PROJECTILE_HIT_RADIUS) {
         if (projectile.source === "enemy") {
           const player = this.state.players.get(projectile.targetId)!;
-          this.damagePlayer(projectile.targetId, player, projectile.damage);
-          if (player.hp > 0) this.applyAilment(player, "weaken", AILMENTS.weaken.durationMs);
+          const ownerEnemy = this.state.enemies.get(projectile.ownerId);
+          if (ownerEnemy?.kind === "boss") {
+            // Phase 2's ranged attack: splash the locked-target's impact point instead of
+            // hitting only them - the enrage multiplier is already baked into projectile.damage.
+            forEachAlive(this.state.players, player.x, player.z, ENEMY_STATS.boss.aoeRadius, (splashPlayer, splashSessionId) => {
+              this.damagePlayer(splashSessionId, splashPlayer, projectile.damage);
+              if (splashPlayer.hp > 0) this.applyAilment(splashPlayer, "weaken", AILMENTS.weaken.durationMs);
+            });
+          } else {
+            this.damagePlayer(projectile.targetId, player, projectile.damage);
+            if (player.hp > 0) this.applyAilment(player, "weaken", AILMENTS.weaken.durationMs);
+          }
         } else {
           const enemy = this.state.enemies.get(projectile.targetId)!;
           this.applySpellDamage(enemy, projectile.damage, projectile.targetId, projectile.ownerId);

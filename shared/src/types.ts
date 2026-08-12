@@ -2,7 +2,7 @@ export const WORLD_ROOM_NAME = "world_room";
 
 export const PLAYER_SPEED = 4; // meters per second, server-authoritative
 
-export const MAP_HALF_EXTENT = 20; // flat test ground spans [-20, 20] on x and z
+export const MAP_HALF_EXTENT = 34; // flat test ground spans [-34, 34] on x and z
 
 export interface InputMessage {
   moveX: number; // normalized direction, -1..1
@@ -10,7 +10,7 @@ export interface InputMessage {
   seq: number; // client-assigned sequence number, echoed back for reconciliation
 }
 
-export type EnemyKind = "melee" | "caster";
+export type EnemyKind = "melee" | "caster" | "boss";
 
 // A character only ever has one relevant combat stat - whichever CLASSES[classId].mainStat
 // names (strength/dexterity/intellect). That identity is metadata for display labeling only;
@@ -62,6 +62,7 @@ export const CRIT_MULTIPLIER = 1.5;
 export const XP_PER_ENEMY_KIND: Record<EnemyKind, number> = {
   melee: 20,
   caster: 30,
+  boss: 300,
 };
 
 export function xpForNextLevel(level: number): number {
@@ -301,11 +302,35 @@ export const SPELLS: Record<SpellId, SpellDef> = Object.fromEntries(
 export const ENEMY_STATS = {
   melee: { maxHp: 40, damage: 8, range: 1.8, intervalMs: 1500 },
   caster: { maxHp: 25, damage: 6, range: 10, cooldownMs: 2200, projectileSpeed: 6, castTimeMs: 1000 },
+  // A boss runs the melee pattern always, and gains the aoe (caster-shaped) pattern once
+  // it enters phase 2 - see BOSS_PHASE_2_HP_FRACTION. Deliberately not the same shape as
+  // melee/caster since it combines both; this object is a plain `as const` literal, not a
+  // uniform Record, so a differently-shaped third key is safe.
+  boss: {
+    maxHp: 500,
+    meleeDamage: 16,
+    meleeRange: 2.2,
+    meleeIntervalMs: 1400,
+    aoeDamage: 20,
+    aoeRadius: 4,
+    aoeRange: 12,
+    aoeCooldownMs: 6000,
+    aoeCastTimeMs: 1200,
+    aoeProjectileSpeed: 8,
+  },
 } as const;
 
 export const PROJECTILE_HIT_RADIUS = 0.6;
 
 export const ENEMY_RESPAWN_MS = 6000;
+
+// A boss's phase/enrage identity is derived from already-synced fields (hp/maxHp,
+// enragesAt) rather than a separate synced flag, so client and server can never disagree
+// on what "phase 2" or "enraged" means - both just compute the same threshold locally.
+export const BOSS_PHASE_2_HP_FRACTION = 0.5;
+export const BOSS_ENRAGE_DAMAGE_MULTIPLIER = 2;
+export const BOSS_ARENA_CENTER = { x: 0, z: 28 };
+export const BOSS_ARENA_RADIUS = 10;
 
 export const PROJECTILE_MAX_LIFETIME_MS = 4000;
 
@@ -397,6 +422,13 @@ export const ITEMS: Record<string, ItemDef> = {
     bonuses: { vitality: 3 },
     icon: "📿",
     description: "Warm to the touch, even in the cold.",
+  },
+  warden_relic: {
+    name: "Warden's Relic",
+    slot: "trinket",
+    bonuses: { mainStat: 6, vitality: 4 },
+    icon: "🔱",
+    description: "Torn from the Warden's shattered core, still humming with old power.",
   },
 };
 
@@ -624,6 +656,7 @@ export interface NpcDef {
 
 export const NPCS: Record<string, NpcDef> = {
   quest_giver: { id: "quest_giver", name: "Weary Quartermaster", x: 0, z: -3, questIds: ["kill_melee_3", "kill_caster_3"] },
+  boss_watcher: { id: "boss_watcher", name: "Scarred Sentinel", x: 0, z: 20, questIds: ["defeat_boss"] },
 };
 
 export type QuestId = string;
@@ -659,6 +692,16 @@ export const QUESTS: Record<QuestId, QuestDef> = {
     objectiveCount: 3,
     rewardXp: 200,
     rewardItemId: "signet_ring",
+  },
+  defeat_boss: {
+    id: "defeat_boss",
+    name: "The Ashen Warden",
+    description: "A monstrous warden has claimed the ruins to the north. End its watch - bring friends.",
+    giverNpcId: "boss_watcher",
+    objectiveEnemyKind: "boss",
+    objectiveCount: 1,
+    rewardXp: 500,
+    rewardItemId: "warden_relic",
   },
 };
 

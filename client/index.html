@@ -631,6 +631,11 @@
       .ailment-tag[hidden] {
         display: none;
       }
+      .ailment-tag.enraged {
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
       #app.ground-target-pending canvas {
         cursor: crosshair;
       }
@@ -782,6 +787,7 @@
         <div class="bar-fill" data-target-cast-fill></div>
         <span class="bar-label">Casting…</span>
       </div>
+      <div class="ailment-tag" data-target-enrage hidden></div>
     </div>
 
     <div id="party-panel" class="unit-panel" hidden>

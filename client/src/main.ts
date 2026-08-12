@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { Room } from "colyseus.js";
 import {
   AcceptQuestMessage,
+  BOSS_PHASE_2_HP_FRACTION,
   CastMessage,
   CLASSES,
   ClassId,
@@ -58,6 +59,11 @@ const SERVER_RECONCILE_LERP = 0.02;
 const RECONCILE_SNAP_DISTANCE = 3; // large corrections (e.g. death/respawn teleport) snap instead of creeping
 const HOTBAR_SLOT_COUNT = 3;
 const AILMENT_LABELS: Record<string, string> = { weaken: "Weakened" };
+const ENEMY_LABEL: Record<EnemyKind, string> = {
+  melee: "Melee Enemy",
+  caster: "Caster Enemy",
+  boss: "The Ashen Warden",
+};
 
 const hud = document.getElementById("hud")!;
 const container = document.getElementById("app")!;
@@ -75,6 +81,7 @@ const targetHpFill = document.querySelector<HTMLElement>("[data-target-hp-fill]"
 const targetHpLabel = document.querySelector<HTMLElement>("[data-target-hp-label]")!;
 const targetCastBarEl = document.querySelector<HTMLElement>("[data-target-cast-bar]")!;
 const targetCastFill = document.querySelector<HTMLElement>("[data-target-cast-fill]")!;
+const targetEnrageEl = document.querySelector<HTMLElement>("[data-target-enrage]")!;
 
 const partyPanel = document.getElementById("party-panel")!;
 const partyMemberListEl = document.getElementById("party-member-list")!;
@@ -403,7 +410,10 @@ async function main(token: string, characterId: number) {
 
   const avatars = new Map<string, PlayerAvatar>();
   const enemies = new Map<string, EnemyAvatar>();
-  const enemySchemaById = new Map<string, { kind: string; hp: number; maxHp: number; isCasting: boolean }>();
+  const enemySchemaById = new Map<
+    string,
+    { kind: string; hp: number; maxHp: number; isCasting: boolean; enragesAt: number }
+  >();
   const playerSchemaById = new Map<
     string,
     {
@@ -592,7 +602,7 @@ async function main(token: string, characterId: number) {
     if (enemySchema) {
       enemies.get(id)?.setSelected(true);
       targetPanel.hidden = false;
-      targetNameEl.textContent = enemySchema.kind === "melee" ? "Melee Enemy" : "Caster Enemy";
+      targetNameEl.textContent = ENEMY_LABEL[enemySchema.kind as EnemyKind] ?? enemySchema.kind;
       updateHpBar(targetHpFill, targetHpLabel, enemySchema.hp, enemySchema.maxHp);
       if (enemySchema.isCasting) {
         targetCastActive = true;
@@ -716,7 +726,8 @@ async function main(token: string, characterId: number) {
   }
 
   function questObjectiveLabel(quest: QuestDef): string {
-    return `Kill ${quest.objectiveCount} ${capitalize(quest.objectiveEnemyKind)} Enemies`;
+    const noun = quest.objectiveCount === 1 ? "Enemy" : "Enemies";
+    return `Kill ${quest.objectiveCount} ${capitalize(quest.objectiveEnemyKind)} ${noun}`;
   }
 
   // Ready-to-turn-in takes priority (most actionable), then a new quest to offer, then a
@@ -1071,6 +1082,7 @@ async function main(token: string, characterId: number) {
       $(enemy).onChange(() => {
         avatar.setTarget(enemy.x, enemy.z);
         avatar.setHp(enemy.hp, enemy.maxHp);
+        if (enemy.kind === "boss") avatar.setBossPhase(enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION);
 
         if (enemyId === currentTargetId) {
           updateHpBar(targetHpFill, targetHpLabel, enemy.hp, enemy.maxHp);
@@ -1205,8 +1217,25 @@ async function main(token: string, characterId: number) {
     }
 
     if (targetCastActive) {
-      const fraction = Math.max(0, Math.min(1, (performance.now() - targetCastStartRef) / ENEMY_STATS.caster.castTimeMs));
+      const targetEnemySchema = currentTargetId ? enemySchemaById.get(currentTargetId) : undefined;
+      const castDurationMs =
+        targetEnemySchema?.kind === "boss" ? ENEMY_STATS.boss.aoeCastTimeMs : ENEMY_STATS.caster.castTimeMs;
+      const fraction = Math.max(0, Math.min(1, (performance.now() - targetCastStartRef) / castDurationMs));
       targetCastFill.style.width = `${fraction * 100}%`;
+    }
+
+    if (currentTargetId) {
+      const targetEnemySchema = enemySchemaById.get(currentTargetId);
+      if (targetEnemySchema?.kind === "boss" && targetEnemySchema.enragesAt > 0) {
+        const remainingMs = targetEnemySchema.enragesAt - Date.now();
+        targetEnrageEl.hidden = false;
+        targetEnrageEl.textContent = remainingMs > 0 ? `Enrages in ${Math.ceil(remainingMs / 1000)}s` : "Enraged";
+        targetEnrageEl.classList.toggle("enraged", remainingMs <= 0);
+      } else {
+        targetEnrageEl.hidden = true;
+      }
+    } else {
+      targetEnrageEl.hidden = true;
     }
 
     for (let i = 0; i < slotSpellIds.length; i++) {

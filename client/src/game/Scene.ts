@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { MAP_HALF_EXTENT } from "@mmo/shared";
+import { BOSS_ARENA_CENTER, BOSS_ARENA_RADIUS, MAP_HALF_EXTENT } from "@mmo/shared";
 
 const CAMERA_OFFSET = new THREE.Vector3(0, 21, 13.5);
 const CAMERA_LERP = 0.08;
@@ -63,6 +63,15 @@ export class GameScene {
 
     const grid = new THREE.GridHelper(size, size / 2, 0x4a5578, 0x3a4260);
     this.scene.add(grid);
+
+    // Purely decorative marker for the boss arena - no collision, just tells the player
+    // "you've entered a different area" before the boss itself comes into view.
+    const arenaGeometry = new THREE.CircleGeometry(BOSS_ARENA_RADIUS, 48);
+    const arenaMaterial = new THREE.MeshStandardMaterial({ color: 0x3a1f24 });
+    const arena = new THREE.Mesh(arenaGeometry, arenaMaterial);
+    arena.rotation.x = -Math.PI / 2;
+    arena.position.set(BOSS_ARENA_CENTER.x, 0.01, BOSS_ARENA_CENTER.z);
+    this.scene.add(arena);
   }
 
   followTarget(position: THREE.Vector3) {

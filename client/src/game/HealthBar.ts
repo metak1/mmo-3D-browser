@@ -17,8 +17,11 @@ export class HealthBar {
   readonly group = new THREE.Group();
   private readonly fill: THREE.Mesh;
   private readonly fillMaterial: THREE.MeshBasicMaterial;
+  private readonly yOffset: number;
 
-  constructor() {
+  constructor(yOffset = Y_OFFSET) {
+    this.yOffset = yOffset;
+
     const bg = new THREE.Mesh(
       new THREE.PlaneGeometry(WIDTH, HEIGHT),
       new THREE.MeshBasicMaterial({ color: 0x1a1c24 }),
@@ -35,7 +38,7 @@ export class HealthBar {
   }
 
   setPosition(x: number, y: number, z: number) {
-    this.group.position.set(x, y + Y_OFFSET, z);
+    this.group.position.set(x, y + this.yOffset, z);
   }
 
   setFraction(fraction: number) {
