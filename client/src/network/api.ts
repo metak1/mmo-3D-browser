@@ -20,9 +20,7 @@ export interface CharacterSummary {
   class_id: ClassId;
   level: number;
   xp: number;
-  strength: number;
-  dexterity: number;
-  intellect: number;
+  main_stat: number;
   vitality: number;
   luck: number;
   armor: number;

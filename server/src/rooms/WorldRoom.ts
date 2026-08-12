@@ -1,5 +1,8 @@
 import { Room, Client } from "@colyseus/core";
 import {
+  AILMENTS,
+  AcceptQuestMessage,
+  AilmentKind,
   CastMessage,
   CLASSES,
   ClassId,
@@ -11,6 +14,7 @@ import {
   EnemyKind,
   EquipMessage,
   EquipSlot,
+  INTERRUPT_LOCKOUT_MS,
   INVENTORY_SIZE,
   ITEM_IDS,
   ITEMS,
@@ -23,16 +27,25 @@ import {
   MAIN_STAT_PER_LEVEL,
   MAP_HALF_EXTENT,
   MAX_LEVEL,
+  NPCS,
+  NPC_INTERACT_RADIUS,
+  PARTY_MAX_SIZE,
+  PARTY_XP_SHARE_RADIUS,
   PLAYER_SPEED,
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
+  PartyInviteMessage,
+  PartyRespondMessage,
   PlayerStats,
+  QUESTS,
   SPELLS,
+  SpellDef,
   SpellId,
   SpendTalentMessage,
   TALENTS,
   TALENT_POINTS_PER_LEVEL,
   TalentBonus,
+  TurnInQuestMessage,
   UnequipMessage,
   VITALITY_PER_LEVEL,
   VITALITY_TO_HP,
@@ -67,9 +80,18 @@ interface EnemySpawnPoint {
   z: number;
 }
 
+// A cast's target, resolved once at cast-start time from the raw CastMessage. Cast-time
+// (windup) spells stash this and re-resolve live units from it at fire time, so a target
+// that died/moved mid-windup is re-validated uniformly regardless of target type.
+type ResolvedTarget =
+  | { kind: "enemy"; id: string }
+  | { kind: "ally"; id: string }
+  | { kind: "self" }
+  | { kind: "ground"; x: number; z: number };
+
 interface PendingPlayerCast {
   spellId: SpellId;
-  targetId: string;
+  target: ResolvedTarget;
   fireAt: number;
 }
 
@@ -85,6 +107,22 @@ const SPAWN_POINTS: EnemySpawnPoint[] = [
   { id: "caster-2", kind: "caster", x: -8, z: -8 },
 ];
 
+// One generic radius-scan reused by every AoE spell (enemies-near-point for damage,
+// players-near-point for heal). MapSchema<T> iterates as [id, value] pairs, same as a
+// native Map, so this needs no import from @colyseus/schema.
+function forEachAlive<T extends { hp: number; x: number; z: number }>(
+  units: Iterable<[string, T]>,
+  cx: number,
+  cz: number,
+  radius: number,
+  fn: (unit: T, id: string) => void,
+) {
+  for (const [id, unit] of units) {
+    if (unit.hp <= 0) continue;
+    if (Math.hypot(unit.x - cx, unit.z - cz) <= radius) fn(unit, id);
+  }
+}
+
 export class WorldRoom extends Room<WorldState> {
   private lastInput = new Map<string, PlayerInput>();
   private lastCastAt = new Map<string, number>(); // key: `${sessionId}:${spellId}`
@@ -92,6 +130,7 @@ export class WorldRoom extends Room<WorldState> {
   private lastCasterAttackAt = new Map<string, number>(); // key: enemyId
   private pendingPlayerCast = new Map<string, PendingPlayerCast>(); // key: sessionId
   private pendingEnemyCast = new Map<string, PendingEnemyCast>(); // key: enemyId
+  private interruptLockoutUntil = new Map<string, number>(); // key: sessionId or enemyId
   private projectileAge = new Map<string, number>(); // key: projectileId, value: ms alive
   private projectileSeq = 0;
   private lootBagSeq = 0;
@@ -121,6 +160,11 @@ export class WorldRoom extends Room<WorldState> {
     this.onMessage("equip", (client, message: EquipMessage) => this.handleEquip(client, message));
     this.onMessage("unequip", (client, message: UnequipMessage) => this.handleUnequip(client, message));
     this.onMessage("spend_talent", (client, message: SpendTalentMessage) => this.handleSpendTalent(client, message));
+    this.onMessage("accept_quest", (client, message: AcceptQuestMessage) => this.handleAcceptQuest(client, message));
+    this.onMessage("turn_in_quest", (client, message: TurnInQuestMessage) => this.handleTurnInQuest(client, message));
+    this.onMessage("party_invite", (client, message: PartyInviteMessage) => this.handlePartyInvite(client, message));
+    this.onMessage("party_respond", (client, message: PartyRespondMessage) => this.handlePartyRespond(client, message));
+    this.onMessage("party_leave", (client) => this.handlePartyLeave(client));
 
     this.setSimulationInterval(() => this.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
@@ -149,12 +193,11 @@ export class WorldRoom extends Room<WorldState> {
     player.x = 0;
     player.y = 0;
     player.z = 0;
+    player.name = character.name;
     player.classId = classId;
     player.level = character.level;
     player.xp = character.xp;
-    player.strength = character.strength;
-    player.dexterity = character.dexterity;
-    player.intellect = character.intellect;
+    player.mainStat = character.main_stat;
     player.vitality = character.vitality;
     player.luck = character.luck;
     player.armor = character.armor;
@@ -162,6 +205,14 @@ export class WorldRoom extends Room<WorldState> {
     const savedRanks = (character.talent_ranks as Record<string, number>) ?? {};
     for (const [talentId, rank] of Object.entries(savedRanks)) {
       player.talentRanks.set(talentId, rank);
+    }
+    const savedQuestProgress = (character.quest_progress as Record<string, number>) ?? {};
+    for (const [questId, count] of Object.entries(savedQuestProgress)) {
+      player.questProgress.set(questId, count);
+    }
+    const savedQuestCompleted = (character.quest_completed as Record<string, number>) ?? {};
+    for (const [questId, completedAt] of Object.entries(savedQuestCompleted)) {
+      player.questCompleted.set(questId, completedAt);
     }
 
     const items = await listCharacterItems(character.id);
@@ -187,26 +238,10 @@ export class WorldRoom extends Room<WorldState> {
     return DEFAULT_CLASS_ID;
   }
 
-  private bumpMainStat(player: Player, mainStat: "strength" | "dexterity" | "intellect", amount: number) {
-    switch (mainStat) {
-      case "strength":
-        player.strength += amount;
-        break;
-      case "dexterity":
-        player.dexterity += amount;
-        break;
-      case "intellect":
-        player.intellect += amount;
-        break;
-    }
-  }
-
   private getEffectiveStatsFor(player: Player): PlayerStats {
     return getEffectiveStats(
       {
-        strength: player.strength,
-        dexterity: player.dexterity,
-        intellect: player.intellect,
+        mainStat: player.mainStat,
         vitality: player.vitality,
         luck: player.luck,
         armor: player.armor,
@@ -254,10 +289,14 @@ export class WorldRoom extends Room<WorldState> {
   async onLeave(client: Client) {
     await this.saveCharacter(client.sessionId);
 
+    const leavingPlayer = this.state.players.get(client.sessionId);
+    if (leavingPlayer) this.removeFromParty(leavingPlayer);
+
     this.cancelPlayerCast(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.lastInput.delete(client.sessionId);
     this.characterIdBySession.delete(client.sessionId);
+    this.interruptLockoutUntil.delete(client.sessionId);
     console.log(`[WorldRoom] ${client.sessionId} left`);
   }
 
@@ -271,15 +310,15 @@ export class WorldRoom extends Room<WorldState> {
         level: player.level,
         xp: player.xp,
         stats: {
-          strength: player.strength,
-          dexterity: player.dexterity,
-          intellect: player.intellect,
+          mainStat: player.mainStat,
           vitality: player.vitality,
           luck: player.luck,
           armor: player.armor,
         },
         talentPoints: player.talentPoints,
         talentRanks: Object.fromEntries(player.talentRanks),
+        questProgress: Object.fromEntries(player.questProgress),
+        questCompleted: Object.fromEntries(player.questCompleted),
       });
     } catch (err) {
       console.error(`[WorldRoom] failed to save character ${characterId}:`, err);
@@ -322,10 +361,11 @@ export class WorldRoom extends Room<WorldState> {
   private handleCast(client: Client, message: CastMessage) {
     const player = this.state.players.get(client.sessionId);
     if (!player || player.hp <= 0) return;
-    if (player.castSpellId !== 0) return; // already casting
+    if (player.castSpellId !== "") return; // already casting
+    if ((this.interruptLockoutUntil.get(client.sessionId) ?? 0) > Date.now()) return;
 
     const spell = SPELLS[message.spellId];
-    if (!spell) return;
+    if (!spell || spell.classId !== this.resolveClassId(player.classId)) return;
 
     const cooldownKey = `${client.sessionId}:${message.spellId}`;
     const now = Date.now();
@@ -334,10 +374,13 @@ export class WorldRoom extends Room<WorldState> {
     const effectiveCooldownMs = Math.max(100, spell.cooldownMs * (1 - cooldownPercent / 100));
     if (now - lastCast < effectiveCooldownMs) return;
 
-    const target = this.state.enemies.get(message.targetId);
-    if (!target || target.hp <= 0) return;
+    const target = this.resolveCastTarget(player, client.sessionId, spell, message);
+    if (!target) return;
 
-    const dist = Math.hypot(player.x - target.x, player.z - target.z);
+    const impact = this.resolveImpactPoint(player, target);
+    if (!impact) return;
+
+    const dist = Math.hypot(player.x - impact.x, player.z - impact.z);
     if (dist > spell.range + RANGE_BUFFER) return;
 
     this.lastCastAt.set(cooldownKey, now);
@@ -346,12 +389,122 @@ export class WorldRoom extends Room<WorldState> {
       player.castSpellId = message.spellId;
       this.pendingPlayerCast.set(client.sessionId, {
         spellId: message.spellId,
-        targetId: message.targetId,
+        target,
         fireAt: now + spell.castTimeMs,
       });
     } else {
-      const damage = this.computePlayerDamage(player, spell.damage);
-      this.applySpellDamage(target, damage, message.targetId, client.sessionId);
+      this.resolveSpellEffect(player, client.sessionId, spell, target);
+    }
+  }
+
+  // Resolves a raw CastMessage into a ResolvedTarget based on the spell's targetType.
+  // "ally" falls back to the caster themself when no valid ally id was sent, which is
+  // what makes self-heal/self-cleanse work without requiring a self-click.
+  private resolveCastTarget(
+    player: Player,
+    sessionId: string,
+    spell: SpellDef,
+    message: CastMessage,
+  ): ResolvedTarget | null {
+    switch (spell.targetType) {
+      case "enemy": {
+        if (!message.targetId) return null;
+        const enemy = this.state.enemies.get(message.targetId);
+        if (!enemy || enemy.hp <= 0) return null;
+        return { kind: "enemy", id: message.targetId };
+      }
+      case "ally": {
+        const candidateId = message.targetId && this.state.players.has(message.targetId) ? message.targetId : sessionId;
+        const ally = this.state.players.get(candidateId);
+        if (!ally || ally.hp <= 0) return null;
+        return { kind: "ally", id: candidateId };
+      }
+      case "self":
+        return { kind: "self" };
+      case "ground": {
+        if (message.targetX === undefined || message.targetZ === undefined) return null;
+        if (Math.abs(message.targetX) > MAP_HALF_EXTENT || Math.abs(message.targetZ) > MAP_HALF_EXTENT) return null;
+        return { kind: "ground", x: message.targetX, z: message.targetZ };
+      }
+    }
+  }
+
+  // Live x/z of a resolved target, re-derived fresh each call (never cached) so cast-time
+  // spells re-validate a moving/dying unit at fire time instead of using a stale position.
+  private resolveImpactPoint(caster: Player, target: ResolvedTarget): { x: number; z: number } | null {
+    switch (target.kind) {
+      case "enemy": {
+        const enemy = this.state.enemies.get(target.id);
+        return enemy && enemy.hp > 0 ? { x: enemy.x, z: enemy.z } : null;
+      }
+      case "ally": {
+        const ally = this.state.players.get(target.id);
+        return ally && ally.hp > 0 ? { x: ally.x, z: ally.z } : null;
+      }
+      case "self":
+        return { x: caster.x, z: caster.z };
+      case "ground":
+        return { x: target.x, z: target.z };
+    }
+  }
+
+  private resolveAllyUnit(caster: Player, target: ResolvedTarget): Player | null {
+    if (target.kind === "self") return caster;
+    if (target.kind === "ally") {
+      const ally = this.state.players.get(target.id);
+      return ally && ally.hp > 0 ? ally : null;
+    }
+    return null;
+  }
+
+  // Cancels whatever the target currently has pending (enemy windup or player cast) and
+  // applies a short lockout, regardless of whether anything was actually pending - a
+  // whiffed interrupt still consumes its own cooldown, matching how every other spell's
+  // cooldown is consumed once the cast is accepted.
+  private tryInterrupt(target: ResolvedTarget) {
+    if (target.kind === "enemy" && this.pendingEnemyCast.has(target.id)) {
+      this.cancelEnemyCast(target.id);
+      this.interruptLockoutUntil.set(target.id, Date.now() + INTERRUPT_LOCKOUT_MS);
+    } else if (target.kind === "ally" && this.pendingPlayerCast.has(target.id)) {
+      this.cancelPlayerCast(target.id);
+      this.interruptLockoutUntil.set(target.id, Date.now() + INTERRUPT_LOCKOUT_MS);
+    }
+  }
+
+  private resolveSpellEffect(caster: Player, casterSessionId: string, spell: SpellDef, target: ResolvedTarget) {
+    if (spell.interruptsCast || spell.effectType === "interrupt") {
+      this.tryInterrupt(target);
+    }
+
+    if (spell.effectType === "damage") {
+      if (spell.aoeRadius) {
+        const impact = this.resolveImpactPoint(caster, target);
+        if (!impact) return;
+        forEachAlive(this.state.enemies, impact.x, impact.z, spell.aoeRadius, (enemy, enemyId) => {
+          const damage = this.computePlayerDamage(caster, spell.amount ?? 0);
+          this.applySpellDamage(enemy, damage, enemyId, casterSessionId);
+        });
+      } else if (target.kind === "enemy") {
+        const enemy = this.state.enemies.get(target.id);
+        if (enemy && enemy.hp > 0) {
+          const damage = this.computePlayerDamage(caster, spell.amount ?? 0);
+          this.applySpellDamage(enemy, damage, target.id, casterSessionId);
+        }
+      }
+    } else if (spell.effectType === "heal") {
+      if (spell.aoeRadius) {
+        const impact = this.resolveImpactPoint(caster, target);
+        if (!impact) return;
+        forEachAlive(this.state.players, impact.x, impact.z, spell.aoeRadius, (ally) => {
+          this.healPlayer(caster, ally, spell.amount ?? 0);
+        });
+      } else {
+        const ally = this.resolveAllyUnit(caster, target);
+        if (ally) this.healPlayer(caster, ally, spell.amount ?? 0);
+      }
+    } else if (spell.effectType === "dispel") {
+      const ally = this.resolveAllyUnit(caster, target);
+      if (ally) ally.ailments.clear();
     }
   }
 
@@ -359,7 +512,14 @@ export class WorldRoom extends Room<WorldState> {
     if (!this.pendingPlayerCast.has(sessionId)) return;
     this.pendingPlayerCast.delete(sessionId);
     const player = this.state.players.get(sessionId);
-    if (player) player.castSpellId = 0;
+    if (player) player.castSpellId = "";
+  }
+
+  private cancelEnemyCast(enemyId: string) {
+    if (!this.pendingEnemyCast.has(enemyId)) return;
+    this.pendingEnemyCast.delete(enemyId);
+    const enemy = this.state.enemies.get(enemyId);
+    if (enemy) enemy.isCasting = false;
   }
 
   private applySpellDamage(target: Enemy, damage: number, targetId: string, killerSessionId: string) {
@@ -369,10 +529,99 @@ export class WorldRoom extends Room<WorldState> {
       const deathX = target.x;
       const deathZ = target.z;
       this.killEnemy(targetId);
-      const killer = this.state.players.get(killerSessionId);
-      if (killer) this.grantXp(killer, XP_PER_ENEMY_KIND[kind]);
+      this.grantKillRewards(killerSessionId, kind, deathX, deathZ);
       this.maybeDropLoot(deathX, deathZ);
     }
+  }
+
+  // Every party member within PARTY_XP_SHARE_RADIUS of the kill (and alive) gets the same
+  // XP/quest credit the killer would get solo - not a split pool, just shared credit for
+  // being nearby. Degrades to exactly the old single-killer behavior when partyId is empty.
+  private grantKillRewards(killerSessionId: string, kind: EnemyKind, x: number, z: number) {
+    const killer = this.state.players.get(killerSessionId);
+    if (!killer) return;
+
+    for (const player of this.partyMembersNear(killer, x, z)) {
+      this.grantXp(player, XP_PER_ENEMY_KIND[kind]);
+      this.progressQuestKills(player, kind);
+    }
+  }
+
+  private countPartyMembers(partyId: string): number {
+    let count = 0;
+    for (const player of this.state.players.values()) {
+      if (player.partyId === partyId) count++;
+    }
+    return count;
+  }
+
+  private partyMembersNear(player: Player, x: number, z: number): Player[] {
+    const result: Player[] = [player];
+    if (!player.partyId) return result;
+
+    for (const other of this.state.players.values()) {
+      if (other === player) continue;
+      if (other.partyId !== player.partyId) continue;
+      if (other.hp <= 0) continue;
+      if (Math.hypot(other.x - x, other.z - z) > PARTY_XP_SHARE_RADIUS) continue;
+      result.push(other);
+    }
+    return result;
+  }
+
+  // Clears partyId; if exactly one member of that party remains afterward, clears theirs
+  // too - a "party" of 1 isn't a party. Called from party_leave and from onLeave.
+  private removeFromParty(player: Player) {
+    const partyId = player.partyId;
+    if (!partyId) return;
+    player.partyId = "";
+
+    const remaining = [...this.state.players.values()].filter((p) => p.partyId === partyId);
+    if (remaining.length === 1) remaining[0].partyId = "";
+  }
+
+  private handlePartyInvite(client: Client, message: PartyInviteMessage) {
+    const inviter = this.state.players.get(client.sessionId);
+    const target = this.state.players.get(message.targetSessionId);
+    if (!inviter || !target || target === inviter) return;
+    if (inviter.partyId && inviter.partyId === target.partyId) return; // already grouped together
+    // Refuse to bridge two already-established (different) parties - merging would require
+    // re-keying every existing member of one side, which this simple model doesn't support.
+    if (inviter.partyId && target.partyId && inviter.partyId !== target.partyId) return;
+
+    const existingPartyId = inviter.partyId || target.partyId;
+    if (existingPartyId && this.countPartyMembers(existingPartyId) >= PARTY_MAX_SIZE) return;
+
+    target.pendingPartyInviteFrom = client.sessionId;
+  }
+
+  private handlePartyRespond(client: Client, message: PartyRespondMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const inviterSessionId = player.pendingPartyInviteFrom;
+    if (!inviterSessionId) return;
+    player.pendingPartyInviteFrom = "";
+    if (!message.accept) return;
+
+    const inviter = this.state.players.get(inviterSessionId);
+    if (!inviter) return; // inviter disconnected between inviting and being accepted
+    if (inviter.partyId && player.partyId && inviter.partyId !== player.partyId) return; // see handlePartyInvite
+
+    // Whichever side already has a party anchors the merge - the inviter usually does, but
+    // e.g. a solo player inviting someone who's already grouped must join THEIR party, not
+    // overwrite it with a fresh one anchored on the inviter.
+    const partyId = inviter.partyId || player.partyId || inviterSessionId;
+    if (this.countPartyMembers(partyId) >= PARTY_MAX_SIZE) return;
+
+    inviter.partyId = partyId;
+    player.partyId = partyId;
+  }
+
+  private handlePartyLeave(client: Client) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+    this.removeFromParty(player);
   }
 
   private maybeDropLoot(x: number, z: number) {
@@ -473,6 +722,57 @@ export class WorldRoom extends Room<WorldState> {
     this.recomputeMaxHp(player);
   }
 
+  private isNearNpc(player: Player, npcId: string): boolean {
+    const npc = NPCS[npcId];
+    if (!npc) return false;
+    return Math.hypot(player.x - npc.x, player.z - npc.z) <= NPC_INTERACT_RADIUS;
+  }
+
+  private handleAcceptQuest(client: Client, message: AcceptQuestMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const quest = QUESTS[message.questId];
+    if (!quest) return;
+    if (player.questProgress.has(quest.id) || player.questCompleted.has(quest.id)) return;
+    if (!this.isNearNpc(player, quest.giverNpcId)) return;
+
+    player.questProgress.set(quest.id, 0);
+  }
+
+  private handleTurnInQuest(client: Client, message: TurnInQuestMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const quest = QUESTS[message.questId];
+    if (!quest) return;
+
+    const progress = player.questProgress.get(quest.id);
+    if (progress === undefined || progress < quest.objectiveCount) return;
+    if (!this.isNearNpc(player, quest.giverNpcId)) return;
+    if (quest.rewardItemId && player.inventory.length >= INVENTORY_SIZE) return;
+
+    player.questProgress.delete(quest.id);
+    player.questCompleted.set(quest.id, Date.now());
+    this.grantXp(player, quest.rewardXp);
+
+    if (quest.rewardItemId) {
+      player.inventory.push(encodeItemToken(quest.rewardItemId, "common"));
+      this.persistItems(client.sessionId);
+    }
+  }
+
+  // Called alongside grantXp from applySpellDamage's kill branch - the single hook point
+  // that already covers instant, AoE, and projectile-resolved enemy kills.
+  private progressQuestKills(player: Player, enemyKind: EnemyKind) {
+    for (const quest of Object.values(QUESTS)) {
+      if (quest.objectiveEnemyKind !== enemyKind) continue;
+      const progress = player.questProgress.get(quest.id);
+      if (progress === undefined || progress >= quest.objectiveCount) continue;
+      player.questProgress.set(quest.id, progress + 1);
+    }
+  }
+
   private grantXp(player: Player, amount: number) {
     player.xp += amount;
 
@@ -481,7 +781,7 @@ export class WorldRoom extends Room<WorldState> {
       player.level += 1;
       player.talentPoints += TALENT_POINTS_PER_LEVEL;
       player.vitality += VITALITY_PER_LEVEL;
-      this.bumpMainStat(player, CLASSES[this.resolveClassId(player.classId)].mainStat, MAIN_STAT_PER_LEVEL);
+      player.mainStat += MAIN_STAT_PER_LEVEL;
       this.recomputeMaxHp(player);
       player.hp = player.maxHp;
     }
@@ -490,8 +790,9 @@ export class WorldRoom extends Room<WorldState> {
   private computePlayerDamage(player: Player, baseDamage: number): number {
     const effective = this.getEffectiveStatsFor(player);
     const talentBonus = this.getTalentBonusFor(player);
-    const statBonus = Math.floor((effective.strength + effective.dexterity + effective.intellect) * DAMAGE_STAT_FACTOR);
-    let damage = (baseDamage + statBonus) * (1 + talentBonus.damagePercent / 100);
+    const ailmentMultiplier = this.getAilmentDamageMultiplier(player);
+    const statBonus = Math.floor(effective.mainStat * DAMAGE_STAT_FACTOR);
+    let damage = (baseDamage + statBonus) * (1 + talentBonus.damagePercent / 100) * ailmentMultiplier;
     const critChance = Math.min(1, critChanceFromLuck(effective.luck) + talentBonus.critChanceBonus / 100);
     if (Math.random() < critChance) {
       damage = damage * CRIT_MULTIPLIER;
@@ -499,11 +800,43 @@ export class WorldRoom extends Room<WorldState> {
     return Math.round(damage);
   }
 
+  // Healing reuses the talent system's damagePercent bucket as a general "spell power"
+  // multiplier rather than introducing a separate heal-only talent effect, since no talent
+  // in the current roster distinguishes the two - simplest thing that could work.
+  private computePlayerHeal(player: Player, baseAmount: number): number {
+    const effective = this.getEffectiveStatsFor(player);
+    const talentBonus = this.getTalentBonusFor(player);
+    const statBonus = Math.floor(effective.mainStat * DAMAGE_STAT_FACTOR);
+    const heal = (baseAmount + statBonus) * (1 + talentBonus.damagePercent / 100);
+    return Math.round(heal);
+  }
+
+  private healPlayer(caster: Player, target: Player, baseAmount: number) {
+    const heal = this.computePlayerHeal(caster, baseAmount);
+    target.hp = Math.min(target.maxHp, target.hp + heal);
+  }
+
+  private applyAilment(player: Player, kind: AilmentKind, durationMs: number) {
+    player.ailments.set(kind, Date.now() + durationMs);
+  }
+
+  private getAilmentDamageMultiplier(player: Player): number {
+    let multiplier = 1;
+    const now = Date.now();
+    for (const [kind, expiresAt] of player.ailments) {
+      if (expiresAt <= now) continue;
+      const def = AILMENTS[kind as AilmentKind];
+      if (def) multiplier *= 1 - def.damagePercent / 100;
+    }
+    return multiplier;
+  }
+
   private killEnemy(enemyId: string) {
     this.state.enemies.delete(enemyId);
     this.lastMeleeAttackAt.delete(enemyId);
     this.lastCasterAttackAt.delete(enemyId);
     this.pendingEnemyCast.delete(enemyId);
+    this.interruptLockoutUntil.delete(enemyId);
 
     const point = SPAWN_POINTS.find((p) => p.id === enemyId);
     if (!point) return;
@@ -517,6 +850,7 @@ export class WorldRoom extends Room<WorldState> {
     player.x = 0;
     player.y = 0;
     player.z = 0;
+    player.ailments.clear();
   }
 
   private tick(dt: number) {
@@ -552,19 +886,22 @@ export class WorldRoom extends Room<WorldState> {
       this.pendingPlayerCast.delete(sessionId);
 
       const player = this.state.players.get(sessionId);
-      if (player) player.castSpellId = 0;
+      if (player) player.castSpellId = "";
       if (!player || player.hp <= 0) continue;
 
       const spell = SPELLS[pending.spellId];
-      const target = this.state.enemies.get(pending.targetId);
-      if (!target || target.hp <= 0) continue; // target gone, cast fizzles
+      if (!spell) continue;
 
-      const damage = this.computePlayerDamage(player, spell.damage);
+      // Re-validate the target is still resolvable - it may have died, disconnected, or
+      // (for ground casts) simply still be a valid point - before applying the effect.
+      const impact = this.resolveImpactPoint(player, pending.target);
+      if (!impact) continue; // target gone, cast fizzles
 
-      if (spell.projectileSpeed) {
-        this.spawnProjectile(player.x, player.z, "player", pending.targetId, damage, spell.projectileSpeed, sessionId);
+      if (spell.projectileSpeed && pending.target.kind === "enemy") {
+        const damage = this.computePlayerDamage(player, spell.amount ?? 0);
+        this.spawnProjectile(player.x, player.z, "player", pending.target.id, damage, spell.projectileSpeed, sessionId);
       } else {
-        this.applySpellDamage(target, damage, pending.targetId, sessionId);
+        this.resolveSpellEffect(player, sessionId, spell, pending.target);
       }
     }
   }
@@ -591,6 +928,7 @@ export class WorldRoom extends Room<WorldState> {
         }
       } else {
         if (this.pendingEnemyCast.has(enemyId)) continue; // already winding up
+        if ((this.interruptLockoutUntil.get(enemyId) ?? 0) > now) continue; // recently interrupted
 
         const stats = ENEMY_STATS.caster;
         const lastAttack = this.lastCasterAttackAt.get(enemyId) ?? 0;
@@ -683,6 +1021,7 @@ export class WorldRoom extends Room<WorldState> {
         if (projectile.source === "enemy") {
           const player = this.state.players.get(projectile.targetId)!;
           this.damagePlayer(projectile.targetId, player, projectile.damage);
+          if (player.hp > 0) this.applyAilment(player, "weaken", AILMENTS.weaken.durationMs);
         } else {
           const enemy = this.state.enemies.get(projectile.targetId)!;
           this.applySpellDamage(enemy, projectile.damage, projectile.targetId, projectile.ownerId);

@@ -19,23 +19,23 @@ model User {
 }
 
 model Character {
-  id            Int             @id @default(autoincrement())
-  user_id       Int
-  user          User            @relation(fields: [user_id], references: [id], onDelete: Cascade)
-  name          String          @unique @db.VarChar(32)
-  class_id      String          @db.VarChar(16)
-  level         Int             @default(1)
-  xp            Int             @default(0)
-  strength      Int
-  dexterity     Int
-  intellect     Int
-  vitality      Int
-  luck          Int
-  armor         Int
-  talent_points Int             @default(0)
-  talent_ranks  Json            @default("{}")
-  created_at    DateTime        @default(now()) @db.Timestamptz(6)
-  items         CharacterItem[]
+  id              Int             @id @default(autoincrement())
+  user_id         Int
+  user            User            @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  name            String          @unique @db.VarChar(32)
+  class_id        String          @db.VarChar(16)
+  level           Int             @default(1)
+  xp              Int             @default(0)
+  main_stat       Int
+  vitality        Int
+  luck            Int
+  armor           Int
+  talent_points   Int             @default(0)
+  talent_ranks    Json            @default("{}")
+  quest_progress  Json            @default("{}")
+  quest_completed Json            @default("{}")
+  created_at      DateTime        @default(now()) @db.Timestamptz(6)
+  items           CharacterItem[]
 
   @@map("characters")
 }

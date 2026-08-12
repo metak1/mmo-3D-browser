@@ -12,19 +12,18 @@ export interface InputMessage {
 
 export type EnemyKind = "melee" | "caster";
 
+// A character only ever has one relevant combat stat - whichever CLASSES[classId].mainStat
+// names (strength/dexterity/intellect). That identity is metadata for display labeling only;
+// the actual value lives in this one field, not three parallel ones.
 export interface PlayerStats {
-  strength: number;
-  dexterity: number;
-  intellect: number;
+  mainStat: number;
   vitality: number;
   luck: number;
   armor: number;
 }
 
 export const BASE_STATS: PlayerStats = {
-  strength: 5,
-  dexterity: 5,
-  intellect: 5,
+  mainStat: 5,
   vitality: 10,
   luck: 5,
   armor: 0,
@@ -55,7 +54,7 @@ export const CLASSES: Record<ClassId, ClassDef> = {
 export const DEFAULT_CLASS_ID: ClassId = "warrior";
 export const MAIN_STAT_START_BONUS = 5; // extra points in your class's main stat at level 1
 
-export const DAMAGE_STAT_FACTOR = 0.3; // flat damage bonus = floor((str+dex+int) * factor)
+export const DAMAGE_STAT_FACTOR = 0.3; // flat damage/heal bonus = floor(mainStat * factor)
 export const CRIT_PER_LUCK = 1.5; // % crit chance per luck point
 export const MAX_CRIT_CHANCE = 75; // %
 export const CRIT_MULTIPLIER = 1.5;
@@ -73,22 +72,231 @@ export function critChanceFromLuck(luck: number): number {
   return Math.min(MAX_CRIT_CHANCE, luck * CRIT_PER_LUCK) / 100;
 }
 
-export type SpellId = 1 | 2 | 3;
+export type SpellId = string;
+
+export type SpellTargetType = "enemy" | "ally" | "self" | "ground";
+export type SpellEffectType = "damage" | "heal" | "dispel" | "interrupt";
 
 export interface SpellDef {
+  id: SpellId;
+  classId: ClassId;
   name: string;
-  damage: number;
+  description: string;
+  effectType: SpellEffectType;
+  targetType: SpellTargetType;
+  amount?: number; // damage or heal magnitude (base, before stat/talent/ailment scaling); unused by dispel/interrupt
+  aoeRadius?: number; // when set, the effect applies to every valid unit within this radius of the impact point
+  interruptsCast?: boolean; // secondary modifier - cancels the target's pending cast, independent of effectType
   cooldownMs: number;
-  range: number;
   castTimeMs: number;
-  projectileSpeed?: number;
+  range: number;
+  projectileSpeed?: number; // only used when castTimeMs > 0 (cast-time spells may travel as a projectile)
 }
 
-export const SPELLS: Record<SpellId, SpellDef> = {
-  1: { name: "Bolt", damage: 8, cooldownMs: 800, range: 8, castTimeMs: 0 },
-  2: { name: "Strike", damage: 20, cooldownMs: 2500, range: 6, castTimeMs: 0 },
-  3: { name: "Fireball", damage: 30, cooldownMs: 4000, range: 10, castTimeMs: 1500, projectileSpeed: 8 },
-};
+function spell(def: Omit<SpellDef, "id"> & { slug: string }): SpellDef {
+  const { slug, ...rest } = def;
+  return { id: `${def.classId}_${slug}`, ...rest };
+}
+
+export const SPELLS: Record<SpellId, SpellDef> = Object.fromEntries(
+  [
+    // Warrior
+    spell({
+      classId: "warrior",
+      slug: "slash",
+      name: "Slash",
+      description: "A quick, brutal cut.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 14,
+      cooldownMs: 1200,
+      range: 2.5,
+      castTimeMs: 0,
+    }),
+    spell({
+      classId: "warrior",
+      slug: "shield_bash",
+      name: "Shield Bash",
+      description: "Slams a foe with your shield, breaking their concentration.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 6,
+      interruptsCast: true,
+      cooldownMs: 6000,
+      range: 2.5,
+      castTimeMs: 0,
+    }),
+    spell({
+      classId: "warrior",
+      slug: "whirlwind",
+      name: "Whirlwind",
+      description: "Spin and strike every enemy in reach.",
+      effectType: "damage",
+      targetType: "self",
+      amount: 10,
+      aoeRadius: 4,
+      cooldownMs: 4000,
+      range: 4,
+      castTimeMs: 0,
+    }),
+
+    // Rogue
+    spell({
+      classId: "rogue",
+      slug: "backstab",
+      name: "Backstab",
+      description: "A blade in exactly the wrong place.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 16,
+      cooldownMs: 1200,
+      range: 2.5,
+      castTimeMs: 0,
+    }),
+    spell({
+      classId: "rogue",
+      slug: "garrote",
+      name: "Garrote",
+      description: "Chokes off a foe's breath, and their spell.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 6,
+      interruptsCast: true,
+      cooldownMs: 6000,
+      range: 2.5,
+      castTimeMs: 0,
+    }),
+    spell({
+      classId: "rogue",
+      slug: "fan_of_knives",
+      name: "Fan of Knives",
+      description: "A spray of blades around your target.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 10,
+      aoeRadius: 4,
+      cooldownMs: 4000,
+      range: 2.5,
+      castTimeMs: 0,
+    }),
+
+    // Ranger
+    spell({
+      classId: "ranger",
+      slug: "aimed_shot",
+      name: "Aimed Shot",
+      description: "A carefully placed arrow.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 18,
+      cooldownMs: 1500,
+      range: 9,
+      castTimeMs: 400,
+      projectileSpeed: 12,
+    }),
+    spell({
+      classId: "ranger",
+      slug: "disabling_shot",
+      name: "Disabling Shot",
+      description: "Pins a caster's hands before they finish the gesture.",
+      effectType: "interrupt",
+      targetType: "enemy",
+      cooldownMs: 6000,
+      range: 9,
+      castTimeMs: 0,
+    }),
+    spell({
+      classId: "ranger",
+      slug: "explosive_trap",
+      name: "Explosive Trap",
+      description: "Rigs a patch of ground to blow.",
+      effectType: "damage",
+      targetType: "ground",
+      amount: 16,
+      aoeRadius: 3,
+      cooldownMs: 5000,
+      range: 8,
+      castTimeMs: 500,
+    }),
+
+    // Oracle
+    spell({
+      classId: "oracle",
+      slug: "smite",
+      name: "Smite",
+      description: "A bolt of judgment.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 14,
+      cooldownMs: 1500,
+      range: 9,
+      castTimeMs: 300,
+      projectileSpeed: 10,
+    }),
+    spell({
+      classId: "oracle",
+      slug: "renew",
+      name: "Renew",
+      description: "Knits flesh and spirit back together. Heals yourself if no ally is targeted.",
+      effectType: "heal",
+      targetType: "ally",
+      amount: 20,
+      cooldownMs: 3000,
+      range: 8,
+      castTimeMs: 800,
+    }),
+    spell({
+      classId: "oracle",
+      slug: "cleanse",
+      name: "Cleanse",
+      description: "Washes away ailments afflicting an ally (or yourself).",
+      effectType: "dispel",
+      targetType: "ally",
+      cooldownMs: 8000,
+      range: 8,
+      castTimeMs: 0,
+    }),
+
+    // Mage
+    spell({
+      classId: "mage",
+      slug: "frostbolt",
+      name: "Frostbolt",
+      description: "A shard of ice, slow to arrive and hard to forgive.",
+      effectType: "damage",
+      targetType: "enemy",
+      amount: 22,
+      cooldownMs: 2000,
+      range: 9,
+      castTimeMs: 1000,
+      projectileSpeed: 9,
+    }),
+    spell({
+      classId: "mage",
+      slug: "blizzard",
+      name: "Blizzard",
+      description: "Calls down a storm over a patch of ground.",
+      effectType: "damage",
+      targetType: "ground",
+      amount: 18,
+      aoeRadius: 3.5,
+      cooldownMs: 6000,
+      range: 9,
+      castTimeMs: 1200,
+    }),
+    spell({
+      classId: "mage",
+      slug: "counterspell",
+      name: "Counterspell",
+      description: "Unravels a spell before it finishes forming.",
+      effectType: "interrupt",
+      targetType: "enemy",
+      cooldownMs: 8000,
+      range: 9,
+      castTimeMs: 0,
+    }),
+  ].map((def) => [def.id, def]),
+);
 
 export const ENEMY_STATS = {
   melee: { maxHp: 40, damage: 8, range: 1.8, intervalMs: 1500 },
@@ -101,9 +309,19 @@ export const ENEMY_RESPAWN_MS = 6000;
 
 export const PROJECTILE_MAX_LIFETIME_MS = 4000;
 
+export type AilmentKind = "weaken";
+
+export const AILMENTS: Record<AilmentKind, { damagePercent: number; durationMs: number }> = {
+  weaken: { damagePercent: 20, durationMs: 8000 },
+};
+
+export const INTERRUPT_LOCKOUT_MS = 3000;
+
 export interface CastMessage {
   spellId: SpellId;
-  targetId: string;
+  targetId?: string;
+  targetX?: number;
+  targetZ?: number;
 }
 
 export type EquipSlot = "weapon" | "armor" | "trinket";
@@ -120,21 +338,21 @@ export const ITEMS: Record<string, ItemDef> = {
   rusty_sword: {
     name: "Rusty Sword",
     slot: "weapon",
-    bonuses: { strength: 3 },
+    bonuses: { mainStat: 3 },
     icon: "🗡️",
     description: "Pitted and dull, but it still holds an edge.",
   },
   hunting_bow: {
     name: "Hunting Bow",
     slot: "weapon",
-    bonuses: { dexterity: 3 },
+    bonuses: { mainStat: 3 },
     icon: "🏹",
     description: "Favored by scouts for its light draw weight.",
   },
   apprentice_wand: {
     name: "Apprentice Wand",
     slot: "weapon",
-    bonuses: { intellect: 3 },
+    bonuses: { mainStat: 3 },
     icon: "🪄",
     description: "A first wand, worn smooth by nervous hands.",
   },
@@ -155,7 +373,7 @@ export const ITEMS: Record<string, ItemDef> = {
   padded_robe: {
     name: "Padded Robe",
     slot: "armor",
-    bonuses: { vitality: 3, intellect: 1 },
+    bonuses: { vitality: 3, mainStat: 1 },
     icon: "👘",
     description: "Woven with faint warding sigils along the hem.",
   },
@@ -169,7 +387,7 @@ export const ITEMS: Record<string, ItemDef> = {
   signet_ring: {
     name: "Signet Ring",
     slot: "trinket",
-    bonuses: { strength: 2, dexterity: 2 },
+    bonuses: { mainStat: 4 },
     icon: "💍",
     description: "A minor house crest, edges worn smooth.",
   },
@@ -392,4 +610,73 @@ export function getTalentBonus(classId: ClassId, talentRanks: Iterable<[string, 
 
 export interface SpendTalentMessage {
   talentId: string;
+}
+
+export const NPC_INTERACT_RADIUS = 3; // mirrors LOOT_PICKUP_RADIUS
+
+export interface NpcDef {
+  id: string;
+  name: string;
+  x: number;
+  z: number;
+  questIds: string[];
+}
+
+export const NPCS: Record<string, NpcDef> = {
+  quest_giver: { id: "quest_giver", name: "Weary Quartermaster", x: 0, z: -3, questIds: ["kill_melee_3", "kill_caster_3"] },
+};
+
+export type QuestId = string;
+
+export interface QuestDef {
+  id: QuestId;
+  name: string;
+  description: string;
+  giverNpcId: string;
+  objectiveEnemyKind: EnemyKind;
+  objectiveCount: number;
+  rewardXp: number;
+  rewardItemId?: string;
+}
+
+export const QUESTS: Record<QuestId, QuestDef> = {
+  kill_melee_3: {
+    id: "kill_melee_3",
+    name: "Thin the Ranks",
+    description: "Melee attackers keep probing the perimeter. Kill 3 of them.",
+    giverNpcId: "quest_giver",
+    objectiveEnemyKind: "melee",
+    objectiveCount: 3,
+    rewardXp: 150,
+    rewardItemId: "lucky_charm",
+  },
+  kill_caster_3: {
+    id: "kill_caster_3",
+    name: "Silence the Casters",
+    description: "Enemy casters are the bigger threat. Kill 3 of them.",
+    giverNpcId: "quest_giver",
+    objectiveEnemyKind: "caster",
+    objectiveCount: 3,
+    rewardXp: 200,
+    rewardItemId: "signet_ring",
+  },
+};
+
+export interface AcceptQuestMessage {
+  questId: QuestId;
+}
+
+export interface TurnInQuestMessage {
+  questId: QuestId;
+}
+
+export const PARTY_MAX_SIZE = 5;
+export const PARTY_XP_SHARE_RADIUS = 15; // must be roughly in the same area of the map, not just "logged in"
+
+export interface PartyInviteMessage {
+  targetSessionId: string;
+}
+
+export interface PartyRespondMessage {
+  accept: boolean;
 }

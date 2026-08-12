@@ -1,11 +1,8 @@
-import { BASE_STATS, CLASSES, ClassId, MAIN_STAT_START_BONUS, PlayerStats } from "@mmo/shared";
+import { BASE_STATS, ClassId, MAIN_STAT_START_BONUS, PlayerStats } from "@mmo/shared";
 import { prisma } from "./client.js";
 
-export function createInitialStats(classId: ClassId): PlayerStats {
-  const stats: PlayerStats = { ...BASE_STATS };
-  const mainStat = CLASSES[classId].mainStat;
-  stats[mainStat] += MAIN_STAT_START_BONUS;
-  return stats;
+export function createInitialStats(): PlayerStats {
+  return { ...BASE_STATS, mainStat: BASE_STATS.mainStat + MAIN_STAT_START_BONUS };
 }
 
 export interface CharacterRow {
@@ -15,14 +12,14 @@ export interface CharacterRow {
   class_id: string;
   level: number;
   xp: number;
-  strength: number;
-  dexterity: number;
-  intellect: number;
+  main_stat: number;
   vitality: number;
   luck: number;
   armor: number;
   talent_points: number;
   talent_ranks: unknown;
+  quest_progress: unknown;
+  quest_completed: unknown;
   created_at: Date;
 }
 
@@ -42,15 +39,13 @@ export async function findCharacterByName(name: string): Promise<CharacterRow | 
 }
 
 export async function createCharacter(userId: number, name: string, classId: ClassId): Promise<CharacterRow> {
-  const stats = createInitialStats(classId);
+  const stats = createInitialStats();
   return prisma.character.create({
     data: {
       user_id: userId,
       name,
       class_id: classId,
-      strength: stats.strength,
-      dexterity: stats.dexterity,
-      intellect: stats.intellect,
+      main_stat: stats.mainStat,
       vitality: stats.vitality,
       luck: stats.luck,
       armor: stats.armor,
@@ -66,6 +61,8 @@ export async function saveCharacterProgress(
     stats: PlayerStats;
     talentPoints: number;
     talentRanks: Record<string, number>;
+    questProgress: Record<string, number>;
+    questCompleted: Record<string, number>;
   },
 ): Promise<void> {
   await prisma.character.update({
@@ -73,14 +70,14 @@ export async function saveCharacterProgress(
     data: {
       level: progress.level,
       xp: progress.xp,
-      strength: progress.stats.strength,
-      dexterity: progress.stats.dexterity,
-      intellect: progress.stats.intellect,
+      main_stat: progress.stats.mainStat,
       vitality: progress.stats.vitality,
       luck: progress.stats.luck,
       armor: progress.stats.armor,
       talent_points: progress.talentPoints,
       talent_ranks: progress.talentRanks,
+      quest_progress: progress.questProgress,
+      quest_completed: progress.questCompleted,
     },
   });
 }

@@ -10,14 +10,13 @@ export class Player extends Schema {
   @type("number") rotationY = 0;
   @type("number") hp = BASE_MAX_HP;
   @type("number") maxHp = BASE_MAX_HP;
-  @type("number") castSpellId = 0;
+  @type("string") castSpellId = "";
 
+  @type("string") name = "";
   @type("string") classId: string = DEFAULT_CLASS_ID;
   @type("number") level = 1;
   @type("number") xp = 0;
-  @type("number") strength = BASE_STATS.strength;
-  @type("number") dexterity = BASE_STATS.dexterity;
-  @type("number") intellect = BASE_STATS.intellect;
+  @type("number") mainStat = BASE_STATS.mainStat;
   @type("number") vitality = BASE_STATS.vitality;
   @type("number") luck = BASE_STATS.luck;
   @type("number") armor = BASE_STATS.armor;
@@ -29,6 +28,16 @@ export class Player extends Schema {
 
   @type("number") talentPoints = 0;
   @type({ map: "number" }) talentRanks = new MapSchema<number>();
+
+  @type({ map: "number" }) ailments = new MapSchema<number>(); // ailment kind -> expiresAt (epoch ms)
+
+  @type({ map: "number" }) questProgress = new MapSchema<number>(); // questId -> kill count
+  @type({ map: "number" }) questCompleted = new MapSchema<number>(); // questId -> completedAt (epoch ms)
+
+  // partyId is the session id of whichever player anchored the group (first inviter);
+  // two players are grouped iff both have the same non-empty partyId - no separate Party object.
+  @type("string") partyId = "";
+  @type("string") pendingPartyInviteFrom = ""; // sessionId of pending inviter, or ""
 }
 
 export class Enemy extends Schema {

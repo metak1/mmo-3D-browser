@@ -60,7 +60,7 @@ export function makeDraggable(panel: HTMLElement, key: string) {
 
   panel.addEventListener("mousedown", (event) => {
     if (locked) return;
-    if ((event.target as HTMLElement).closest("[data-lock]")) return;
+    if ((event.target as HTMLElement).closest("[data-lock], [data-no-drag]")) return;
 
     const rect = panel.getBoundingClientRect();
     pinToTopLeft(panel, rect.left, rect.top);

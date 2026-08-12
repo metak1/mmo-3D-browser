@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MMO 3D Navigateur</title>
     <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
       html, body {
         margin: 0;
         padding: 0;
@@ -395,6 +400,35 @@
         font-style: italic;
         font-size: 11px;
       }
+      .context-menu {
+        position: fixed;
+        z-index: 55;
+        min-width: 160px;
+        padding: 4px;
+        background: rgba(10, 10, 16, 0.96);
+        border: 2px solid #4a5578;
+        border-radius: 6px;
+        font: 12px/1.4 -apple-system, system-ui, sans-serif;
+      }
+      .context-menu[hidden] {
+        display: none;
+      }
+      .context-menu-item {
+        display: block;
+        width: 100%;
+        padding: 6px 10px;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: #e6e6e6;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .context-menu-item:hover {
+        background: rgba(255, 255, 255, 0.12);
+        color: #fff6d5;
+      }
       #loot-window {
         left: auto;
         right: 12px;
@@ -459,6 +493,74 @@
         font-size: 10px;
         color: #a7b0c8;
       }
+      .quest-objective {
+        display: block;
+        margin-top: 2px;
+        font-size: 10px;
+        font-weight: 600;
+        color: #c9a63c;
+      }
+      #npc-dialogue-panel {
+        left: auto;
+        right: 300px;
+        top: 48px;
+        width: 260px;
+      }
+      #npc-dialogue-panel[hidden] {
+        display: none;
+      }
+      #quest-log-panel {
+        left: auto;
+        right: 12px;
+        top: 620px;
+        width: 260px;
+      }
+      #quest-log-panel[hidden] {
+        display: none;
+      }
+      #party-panel {
+        top: 660px;
+      }
+      #party-panel[hidden] {
+        display: none;
+      }
+      .party-member-row {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        width: 100%;
+        padding: 5px 8px;
+        border: 1px solid #4a5578;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.3);
+        color: #e6e6e6;
+        font: inherit;
+        font-size: 11px;
+        text-align: left;
+        cursor: pointer;
+      }
+      .party-member-row:hover {
+        border-color: #c9a63c;
+        background: rgba(40, 36, 20, 0.5);
+      }
+      .party-member-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+      .party-member-bar {
+        height: 8px;
+        margin-top: 0;
+      }
+      #party-invite-prompt {
+        left: auto;
+        right: 300px;
+        top: 48px;
+        width: 220px;
+      }
+      #party-invite-prompt[hidden] {
+        display: none;
+      }
       .loot-actions {
         display: flex;
         gap: 6px;
@@ -520,6 +622,18 @@
         height: 0%;
         background: rgba(0, 0, 0, 0.65);
       }
+      .ailment-tag {
+        margin-top: 4px;
+        font-size: 10px;
+        color: #e0503c;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      }
+      .ailment-tag[hidden] {
+        display: none;
+      }
+      #app.ground-target-pending canvas {
+        cursor: crosshair;
+      }
     </style>
   </head>
   <body>
@@ -575,6 +689,7 @@
         <div class="bar-fill" data-player-hp-fill></div>
         <span class="bar-label" data-player-hp-label></span>
       </div>
+      <div class="ailment-tag" data-player-ailments hidden></div>
       <div class="bar cast-bar" data-player-cast-bar hidden>
         <div class="bar-fill" data-player-cast-fill></div>
         <span class="bar-label" data-player-cast-label></span>
@@ -586,9 +701,7 @@
       <div class="unit-name">Character</div>
       <div class="stat-row"><span class="stat-label">Class</span><span data-character-class></span></div>
       <div class="stat-grid">
-        <div class="stat-row"><span class="stat-label">Strength</span><span data-stat-strength></span></div>
-        <div class="stat-row"><span class="stat-label">Dexterity</span><span data-stat-dexterity></span></div>
-        <div class="stat-row"><span class="stat-label">Intellect</span><span data-stat-intellect></span></div>
+        <div class="stat-row"><span class="stat-label" data-stat-main-label>Main Stat</span><span data-stat-main></span></div>
         <div class="stat-row"><span class="stat-label">Vitality</span><span data-stat-vitality></span></div>
         <div class="stat-row"><span class="stat-label">Luck</span><span data-stat-luck></span></div>
         <div class="stat-row"><span class="stat-label">Armor</span><span data-stat-armor></span></div>
@@ -622,11 +735,30 @@
       <div class="talent-list" id="talent-list"></div>
     </div>
 
+    <div id="npc-dialogue-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name" data-npc-dialogue-name></div>
+      <div class="talent-list" id="npc-dialogue-quests"></div>
+      <button type="button" class="overlay-button" data-npc-dialogue-close style="margin-top: 8px; width: 100%">
+        Close
+      </button>
+    </div>
+
+    <div id="quest-log-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Quest Log</div>
+      <div class="item-list" id="quest-log-list"></div>
+    </div>
+
     <div id="item-tooltip" class="item-tooltip" hidden>
       <div class="item-tooltip-name" data-tooltip-name></div>
       <div class="item-tooltip-slot" data-tooltip-slot></div>
       <div class="item-tooltip-stats" data-tooltip-stats></div>
       <div class="item-tooltip-desc" data-tooltip-desc></div>
+    </div>
+
+    <div id="context-menu" class="context-menu" hidden>
+      <div id="context-menu-list"></div>
     </div>
 
     <div id="loot-window" class="unit-panel" hidden>
@@ -652,24 +784,42 @@
       </div>
     </div>
 
+    <div id="party-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Party</div>
+      <div class="item-list" id="party-member-list" data-no-drag></div>
+      <button type="button" class="overlay-button" data-party-leave style="margin-top: 8px; width: 100%">
+        Leave Party
+      </button>
+    </div>
+
+    <div id="party-invite-prompt" class="unit-panel" hidden>
+      <div class="unit-name">Party Invite</div>
+      <div data-party-invite-text style="font-size: 12px; margin-bottom: 8px"></div>
+      <div class="loot-actions">
+        <button type="button" class="overlay-button" data-party-invite-accept>Accept</button>
+        <button type="button" class="overlay-button" data-party-invite-decline>Decline</button>
+      </div>
+    </div>
+
     <div id="spell-panel" class="unit-panel">
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <div class="unit-name">Spells</div>
       <div id="hotbar">
-        <div class="spell-slot" data-spell="1">
+        <div class="spell-slot" data-slot="0">
           <span class="key">1</span>
+          <div class="cooldown" data-cooldown="0"></div>
+          <span class="name" data-name="0"></span>
+        </div>
+        <div class="spell-slot" data-slot="1">
+          <span class="key">2</span>
           <div class="cooldown" data-cooldown="1"></div>
           <span class="name" data-name="1"></span>
         </div>
-        <div class="spell-slot" data-spell="2">
-          <span class="key">2</span>
+        <div class="spell-slot" data-slot="2">
+          <span class="key">3</span>
           <div class="cooldown" data-cooldown="2"></div>
           <span class="name" data-name="2"></span>
-        </div>
-        <div class="spell-slot" data-spell="3">
-          <span class="key">3</span>
-          <div class="cooldown" data-cooldown="3"></div>
-          <span class="name" data-name="3"></span>
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { Room } from "colyseus.js";
 import {
+  AcceptQuestMessage,
   CastMessage,
   CLASSES,
   ClassId,
@@ -13,14 +14,23 @@ import {
   ITEMS,
   LootTakeMessage,
   MAP_HALF_EXTENT,
+  MainStat,
+  NPCS,
+  NpcDef,
+  PARTY_MAX_SIZE,
   PLAYER_SPEED,
+  PartyInviteMessage,
+  PartyRespondMessage,
   PlayerStats,
+  QUESTS,
+  QuestDef,
   RARITY_COLOR,
   RARITY_MULTIPLIER,
   SPELLS,
   SpellId,
   SpendTalentMessage,
   TALENTS,
+  TurnInQuestMessage,
   UnequipMessage,
   decodeItemToken,
   getEffectiveStats,
@@ -29,6 +39,7 @@ import {
 import { GameScene } from "./game/Scene";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
+import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
 import { ProjectileAvatar } from "./game/Projectile";
 import { LootBagAvatar } from "./game/LootBagAvatar";
 import { InputController } from "./game/InputController";
@@ -45,13 +56,15 @@ const ENEMY_PROJECTILE_EMISSIVE = 0x8a2fb0;
 const INPUT_SEND_INTERVAL_MS = 1000 / 20;
 const SERVER_RECONCILE_LERP = 0.02;
 const RECONCILE_SNAP_DISTANCE = 3; // large corrections (e.g. death/respawn teleport) snap instead of creeping
-const SPELL_IDS: SpellId[] = [1, 2, 3];
+const HOTBAR_SLOT_COUNT = 3;
+const AILMENT_LABELS: Record<string, string> = { weaken: "Weakened" };
 
 const hud = document.getElementById("hud")!;
 const container = document.getElementById("app")!;
 
 const playerHpFill = document.querySelector<HTMLElement>("[data-player-hp-fill]")!;
 const playerHpLabel = document.querySelector<HTMLElement>("[data-player-hp-label]")!;
+const playerAilmentsEl = document.querySelector<HTMLElement>("[data-player-ailments]")!;
 const playerCastBarEl = document.querySelector<HTMLElement>("[data-player-cast-bar]")!;
 const playerCastFill = document.querySelector<HTMLElement>("[data-player-cast-fill]")!;
 const playerCastLabel = document.querySelector<HTMLElement>("[data-player-cast-label]")!;
@@ -63,19 +76,23 @@ const targetHpLabel = document.querySelector<HTMLElement>("[data-target-hp-label
 const targetCastBarEl = document.querySelector<HTMLElement>("[data-target-cast-bar]")!;
 const targetCastFill = document.querySelector<HTMLElement>("[data-target-cast-fill]")!;
 
+const partyPanel = document.getElementById("party-panel")!;
+const partyMemberListEl = document.getElementById("party-member-list")!;
+const partyInvitePromptEl = document.getElementById("party-invite-prompt")!;
+const partyInviteTextEl = document.querySelector<HTMLElement>("[data-party-invite-text]")!;
+
 const playerLevelEl = document.querySelector<HTMLElement>("[data-player-level]")!;
 const playerClassEl = document.querySelector<HTMLElement>("[data-player-class]")!;
 const characterClassEl = document.querySelector<HTMLElement>("[data-character-class]")!;
 const xpFill = document.querySelector<HTMLElement>("[data-xp-fill]")!;
 const xpLabel = document.querySelector<HTMLElement>("[data-xp-label]")!;
 const statEls = {
-  strength: document.querySelector<HTMLElement>("[data-stat-strength]")!,
-  dexterity: document.querySelector<HTMLElement>("[data-stat-dexterity]")!,
-  intellect: document.querySelector<HTMLElement>("[data-stat-intellect]")!,
+  mainStat: document.querySelector<HTMLElement>("[data-stat-main]")!,
   vitality: document.querySelector<HTMLElement>("[data-stat-vitality]")!,
   luck: document.querySelector<HTMLElement>("[data-stat-luck]")!,
   armor: document.querySelector<HTMLElement>("[data-stat-armor]")!,
 };
+const mainStatLabelEl = document.querySelector<HTMLElement>("[data-stat-main-label]")!;
 
 const equipRowEls: Record<EquipSlot, HTMLElement> = {
   weapon: document.querySelector<HTMLElement>('[data-equip-row="weapon"]')!,
@@ -93,20 +110,82 @@ const talentPanel = document.getElementById("talent-panel")!;
 const talentListEl = document.getElementById("talent-list")!;
 const talentPointsEl = document.querySelector<HTMLElement>("[data-talent-points]")!;
 
+const npcDialoguePanel = document.getElementById("npc-dialogue-panel")!;
+const npcDialogueNameEl = document.querySelector<HTMLElement>("[data-npc-dialogue-name]")!;
+const npcDialogueQuestsEl = document.getElementById("npc-dialogue-quests")!;
+const questLogPanel = document.getElementById("quest-log-panel")!;
+const questLogListEl = document.getElementById("quest-log-list")!;
+
 const itemTooltipEl = document.getElementById("item-tooltip")!;
 const itemTooltipNameEl = document.querySelector<HTMLElement>("[data-tooltip-name]")!;
 const itemTooltipSlotEl = document.querySelector<HTMLElement>("[data-tooltip-slot]")!;
 const itemTooltipStatsEl = document.querySelector<HTMLElement>("[data-tooltip-stats]")!;
 const itemTooltipDescEl = document.querySelector<HTMLElement>("[data-tooltip-desc]")!;
 
-const STAT_LABELS: Record<keyof PlayerStats, string> = {
-  strength: "Strength",
-  dexterity: "Dexterity",
-  intellect: "Intellect",
+const contextMenuEl = document.getElementById("context-menu")!;
+const contextMenuListEl = document.getElementById("context-menu-list")!;
+
+interface ContextMenuAction {
+  label: string;
+  onClick: () => void;
+}
+
+function closeContextMenu() {
+  contextMenuEl.hidden = true;
+  contextMenuListEl.innerHTML = "";
+}
+
+function openContextMenu(x: number, y: number, actions: ContextMenuAction[]) {
+  contextMenuListEl.innerHTML = "";
+  for (const action of actions) {
+    const btn = document.createElement("button");
+    btn.className = "context-menu-item";
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => {
+      action.onClick();
+      closeContextMenu();
+    });
+    contextMenuListEl.appendChild(btn);
+  }
+
+  contextMenuEl.hidden = false;
+  const maxLeft = window.innerWidth - contextMenuEl.offsetWidth - 8;
+  const maxTop = window.innerHeight - contextMenuEl.offsetHeight - 8;
+  contextMenuEl.style.left = `${Math.min(x, Math.max(8, maxLeft))}px`;
+  contextMenuEl.style.top = `${Math.min(y, Math.max(8, maxTop))}px`;
+}
+
+// A regular left-click anywhere outside the menu dismisses it - a separate event from the
+// right-click that opens it, so this never races with openContextMenu.
+document.addEventListener("click", (event) => {
+  if (!contextMenuEl.hidden && !contextMenuEl.contains(event.target as Node)) closeContextMenu();
+});
+
+const STAT_LABELS: Record<Exclude<keyof PlayerStats, "mainStat">, string> = {
   vitality: "Vitality",
   luck: "Luck",
   armor: "Armor",
 };
+
+const MAIN_STAT_NAME: Record<MainStat, string> = {
+  strength: "Strength",
+  dexterity: "Dexterity",
+  intellect: "Intellect",
+};
+
+// showItemTooltip is module-scoped (outside main()) so it can't see main()'s local
+// `localPlayerSchema` - this tracks the local player's class id at module scope instead,
+// set once main() knows it, purely so item tooltips can label a mainStat bonus correctly
+// (e.g. "+3 Intellect" for an Oracle looking at a weapon, regardless of that weapon's flavor).
+let localClassId: ClassId | null = null;
+
+function labelForStat(stat: keyof PlayerStats): string {
+  if (stat === "mainStat") {
+    const mainStat = localClassId ? CLASSES[localClassId].mainStat : null;
+    return mainStat ? MAIN_STAT_NAME[mainStat] : "Main Stat";
+  }
+  return STAT_LABELS[stat];
+}
 
 function positionItemTooltip(event: MouseEvent) {
   const offset = 16;
@@ -126,7 +205,7 @@ function showItemTooltip(token: string, event: MouseEvent) {
   itemTooltipNameEl.style.color = RARITY_COLOR[rarity];
   itemTooltipSlotEl.textContent = capitalize(item.slot);
   itemTooltipStatsEl.innerHTML = Object.entries(item.bonuses)
-    .map(([stat, value]) => `<span>+${Math.round((value ?? 0) * multiplier)} ${STAT_LABELS[stat as keyof PlayerStats]}</span>`)
+    .map(([stat, value]) => `<span>+${Math.round((value ?? 0) * multiplier)} ${labelForStat(stat as keyof PlayerStats)}</span>`)
     .join("");
   itemTooltipDescEl.textContent = item.description;
 
@@ -166,6 +245,9 @@ makeDraggable(document.getElementById("xp-panel")!, "xp");
 makeDraggable(inventoryPanel, "inventory");
 makeDraggable(lootWindow, "loot");
 makeDraggable(talentPanel, "talents");
+makeDraggable(npcDialoguePanel, "npc-dialogue");
+makeDraggable(questLogPanel, "quest-log");
+makeDraggable(partyPanel, "party");
 
 // Set once main() establishes a connection; the equip/unequip/inventory click handlers
 // below are bound once at module scope (their DOM elements are static), so they read
@@ -184,9 +266,7 @@ interface PlayerStatsSnapshot {
   classId: string;
   level: number;
   xp: number;
-  strength: number;
-  dexterity: number;
-  intellect: number;
+  mainStat: number;
   vitality: number;
   luck: number;
   armor: number;
@@ -196,6 +276,8 @@ interface PlayerStatsSnapshot {
   inventory: Iterable<string>;
   talentPoints: number;
   talentRanks: Iterable<[string, number]>;
+  questProgress: Iterable<[string, number]>;
+  questCompleted: Iterable<[string, number]>;
 }
 
 function renderEquipment(player: PlayerStatsSnapshot) {
@@ -284,9 +366,7 @@ function updateCharacterPanel(player: PlayerStatsSnapshot) {
 
   const effective = getEffectiveStats(
     {
-      strength: player.strength,
-      dexterity: player.dexterity,
-      intellect: player.intellect,
+      mainStat: player.mainStat,
       vitality: player.vitality,
       luck: player.luck,
       armor: player.armor,
@@ -294,9 +374,9 @@ function updateCharacterPanel(player: PlayerStatsSnapshot) {
     { weapon: player.equippedWeapon, armor: player.equippedArmor, trinket: player.equippedTrinket },
   );
 
-  statEls.strength.textContent = `${effective.strength}`;
-  statEls.dexterity.textContent = `${effective.dexterity}`;
-  statEls.intellect.textContent = `${effective.intellect}`;
+  const mainStat = CLASSES[player.classId as ClassId]?.mainStat;
+  mainStatLabelEl.textContent = mainStat ? MAIN_STAT_NAME[mainStat] : "Main Stat";
+  statEls.mainStat.textContent = `${effective.mainStat}`;
   statEls.vitality.textContent = `${effective.vitality}`;
   statEls.luck.textContent = `${effective.luck}`;
   statEls.armor.textContent = `${effective.armor}`;
@@ -324,18 +404,46 @@ async function main(token: string, characterId: number) {
   const avatars = new Map<string, PlayerAvatar>();
   const enemies = new Map<string, EnemyAvatar>();
   const enemySchemaById = new Map<string, { kind: string; hp: number; maxHp: number; isCasting: boolean }>();
+  const playerSchemaById = new Map<
+    string,
+    {
+      name: string;
+      classId: string;
+      level: number;
+      hp: number;
+      maxHp: number;
+      castSpellId: string;
+      ailments: Iterable<[string, number]>;
+      partyId: string;
+      pendingPartyInviteFrom: string;
+    }
+  >();
   const projectiles = new Map<string, ProjectileAvatar>();
   const lootBags = new Map<string, LootBagAvatar>();
   const lootBagSchemaById = new Map<string, { x: number; z: number; items: Iterable<string> }>();
+
+  // NPCs are static shared data (no hp, never move), so they're spawned once from NPCS
+  // rather than synced through room state like enemies/players/loot bags.
+  const npcs = new Map<string, NpcAvatar>();
+  for (const def of Object.values(NPCS)) {
+    const avatar = new NpcAvatar();
+    avatar.group.userData.npcId = def.id;
+    avatar.setPosition(def.x, def.z);
+    avatar.addTo(gameScene.scene);
+    npcs.set(def.id, avatar);
+  }
 
   let room: Room | undefined;
   let localSessionId: string | null = null;
   let currentTargetId: string | null = null;
   let currentLootBagId: string | null = null;
+  let currentNpcDialogueId: string | null = null;
+  let localPlayerSchema: PlayerStatsSnapshot | undefined;
+  let pendingGroundTargetSpellId: SpellId | null = null;
 
   let localHp = 0;
   let localMaxHp = 0;
-  let localCastSpellId = 0;
+  let localCastSpellId = "";
   let localCastActive = false;
   let localCastStartRef = 0;
 
@@ -348,12 +456,28 @@ async function main(token: string, characterId: number) {
   let seq = 0;
 
   const lastClientCastAt = new Map<SpellId, number>();
-  const cooldownEls = new Map<SpellId, HTMLElement>();
-  for (const spellId of SPELL_IDS) {
-    const nameEl = document.querySelector(`[data-name="${spellId}"]`);
-    if (nameEl) nameEl.textContent = SPELLS[spellId].name;
-    const cooldownEl = document.querySelector(`[data-cooldown="${spellId}"]`) as HTMLElement | null;
-    if (cooldownEl) cooldownEls.set(spellId, cooldownEl);
+
+  // Hotbar slots are keyed by position (0/1/2), not spell identity - the same DOM node
+  // holds a different spell per class. slotSpellIds is populated once the local player's
+  // class is known (setupHotbarForClass), since class never changes mid-session.
+  const spellSlotEls: HTMLElement[] = [];
+  const cooldownEls: HTMLElement[] = [];
+  const nameEls: HTMLElement[] = [];
+  for (let i = 0; i < HOTBAR_SLOT_COUNT; i++) {
+    spellSlotEls.push(document.querySelector(`[data-slot="${i}"]`)!);
+    cooldownEls.push(document.querySelector(`[data-cooldown="${i}"]`)!);
+    nameEls.push(document.querySelector(`[data-name="${i}"]`)!);
+  }
+  let slotSpellIds: SpellId[] = [];
+
+  function setupHotbarForClass(classId: string) {
+    slotSpellIds = Object.values(SPELLS)
+      .filter((s) => s.classId === classId)
+      .map((s) => s.id);
+    for (let i = 0; i < spellSlotEls.length; i++) {
+      const id = slotSpellIds[i];
+      nameEls[i].textContent = id ? SPELLS[id].name : "";
+    }
   }
 
   function updateHud() {
@@ -361,8 +485,100 @@ async function main(token: string, characterId: number) {
     hud.textContent = `Connected as ${localSessionId}`;
   }
 
+  function updateAilmentIndicator(player: { ailments: Iterable<[string, number]> }) {
+    const now = Date.now();
+    const active: string[] = [];
+    for (const [kind, expiresAt] of player.ailments) {
+      if (expiresAt > now) active.push(AILMENT_LABELS[kind] ?? kind);
+    }
+    playerAilmentsEl.textContent = active.join(", ");
+    playerAilmentsEl.hidden = active.length === 0;
+  }
+
+  function renderPartyPanel() {
+    const local = localSessionId ? playerSchemaById.get(localSessionId) : undefined;
+    const partyId = local?.partyId ?? "";
+    if (!partyId) {
+      partyPanel.hidden = true;
+      return;
+    }
+
+    partyPanel.hidden = false;
+    partyMemberListEl.innerHTML = "";
+    for (const [sessionId, schema] of playerSchemaById) {
+      if (schema.partyId !== partyId) continue;
+
+      const className = CLASSES[schema.classId as ClassId]?.name ?? schema.classId;
+      const label = sessionId === localSessionId ? `${schema.name} (You)` : schema.name;
+      const fraction = schema.maxHp > 0 ? Math.max(0, Math.min(1, schema.hp / schema.maxHp)) : 0;
+
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "party-member-row";
+      row.innerHTML = `
+        <div class="party-member-top">
+          <span>${label}</span>
+          <span class="item-slot-tag">Lv.${schema.level} ${className}</span>
+        </div>
+        <div class="bar party-member-bar"><div class="bar-fill" style="width: ${fraction * 100}%; background: ${hpColor(fraction)}"></div></div>
+      `;
+      row.addEventListener("click", () => setTarget(sessionId));
+      partyMemberListEl.appendChild(row);
+    }
+  }
+
+  function renderPartyInvitePrompt(player: { pendingPartyInviteFrom: string }) {
+    const inviterId = player.pendingPartyInviteFrom;
+    if (!inviterId) {
+      partyInvitePromptEl.hidden = true;
+      return;
+    }
+
+    const inviter = playerSchemaById.get(inviterId);
+    const inviterLabel = inviter?.name || (inviter ? (CLASSES[inviter.classId as ClassId]?.name ?? "Someone") : "Someone");
+    partyInviteTextEl.textContent = `${inviterLabel} wants to group with you.`;
+    partyInvitePromptEl.hidden = false;
+  }
+
+  // Guards mirror the server's own checks in handlePartyInvite, so an obviously-invalid
+  // invite (self, already grouped, party full) never shows up as a menu option at all.
+  function canInviteToParty(targetSessionId: string): boolean {
+    if (!localSessionId || targetSessionId === localSessionId) return false;
+    const local = playerSchemaById.get(localSessionId);
+    const target = playerSchemaById.get(targetSessionId);
+    if (!local || !target) return false;
+    if (local.partyId && local.partyId === target.partyId) return false; // already grouped together
+    if (
+      local.partyId &&
+      [...playerSchemaById.values()].filter((s) => s.partyId === local.partyId).length >= PARTY_MAX_SIZE
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  function sendPartyInvite(targetSessionId: string) {
+    if (!canInviteToParty(targetSessionId)) return;
+    const message: PartyInviteMessage = { targetSessionId };
+    room?.send("party_invite", message);
+  }
+
+  // Right-click (on the 3D avatar or the target panel) opens this menu - the single entry
+  // point for player-targeted actions. "Invite to Party" is the only one today; more get
+  // appended here as they're added, always with Invite first per the established convention.
+  function actionsForPlayerTarget(targetSessionId: string): ContextMenuAction[] {
+    const actions: ContextMenuAction[] = [];
+    if (canInviteToParty(targetSessionId)) {
+      actions.push({ label: "Invite to Party", onClick: () => sendPartyInvite(targetSessionId) });
+    }
+    return actions;
+  }
+
   function setTarget(id: string | null) {
-    if (currentTargetId) enemies.get(currentTargetId)?.setSelected(false);
+    if (currentTargetId) {
+      enemies.get(currentTargetId)?.setSelected(false);
+      avatars.get(currentTargetId)?.setSelected(false);
+    }
     currentTargetId = id;
     targetCastActive = false;
     targetCastBarEl.hidden = true;
@@ -372,32 +588,74 @@ async function main(token: string, characterId: number) {
       return;
     }
 
-    enemies.get(id)?.setSelected(true);
-    targetPanel.hidden = false;
-
-    const schema = enemySchemaById.get(id);
-    if (!schema) return;
-
-    targetNameEl.textContent = schema.kind === "melee" ? "Melee Enemy" : "Caster Enemy";
-    updateHpBar(targetHpFill, targetHpLabel, schema.hp, schema.maxHp);
-
-    if (schema.isCasting) {
-      targetCastActive = true;
-      targetCastStartRef = performance.now();
-      targetCastBarEl.hidden = false;
+    const enemySchema = enemySchemaById.get(id);
+    if (enemySchema) {
+      enemies.get(id)?.setSelected(true);
+      targetPanel.hidden = false;
+      targetNameEl.textContent = enemySchema.kind === "melee" ? "Melee Enemy" : "Caster Enemy";
+      updateHpBar(targetHpFill, targetHpLabel, enemySchema.hp, enemySchema.maxHp);
+      if (enemySchema.isCasting) {
+        targetCastActive = true;
+        targetCastStartRef = performance.now();
+        targetCastBarEl.hidden = false;
+      }
+      return;
     }
+
+    const playerSchema = playerSchemaById.get(id);
+    if (playerSchema) {
+      avatars.get(id)?.setSelected(true);
+      targetPanel.hidden = false;
+      const className = CLASSES[playerSchema.classId as ClassId]?.name ?? playerSchema.classId;
+      targetNameEl.textContent = id === localSessionId ? `${className} (You)` : className;
+      updateHpBar(targetHpFill, targetHpLabel, playerSchema.hp, playerSchema.maxHp);
+      if (playerSchema.castSpellId !== "") {
+        targetCastActive = true;
+        targetCastStartRef = performance.now();
+        targetCastBarEl.hidden = false;
+      }
+      return;
+    }
+
+    targetPanel.hidden = true;
   }
 
-  function castSpell(spellId: SpellId) {
-    if (!room || !currentTargetId) return;
+  function sendCast(spellId: SpellId, message: CastMessage) {
+    lastClientCastAt.set(spellId, performance.now());
+    room?.send("cast", message);
+  }
+
+  function castSpell(slotIndex: number) {
+    if (!room) return;
+    const spellId = slotSpellIds[slotIndex];
+    if (!spellId) return;
+
     const spell = SPELLS[spellId];
     const now = performance.now();
     const last = lastClientCastAt.get(spellId) ?? -Infinity;
     if (now - last < spell.cooldownMs) return;
 
-    lastClientCastAt.set(spellId, now);
-    const message: CastMessage = { spellId, targetId: currentTargetId };
-    room.send("cast", message);
+    if (spell.targetType === "ground") {
+      pendingGroundTargetSpellId = spellId;
+      container.classList.add("ground-target-pending");
+      return;
+    }
+
+    if (spell.targetType === "enemy") {
+      if (!currentTargetId || !enemySchemaById.has(currentTargetId)) return;
+      sendCast(spellId, { spellId, targetId: currentTargetId });
+    } else if (spell.targetType === "ally") {
+      const targetId = currentTargetId && playerSchemaById.has(currentTargetId) ? currentTargetId : localSessionId ?? undefined;
+      sendCast(spellId, { spellId, targetId });
+    } else if (spell.targetType === "self") {
+      sendCast(spellId, { spellId });
+    }
+  }
+
+  function cancelPendingGroundTarget() {
+    if (!pendingGroundTargetSpellId) return;
+    pendingGroundTargetSpellId = null;
+    container.classList.remove("ground-target-pending");
   }
 
   function renderLootWindow() {
@@ -447,18 +705,158 @@ async function main(token: string, characterId: number) {
     }
   });
 
+  type QuestState = "available" | "active" | "ready" | "completed";
+
+  function questStateFor(questId: string): QuestState {
+    if (!localPlayerSchema) return "available";
+    if (new Map(localPlayerSchema.questCompleted).has(questId)) return "completed";
+    const progress = new Map(localPlayerSchema.questProgress).get(questId);
+    if (progress === undefined) return "available";
+    return progress >= QUESTS[questId].objectiveCount ? "ready" : "active";
+  }
+
+  function questObjectiveLabel(quest: QuestDef): string {
+    return `Kill ${quest.objectiveCount} ${capitalize(quest.objectiveEnemyKind)} Enemies`;
+  }
+
+  // Ready-to-turn-in takes priority (most actionable), then a new quest to offer, then a
+  // plain in-progress indicator - matches the classic "!"/"?" MMO convention.
+  function npcQuestIndicatorState(npc: NpcDef): QuestIndicatorState {
+    let anyAvailable = false;
+    let anyActive = false;
+    for (const questId of npc.questIds) {
+      const state = questStateFor(questId);
+      if (state === "ready") return "ready";
+      if (state === "available") anyAvailable = true;
+      if (state === "active") anyActive = true;
+    }
+    if (anyAvailable) return "available";
+    if (anyActive) return "active";
+    return "none";
+  }
+
+  function updateNpcQuestIndicators() {
+    for (const [npcId, avatar] of npcs) {
+      const npc = NPCS[npcId];
+      if (!npc) continue;
+      avatar.setQuestIndicator(npcQuestIndicatorState(npc));
+    }
+  }
+
+  function renderNpcDialogue() {
+    if (!currentNpcDialogueId) return;
+    const npc = NPCS[currentNpcDialogueId];
+    if (!npc) return;
+
+    npcDialogueNameEl.textContent = npc.name;
+    npcDialogueQuestsEl.innerHTML = "";
+
+    for (const questId of npc.questIds) {
+      const quest = QUESTS[questId];
+      const state = questStateFor(questId);
+      const progress = localPlayerSchema ? (new Map(localPlayerSchema.questProgress).get(questId) ?? 0) : 0;
+
+      const card = document.createElement("div");
+      card.className = "talent-card";
+      card.innerHTML = `
+        <div class="talent-card-top"><span>${quest.name}</span></div>
+        <span class="talent-desc">${quest.description}</span>
+        <span class="quest-objective">${questObjectiveLabel(quest)}</span>
+      `;
+
+      if (state === "available") {
+        const btn = document.createElement("button");
+        btn.className = "overlay-button";
+        btn.textContent = "Accept";
+        btn.addEventListener("click", () => {
+          const message: AcceptQuestMessage = { questId };
+          activeRoom?.send("accept_quest", message);
+        });
+        card.appendChild(btn);
+      } else if (state === "active") {
+        const status = document.createElement("span");
+        status.className = "talent-rank";
+        status.textContent = `${progress} / ${quest.objectiveCount}`;
+        card.appendChild(status);
+      } else if (state === "ready") {
+        const btn = document.createElement("button");
+        btn.className = "overlay-button";
+        btn.textContent = "Turn In";
+        btn.addEventListener("click", () => {
+          const message: TurnInQuestMessage = { questId };
+          activeRoom?.send("turn_in_quest", message);
+        });
+        card.appendChild(btn);
+      } else {
+        const status = document.createElement("span");
+        status.className = "talent-rank";
+        status.textContent = "Completed";
+        card.appendChild(status);
+      }
+
+      npcDialogueQuestsEl.appendChild(card);
+    }
+  }
+
+  function openNpcDialogue(npcId: string) {
+    currentNpcDialogueId = npcId;
+    npcDialoguePanel.hidden = false;
+    renderNpcDialogue();
+  }
+
+  function closeNpcDialogue() {
+    currentNpcDialogueId = null;
+    npcDialoguePanel.hidden = true;
+  }
+
+  function renderQuestLog() {
+    questLogListEl.innerHTML = "";
+    if (!localPlayerSchema) return;
+    for (const [questId, progress] of localPlayerSchema.questProgress) {
+      const quest = QUESTS[questId];
+      if (!quest) continue;
+      const row = document.createElement("div");
+      row.className = "item-row";
+      row.innerHTML = `
+        <span>${quest.name}<span class="quest-objective">${questObjectiveLabel(quest)}</span></span>
+        <span class="item-slot-tag">${progress} / ${quest.objectiveCount}</span>
+      `;
+      questLogListEl.appendChild(row);
+    }
+  }
+
+  document.querySelector("[data-npc-dialogue-close]")!.addEventListener("click", () => closeNpcDialogue());
+
+  document.querySelector("[data-party-leave]")!.addEventListener("click", () => {
+    room?.send("party_leave");
+  });
+  document.querySelector("[data-party-invite-accept]")!.addEventListener("click", () => {
+    const message: PartyRespondMessage = { accept: true };
+    room?.send("party_respond", message);
+  });
+  document.querySelector("[data-party-invite-decline]")!.addEventListener("click", () => {
+    const message: PartyRespondMessage = { accept: false };
+    room?.send("party_respond", message);
+  });
+
   const characterPanel = document.getElementById("character-panel")!;
 
   window.addEventListener("keydown", (e) => {
-    if (e.code === "Digit1") castSpell(1);
-    else if (e.code === "Digit2") castSpell(2);
-    else if (e.code === "Digit3") castSpell(3);
+    if (e.code === "Digit1") castSpell(0);
+    else if (e.code === "Digit2") castSpell(1);
+    else if (e.code === "Digit3") castSpell(2);
+    else if (e.code === "Escape") {
+      cancelPendingGroundTarget();
+      closeContextMenu();
+    }
     else if (e.code === "KeyP") characterPanel.hidden = !characterPanel.hidden;
     else if (e.code === "KeyI") inventoryPanel.hidden = !inventoryPanel.hidden;
     else if (e.code === "KeyK") talentPanel.hidden = !talentPanel.hidden;
+    else if (e.code === "KeyL") questLogPanel.hidden = !questLogPanel.hidden;
   });
 
   const raycaster = new THREE.Raycaster();
+  const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   gameScene.renderer.domElement.addEventListener("click", (event) => {
     const rect = gameScene.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(
@@ -467,9 +865,23 @@ async function main(token: string, characterId: number) {
     );
     raycaster.setFromCamera(ndc, gameScene.camera);
 
+    if (pendingGroundTargetSpellId) {
+      const spellId = pendingGroundTargetSpellId;
+      cancelPendingGroundTarget();
+      const hitPoint = new THREE.Vector3();
+      if (raycaster.ray.intersectPlane(groundPlane, hitPoint)) {
+        const targetX = clamp(hitPoint.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        const targetZ = clamp(hitPoint.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        sendCast(spellId, { spellId, targetX, targetZ });
+      }
+      return;
+    }
+
     const clickable = [
       ...[...enemies.values()].map((avatar) => avatar.group),
+      ...[...avatars.values()].map((avatar) => avatar.group),
       ...[...lootBags.values()].map((avatar) => avatar.group),
+      ...[...npcs.values()].map((avatar) => avatar.group),
     ];
     const hits = raycaster.intersectObjects(clickable, true);
 
@@ -479,14 +891,62 @@ async function main(token: string, characterId: number) {
     }
 
     let obj: THREE.Object3D | null = hits[0].object;
-    while (obj && !obj.userData.enemyId && !obj.userData.bagId) obj = obj.parent;
+    while (obj && !obj.userData.enemyId && !obj.userData.bagId && !obj.userData.sessionId && !obj.userData.npcId) {
+      obj = obj.parent;
+    }
 
     if (obj?.userData.bagId) {
       openLootWindow(obj.userData.bagId as string);
       return;
     }
+    if (obj?.userData.npcId) {
+      openNpcDialogue(obj.userData.npcId as string);
+      return;
+    }
 
-    setTarget((obj?.userData.enemyId as string) ?? null);
+    setTarget((obj?.userData.enemyId as string) ?? (obj?.userData.sessionId as string) ?? null);
+  });
+
+  // Right-click opens the player-actions menu (Invite to Party today, more later): right-click
+  // a player's 3D avatar directly, or right-click the target panel while targeting a player.
+  gameScene.renderer.domElement.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+
+    const rect = gameScene.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(ndc, gameScene.camera);
+
+    const hits = raycaster.intersectObjects(
+      [...avatars.values()].map((avatar) => avatar.group),
+      true,
+    );
+    if (hits.length === 0) {
+      closeContextMenu();
+      return;
+    }
+
+    let obj: THREE.Object3D | null = hits[0].object;
+    while (obj && !obj.userData.sessionId) obj = obj.parent;
+    const sessionId = obj?.userData.sessionId as string | undefined;
+    const actions = sessionId ? actionsForPlayerTarget(sessionId) : [];
+    if (actions.length === 0) {
+      closeContextMenu();
+      return;
+    }
+    openContextMenu(event.clientX, event.clientY, actions);
+  });
+
+  targetPanel.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    const actions = currentTargetId ? actionsForPlayerTarget(currentTargetId) : [];
+    if (actions.length === 0) {
+      closeContextMenu();
+      return;
+    }
+    openContextMenu(event.clientX, event.clientY, actions);
   });
 
   try {
@@ -498,22 +958,65 @@ async function main(token: string, characterId: number) {
 
     $(room.state).players.onAdd((player, sessionId) => {
       const avatar = new PlayerAvatar(sessionId === localSessionId ? LOCAL_COLOR : REMOTE_COLOR);
+      avatar.group.userData.sessionId = sessionId;
       avatar.setTarget(player.x, player.y, player.z, player.rotationY);
       avatar.snapToTarget();
       avatar.setHp(player.hp, player.maxHp);
       avatar.addTo(gameScene.scene);
       avatars.set(sessionId, avatar);
+      playerSchemaById.set(sessionId, player);
 
       if (sessionId === localSessionId) {
         localHp = player.hp;
         localMaxHp = player.maxHp;
+        localPlayerSchema = player;
+        localClassId = player.classId as ClassId;
         updateHud();
         updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
         updateCharacterPanel(player);
+        updateAilmentIndicator(player);
+        setupHotbarForClass(player.classId);
+        updateNpcQuestIndicators();
+        renderPartyPanel();
+        renderPartyInvitePrompt(player);
+
+        // Mutating a nested MapSchema (questProgress/questCompleted/ailments) does not
+        // reliably trigger the parent Player's own onChange callback below unless a sibling
+        // scalar field also changes in the same tick. Ailment *application* happens to also
+        // change hp in the same tick (so it already updated live), but accept/turn-in and
+        // Cleanse's ailments.clear() touch nothing else - they need their own explicit
+        // listeners to keep the dialogue/quest-log/ailment indicator/NPC head-icon live.
+        const rerenderQuestUi = () => {
+          renderNpcDialogue();
+          renderQuestLog();
+          updateNpcQuestIndicators();
+        };
+        $(player.questProgress).onAdd(rerenderQuestUi);
+        $(player.questProgress).onChange(rerenderQuestUi);
+        $(player.questProgress).onRemove(rerenderQuestUi);
+        $(player.questCompleted).onAdd(rerenderQuestUi);
+        $(player.ailments).onAdd(() => updateAilmentIndicator(player));
+        $(player.ailments).onRemove(() => updateAilmentIndicator(player));
       }
 
       $(player).onChange(() => {
+        // Called before the local-player branch's early `return` below, so a partyId/hp
+        // change on ANY player (local or remote) always keeps the party frame list live.
+        renderPartyPanel();
+
         avatar.setHp(player.hp, player.maxHp);
+
+        if (sessionId === currentTargetId) {
+          updateHpBar(targetHpFill, targetHpLabel, player.hp, player.maxHp);
+          if (player.castSpellId !== "" && !targetCastActive) {
+            targetCastActive = true;
+            targetCastStartRef = performance.now();
+            targetCastBarEl.hidden = false;
+          } else if (player.castSpellId === "" && targetCastActive) {
+            targetCastActive = false;
+            targetCastBarEl.hidden = true;
+          }
+        }
 
         if (sessionId === localSessionId) {
           localServerPosition.set(player.x, player.y, player.z);
@@ -521,13 +1024,17 @@ async function main(token: string, characterId: number) {
           localMaxHp = player.maxHp;
           updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
           updateCharacterPanel(player);
+          updateAilmentIndicator(player);
+          renderNpcDialogue();
+          renderQuestLog();
+          renderPartyInvitePrompt(player);
 
           if (player.castSpellId !== localCastSpellId) {
             localCastSpellId = player.castSpellId;
-            if (localCastSpellId !== 0) {
+            if (localCastSpellId !== "") {
               localCastActive = true;
               localCastStartRef = performance.now();
-              playerCastLabel.textContent = SPELLS[localCastSpellId as SpellId].name;
+              playerCastLabel.textContent = SPELLS[localCastSpellId].name;
               playerCastBarEl.hidden = false;
             } else {
               localCastActive = false;
@@ -546,6 +1053,9 @@ async function main(token: string, characterId: number) {
         avatar.removeFrom(gameScene.scene);
         avatars.delete(sessionId);
       }
+      playerSchemaById.delete(sessionId);
+      if (currentTargetId === sessionId) setTarget(null);
+      renderPartyPanel();
     });
 
     $(room.state).enemies.onAdd((enemy, enemyId) => {
@@ -688,8 +1198,8 @@ async function main(token: string, characterId: number) {
     for (const avatar of enemies.values()) avatar.update();
     for (const avatar of projectiles.values()) avatar.update();
 
-    if (localCastActive && localCastSpellId !== 0) {
-      const durationMs = SPELLS[localCastSpellId as SpellId].castTimeMs;
+    if (localCastActive && localCastSpellId !== "") {
+      const durationMs = SPELLS[localCastSpellId].castTimeMs;
       const fraction = Math.max(0, Math.min(1, (performance.now() - localCastStartRef) / durationMs));
       playerCastFill.style.width = `${fraction * 100}%`;
     }
@@ -699,9 +1209,10 @@ async function main(token: string, characterId: number) {
       targetCastFill.style.width = `${fraction * 100}%`;
     }
 
-    for (const spellId of SPELL_IDS) {
-      const el = cooldownEls.get(spellId);
-      if (!el) continue;
+    for (let i = 0; i < slotSpellIds.length; i++) {
+      const spellId = slotSpellIds[i];
+      const el = cooldownEls[i];
+      if (!el || !spellId) continue;
       const last = lastClientCastAt.get(spellId) ?? -Infinity;
       const elapsed = performance.now() - last;
       const remaining = Math.max(0, 1 - elapsed / SPELLS[spellId].cooldownMs);
