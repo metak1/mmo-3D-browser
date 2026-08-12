@@ -6,17 +6,24 @@ import {
   ClassId,
   ENEMY_STATS,
   EnemyKind,
+  EquipMessage,
+  EquipSlot,
   InputMessage,
+  ITEMS,
+  LootTakeMessage,
   MAP_HALF_EXTENT,
   PLAYER_SPEED,
   SPELLS,
   SpellId,
+  UnequipMessage,
+  getEffectiveStats,
   xpForNextLevel,
 } from "@mmo/shared";
 import { GameScene } from "./game/Scene";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
 import { ProjectileAvatar } from "./game/Projectile";
+import { LootBagAvatar } from "./game/LootBagAvatar";
 import { InputController } from "./game/InputController";
 import { connectToWorld } from "./network/connection";
 import * as api from "./network/api";
@@ -63,11 +70,42 @@ const statEls = {
   armor: document.querySelector<HTMLElement>("[data-stat-armor]")!,
 };
 
+const equipRowEls: Record<EquipSlot, HTMLElement> = {
+  weapon: document.querySelector<HTMLElement>('[data-equip-row="weapon"]')!,
+  armor: document.querySelector<HTMLElement>('[data-equip-row="armor"]')!,
+  trinket: document.querySelector<HTMLElement>('[data-equip-row="trinket"]')!,
+};
+const equipNameEls: Record<EquipSlot, HTMLElement> = {
+  weapon: document.querySelector<HTMLElement>('[data-equip-name="weapon"]')!,
+  armor: document.querySelector<HTMLElement>('[data-equip-name="armor"]')!,
+  trinket: document.querySelector<HTMLElement>('[data-equip-name="trinket"]')!,
+};
+
+const inventoryPanel = document.getElementById("inventory-panel")!;
+const inventoryListEl = document.getElementById("inventory-list")!;
+
+const lootWindow = document.getElementById("loot-window")!;
+const lootListEl = document.getElementById("loot-list")!;
+
 makeDraggable(document.getElementById("player-panel")!, "player");
 makeDraggable(document.getElementById("target-panel")!, "target");
 makeDraggable(document.getElementById("spell-panel")!, "spells");
 makeDraggable(document.getElementById("character-panel")!, "character");
 makeDraggable(document.getElementById("xp-panel")!, "xp");
+makeDraggable(inventoryPanel, "inventory");
+makeDraggable(lootWindow, "loot");
+
+// Set once main() establishes a connection; the equip/unequip/inventory click handlers
+// below are bound once at module scope (their DOM elements are static), so they read
+// this rather than a `room` captured in a closure that only exists for one connection.
+let activeRoom: Room | undefined;
+
+for (const slot of Object.keys(equipRowEls) as EquipSlot[]) {
+  equipRowEls[slot].addEventListener("click", () => {
+    const message: UnequipMessage = { slot };
+    activeRoom?.send("unequip", message);
+  });
+}
 
 interface PlayerStatsSnapshot {
   classId: string;
@@ -79,6 +117,42 @@ interface PlayerStatsSnapshot {
   vitality: number;
   luck: number;
   armor: number;
+  equippedWeapon: string;
+  equippedArmor: string;
+  equippedTrinket: string;
+  inventory: Iterable<string>;
+}
+
+function renderEquipment(player: PlayerStatsSnapshot) {
+  const equipped: Record<EquipSlot, string> = {
+    weapon: player.equippedWeapon,
+    armor: player.equippedArmor,
+    trinket: player.equippedTrinket,
+  };
+
+  for (const slot of Object.keys(equipped) as EquipSlot[]) {
+    const itemId = equipped[slot];
+    const item = itemId ? ITEMS[itemId] : undefined;
+    equipNameEls[slot].textContent = item ? item.name : "Empty";
+    equipRowEls[slot].classList.toggle("empty", !item);
+  }
+}
+
+function renderInventory(player: PlayerStatsSnapshot) {
+  inventoryListEl.innerHTML = "";
+  for (const itemId of player.inventory) {
+    const item = ITEMS[itemId];
+    if (!item) continue;
+
+    const row = document.createElement("button");
+    row.className = "item-row";
+    row.innerHTML = `<span>${item.name}</span><span class="item-slot-tag">${capitalize(item.slot)}</span>`;
+    row.addEventListener("click", () => {
+      const message: EquipMessage = { itemId };
+      activeRoom?.send("equip", message);
+    });
+    inventoryListEl.appendChild(row);
+  }
 }
 
 function updateCharacterPanel(player: PlayerStatsSnapshot) {
@@ -92,12 +166,27 @@ function updateCharacterPanel(player: PlayerStatsSnapshot) {
   xpFill.style.width = `${fraction * 100}%`;
   xpLabel.textContent = `${player.xp} / ${needed} XP`;
 
-  statEls.strength.textContent = `${player.strength}`;
-  statEls.dexterity.textContent = `${player.dexterity}`;
-  statEls.intellect.textContent = `${player.intellect}`;
-  statEls.vitality.textContent = `${player.vitality}`;
-  statEls.luck.textContent = `${player.luck}`;
-  statEls.armor.textContent = `${player.armor}`;
+  const effective = getEffectiveStats(
+    {
+      strength: player.strength,
+      dexterity: player.dexterity,
+      intellect: player.intellect,
+      vitality: player.vitality,
+      luck: player.luck,
+      armor: player.armor,
+    },
+    { weapon: player.equippedWeapon, armor: player.equippedArmor, trinket: player.equippedTrinket },
+  );
+
+  statEls.strength.textContent = `${effective.strength}`;
+  statEls.dexterity.textContent = `${effective.dexterity}`;
+  statEls.intellect.textContent = `${effective.intellect}`;
+  statEls.vitality.textContent = `${effective.vitality}`;
+  statEls.luck.textContent = `${effective.luck}`;
+  statEls.armor.textContent = `${effective.armor}`;
+
+  renderEquipment(player);
+  renderInventory(player);
 }
 
 function hpColor(fraction: number): string {
@@ -119,10 +208,13 @@ async function main(token: string, characterId: number) {
   const enemies = new Map<string, EnemyAvatar>();
   const enemySchemaById = new Map<string, { kind: string; hp: number; maxHp: number; isCasting: boolean }>();
   const projectiles = new Map<string, ProjectileAvatar>();
+  const lootBags = new Map<string, LootBagAvatar>();
+  const lootBagSchemaById = new Map<string, { x: number; z: number; items: Iterable<string> }>();
 
   let room: Room | undefined;
   let localSessionId: string | null = null;
   let currentTargetId: string | null = null;
+  let currentLootBagId: string | null = null;
 
   let localHp = 0;
   let localMaxHp = 0;
@@ -191,6 +283,52 @@ async function main(token: string, characterId: number) {
     room.send("cast", message);
   }
 
+  function renderLootWindow() {
+    if (!currentLootBagId) return;
+    const bag = lootBagSchemaById.get(currentLootBagId);
+    if (!bag) {
+      closeLootWindow();
+      return;
+    }
+
+    lootListEl.innerHTML = "";
+    for (const itemId of bag.items) {
+      const item = ITEMS[itemId];
+      if (!item) continue;
+
+      const row = document.createElement("button");
+      row.className = "item-row";
+      row.innerHTML = `<span>${item.name}</span><span class="item-slot-tag">${capitalize(item.slot)}</span>`;
+      row.addEventListener("click", () => {
+        const message: LootTakeMessage = { bagId: currentLootBagId!, itemId };
+        room?.send("loot_take", message);
+      });
+      lootListEl.appendChild(row);
+    }
+  }
+
+  function openLootWindow(bagId: string) {
+    currentLootBagId = bagId;
+    lootWindow.hidden = false;
+    renderLootWindow();
+  }
+
+  function closeLootWindow() {
+    currentLootBagId = null;
+    lootWindow.hidden = true;
+  }
+
+  document.querySelector("[data-loot-close]")!.addEventListener("click", () => closeLootWindow());
+  document.querySelector("[data-loot-take-all]")!.addEventListener("click", () => {
+    if (!currentLootBagId) return;
+    const bag = lootBagSchemaById.get(currentLootBagId);
+    if (!bag) return;
+    for (const itemId of [...bag.items]) {
+      const message: LootTakeMessage = { bagId: currentLootBagId, itemId };
+      room?.send("loot_take", message);
+    }
+  });
+
   const characterPanel = document.getElementById("character-panel")!;
 
   window.addEventListener("keydown", (e) => {
@@ -198,6 +336,7 @@ async function main(token: string, characterId: number) {
     else if (e.code === "Digit2") castSpell(2);
     else if (e.code === "Digit3") castSpell(3);
     else if (e.code === "KeyP") characterPanel.hidden = !characterPanel.hidden;
+    else if (e.code === "KeyI") inventoryPanel.hidden = !inventoryPanel.hidden;
   });
 
   const raycaster = new THREE.Raycaster();
@@ -209,8 +348,11 @@ async function main(token: string, characterId: number) {
     );
     raycaster.setFromCamera(ndc, gameScene.camera);
 
-    const enemyGroups = [...enemies.values()].map((avatar) => avatar.group);
-    const hits = raycaster.intersectObjects(enemyGroups, true);
+    const clickable = [
+      ...[...enemies.values()].map((avatar) => avatar.group),
+      ...[...lootBags.values()].map((avatar) => avatar.group),
+    ];
+    const hits = raycaster.intersectObjects(clickable, true);
 
     if (hits.length === 0) {
       setTarget(null);
@@ -218,13 +360,20 @@ async function main(token: string, characterId: number) {
     }
 
     let obj: THREE.Object3D | null = hits[0].object;
-    while (obj && !obj.userData.enemyId) obj = obj.parent;
+    while (obj && !obj.userData.enemyId && !obj.userData.bagId) obj = obj.parent;
+
+    if (obj?.userData.bagId) {
+      openLootWindow(obj.userData.bagId as string);
+      return;
+    }
+
     setTarget((obj?.userData.enemyId as string) ?? null);
   });
 
   try {
     const connection = await connectToWorld(token, characterId);
     room = connection.room;
+    activeRoom = room;
     const $ = connection.$;
     localSessionId = room.sessionId;
 
@@ -341,6 +490,29 @@ async function main(token: string, characterId: number) {
         gameScene.scene.remove(avatar.mesh);
         projectiles.delete(projectileId);
       }
+    });
+
+    $(room.state).lootBags.onAdd((bag, bagId) => {
+      const avatar = new LootBagAvatar();
+      avatar.group.userData.bagId = bagId;
+      avatar.setPosition(bag.x, bag.z);
+      avatar.addTo(gameScene.scene);
+      lootBags.set(bagId, avatar);
+      lootBagSchemaById.set(bagId, bag);
+
+      $(bag).onChange(() => {
+        if (bagId === currentLootBagId) renderLootWindow();
+      });
+    });
+
+    $(room.state).lootBags.onRemove((_bag, bagId) => {
+      const avatar = lootBags.get(bagId);
+      if (avatar) {
+        avatar.removeFrom(gameScene.scene);
+        lootBags.delete(bagId);
+      }
+      lootBagSchemaById.delete(bagId);
+      if (currentLootBagId === bagId) closeLootWindow();
     });
 
     room.onLeave(() => {

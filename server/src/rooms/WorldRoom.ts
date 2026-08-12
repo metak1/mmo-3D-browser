@@ -9,24 +9,38 @@ import {
   ENEMY_RESPAWN_MS,
   ENEMY_STATS,
   EnemyKind,
+  EquipMessage,
+  EquipSlot,
+  INVENTORY_SIZE,
+  ITEM_IDS,
+  ITEMS,
   InputMessage,
+  LOOT_BAG_AGGREGATE_RADIUS,
+  LOOT_BAG_DESPAWN_MS,
+  LOOT_DROP_CHANCE,
+  LOOT_PICKUP_RADIUS,
+  LootTakeMessage,
   MAIN_STAT_PER_LEVEL,
   MAP_HALF_EXTENT,
   MAX_LEVEL,
   PLAYER_SPEED,
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
+  PlayerStats,
   SPELLS,
   SpellId,
+  UnequipMessage,
   VITALITY_PER_LEVEL,
   VITALITY_TO_HP,
   XP_PER_ENEMY_KIND,
   critChanceFromLuck,
+  getEffectiveStats,
   xpForNextLevel,
 } from "@mmo/shared";
 import { verifyToken } from "../auth/jwt.js";
 import { getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
-import { Enemy, Player, Projectile, WorldState } from "./schema/WorldState.js";
+import { listCharacterItems, replaceCharacterItems } from "../db/items.js";
+import { Enemy, LootBag, Player, Projectile, WorldState } from "./schema/WorldState.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const RANGE_BUFFER = 1; // small allowance for latency between client input and server check
@@ -72,6 +86,7 @@ export class WorldRoom extends Room<WorldState> {
   private pendingEnemyCast = new Map<string, PendingEnemyCast>(); // key: enemyId
   private projectileAge = new Map<string, number>(); // key: projectileId, value: ms alive
   private projectileSeq = 0;
+  private lootBagSeq = 0;
   private characterIdBySession = new Map<string, number>();
 
   onCreate() {
@@ -94,6 +109,9 @@ export class WorldRoom extends Room<WorldState> {
     });
 
     this.onMessage("cast", (client, message: CastMessage) => this.handleCast(client, message));
+    this.onMessage("loot_take", (client, message: LootTakeMessage) => this.handleLootTake(client, message));
+    this.onMessage("equip", (client, message: EquipMessage) => this.handleEquip(client, message));
+    this.onMessage("unequip", (client, message: UnequipMessage) => this.handleUnequip(client, message));
 
     this.setSimulationInterval(() => this.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
@@ -131,7 +149,16 @@ export class WorldRoom extends Room<WorldState> {
     player.vitality = character.vitality;
     player.luck = character.luck;
     player.armor = character.armor;
-    player.maxHp = player.vitality * VITALITY_TO_HP;
+
+    const items = await listCharacterItems(character.id);
+    for (const row of items) {
+      if (row.slot === "weapon") player.equippedWeapon = row.item_id;
+      else if (row.slot === "armor") player.equippedArmor = row.item_id;
+      else if (row.slot === "trinket") player.equippedTrinket = row.item_id;
+      else player.inventory.push(row.item_id);
+    }
+
+    player.maxHp = this.getEffectiveStatsFor(player).vitality * VITALITY_TO_HP;
     player.hp = player.maxHp;
 
     this.state.players.set(client.sessionId, player);
@@ -158,6 +185,50 @@ export class WorldRoom extends Room<WorldState> {
         player.intellect += amount;
         break;
     }
+  }
+
+  private getEffectiveStatsFor(player: Player): PlayerStats {
+    return getEffectiveStats(
+      {
+        strength: player.strength,
+        dexterity: player.dexterity,
+        intellect: player.intellect,
+        vitality: player.vitality,
+        luck: player.luck,
+        armor: player.armor,
+      },
+      { weapon: player.equippedWeapon, armor: player.equippedArmor, trinket: player.equippedTrinket },
+    );
+  }
+
+  private getEquippedItemId(player: Player, slot: EquipSlot): string {
+    switch (slot) {
+      case "weapon":
+        return player.equippedWeapon;
+      case "armor":
+        return player.equippedArmor;
+      case "trinket":
+        return player.equippedTrinket;
+    }
+  }
+
+  private setEquippedItemId(player: Player, slot: EquipSlot, itemId: string) {
+    switch (slot) {
+      case "weapon":
+        player.equippedWeapon = itemId;
+        break;
+      case "armor":
+        player.equippedArmor = itemId;
+        break;
+      case "trinket":
+        player.equippedTrinket = itemId;
+        break;
+    }
+  }
+
+  private recomputeMaxHp(player: Player) {
+    player.maxHp = this.getEffectiveStatsFor(player).vitality * VITALITY_TO_HP;
+    player.hp = Math.min(player.hp, player.maxHp);
   }
 
   async onLeave(client: Client) {
@@ -196,6 +267,22 @@ export class WorldRoom extends Room<WorldState> {
   private async autosaveAll() {
     for (const sessionId of this.characterIdBySession.keys()) {
       await this.saveCharacter(sessionId);
+    }
+  }
+
+  private async persistItems(sessionId: string) {
+    const player = this.state.players.get(sessionId);
+    const characterId = this.characterIdBySession.get(sessionId);
+    if (!player || !characterId) return;
+
+    try {
+      await replaceCharacterItems(characterId, [...player.inventory], {
+        weapon: player.equippedWeapon,
+        armor: player.equippedArmor,
+        trinket: player.equippedTrinket,
+      });
+    } catch (err) {
+      console.error(`[WorldRoom] failed to persist items for character ${characterId}:`, err);
     }
   }
 
@@ -255,10 +342,95 @@ export class WorldRoom extends Room<WorldState> {
     const kind = target.kind as EnemyKind;
     target.hp = Math.max(0, target.hp - damage);
     if (target.hp === 0) {
+      const deathX = target.x;
+      const deathZ = target.z;
       this.killEnemy(targetId);
       const killer = this.state.players.get(killerSessionId);
       if (killer) this.grantXp(killer, XP_PER_ENEMY_KIND[kind]);
+      this.maybeDropLoot(deathX, deathZ);
     }
+  }
+
+  private maybeDropLoot(x: number, z: number) {
+    if (Math.random() >= LOOT_DROP_CHANCE) return;
+    const itemId = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
+    this.dropLoot(x, z, itemId);
+  }
+
+  private dropLoot(x: number, z: number, itemId: string) {
+    for (const bag of this.state.lootBags.values()) {
+      const dist = Math.hypot(bag.x - x, bag.z - z);
+      if (dist <= LOOT_BAG_AGGREGATE_RADIUS) {
+        bag.items.push(itemId);
+        return;
+      }
+    }
+
+    const bag = new LootBag();
+    bag.x = x;
+    bag.z = z;
+    bag.items.push(itemId);
+
+    const id = `bag-${this.lootBagSeq++}`;
+    this.state.lootBags.set(id, bag);
+    this.clock.setTimeout(() => this.state.lootBags.delete(id), LOOT_BAG_DESPAWN_MS);
+  }
+
+  private handleLootTake(client: Client, message: LootTakeMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const bag = this.state.lootBags.get(message.bagId);
+    if (!player || !bag) return;
+
+    const dist = Math.hypot(player.x - bag.x, player.z - bag.z);
+    if (dist > LOOT_PICKUP_RADIUS) return;
+
+    const index = bag.items.indexOf(message.itemId);
+    if (index === -1) return;
+    if (player.inventory.length >= INVENTORY_SIZE) return;
+
+    bag.items.splice(index, 1);
+    player.inventory.push(message.itemId);
+
+    if (bag.items.length === 0) {
+      this.state.lootBags.delete(message.bagId);
+    }
+
+    this.persistItems(client.sessionId);
+  }
+
+  private handleEquip(client: Client, message: EquipMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const item = ITEMS[message.itemId];
+    if (!item) return;
+
+    const index = player.inventory.indexOf(message.itemId);
+    if (index === -1) return;
+
+    player.inventory.splice(index, 1);
+
+    const previous = this.getEquippedItemId(player, item.slot);
+    if (previous) player.inventory.push(previous);
+    this.setEquippedItemId(player, item.slot, message.itemId);
+
+    this.recomputeMaxHp(player);
+    this.persistItems(client.sessionId);
+  }
+
+  private handleUnequip(client: Client, message: UnequipMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const itemId = this.getEquippedItemId(player, message.slot);
+    if (!itemId) return;
+    if (player.inventory.length >= INVENTORY_SIZE) return;
+
+    this.setEquippedItemId(player, message.slot, "");
+    player.inventory.push(itemId);
+
+    this.recomputeMaxHp(player);
+    this.persistItems(client.sessionId);
   }
 
   private grantXp(player: Player, amount: number) {
@@ -269,15 +441,16 @@ export class WorldRoom extends Room<WorldState> {
       player.level += 1;
       player.vitality += VITALITY_PER_LEVEL;
       this.bumpMainStat(player, CLASSES[this.resolveClassId(player.classId)].mainStat, MAIN_STAT_PER_LEVEL);
-      player.maxHp = player.vitality * VITALITY_TO_HP;
+      player.maxHp = this.getEffectiveStatsFor(player).vitality * VITALITY_TO_HP;
       player.hp = player.maxHp;
     }
   }
 
   private computePlayerDamage(player: Player, baseDamage: number): number {
-    const statBonus = Math.floor((player.strength + player.dexterity + player.intellect) * DAMAGE_STAT_FACTOR);
+    const effective = this.getEffectiveStatsFor(player);
+    const statBonus = Math.floor((effective.strength + effective.dexterity + effective.intellect) * DAMAGE_STAT_FACTOR);
     let damage = baseDamage + statBonus;
-    if (Math.random() < critChanceFromLuck(player.luck)) {
+    if (Math.random() < critChanceFromLuck(effective.luck)) {
       damage = Math.round(damage * CRIT_MULTIPLIER);
     }
     return damage;
@@ -492,7 +665,8 @@ export class WorldRoom extends Room<WorldState> {
   }
 
   private damagePlayer(sessionId: string, player: Player, amount: number) {
-    const mitigated = Math.max(1, amount - player.armor);
+    const effective = this.getEffectiveStatsFor(player);
+    const mitigated = Math.max(1, amount - effective.armor);
     player.hp = Math.max(0, player.hp - mitigated);
     if (player.hp === 0) {
       this.respawnPlayer(sessionId, player);

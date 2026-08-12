@@ -105,3 +105,62 @@ export interface CastMessage {
   spellId: SpellId;
   targetId: string;
 }
+
+export type EquipSlot = "weapon" | "armor" | "trinket";
+
+export interface ItemDef {
+  name: string;
+  slot: EquipSlot;
+  bonuses: Partial<PlayerStats>;
+}
+
+export const ITEMS: Record<string, ItemDef> = {
+  rusty_sword: { name: "Rusty Sword", slot: "weapon", bonuses: { strength: 3 } },
+  hunting_bow: { name: "Hunting Bow", slot: "weapon", bonuses: { dexterity: 3 } },
+  apprentice_wand: { name: "Apprentice Wand", slot: "weapon", bonuses: { intellect: 3 } },
+  leather_vest: { name: "Leather Vest", slot: "armor", bonuses: { vitality: 2, armor: 2 } },
+  chainmail_hauberk: { name: "Chainmail Hauberk", slot: "armor", bonuses: { armor: 5 } },
+  padded_robe: { name: "Padded Robe", slot: "armor", bonuses: { vitality: 3, intellect: 1 } },
+  lucky_charm: { name: "Lucky Charm", slot: "trinket", bonuses: { luck: 4 } },
+  signet_ring: { name: "Signet Ring", slot: "trinket", bonuses: { strength: 2, dexterity: 2 } },
+  amulet_of_vigor: { name: "Amulet of Vigor", slot: "trinket", bonuses: { vitality: 3 } },
+};
+
+export const ITEM_IDS = Object.keys(ITEMS);
+
+export const LOOT_DROP_CHANCE = 0.5;
+export const LOOT_BAG_AGGREGATE_RADIUS = 3;
+export const LOOT_BAG_DESPAWN_MS = 180_000;
+export const LOOT_PICKUP_RADIUS = 3;
+export const INVENTORY_SIZE = 20;
+
+export interface EquippedItems {
+  weapon: string;
+  armor: string;
+  trinket: string;
+}
+
+export function getEffectiveStats(base: PlayerStats, equipped: EquippedItems): PlayerStats {
+  const total: PlayerStats = { ...base };
+  for (const itemId of Object.values(equipped)) {
+    const item = itemId ? ITEMS[itemId] : undefined;
+    if (!item) continue;
+    for (const [stat, value] of Object.entries(item.bonuses)) {
+      total[stat as keyof PlayerStats] += value ?? 0;
+    }
+  }
+  return total;
+}
+
+export interface LootTakeMessage {
+  bagId: string;
+  itemId: string;
+}
+
+export interface EquipMessage {
+  itemId: string;
+}
+
+export interface UnequipMessage {
+  slot: EquipSlot;
+}
