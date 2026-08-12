@@ -184,6 +184,37 @@ export const ITEMS: Record<string, ItemDef> = {
 
 export const ITEM_IDS = Object.keys(ITEMS);
 
+export type Rarity = "common" | "rare" | "epic";
+
+export const RARITY_MULTIPLIER: Record<Rarity, number> = { common: 1, rare: 1.5, epic: 2 };
+export const RARITY_LABEL: Record<Rarity, string> = { common: "Common", rare: "Rare", epic: "Epic" };
+export const RARITY_COLOR: Record<Rarity, string> = { common: "#e6e6e6", rare: "#4ac0e8", epic: "#c95ce8" };
+export const RARITY_WEIGHTS: Record<Rarity, number> = { common: 70, rare: 25, epic: 5 };
+
+export function rollRarity(): Rarity {
+  const total = RARITY_WEIGHTS.common + RARITY_WEIGHTS.rare + RARITY_WEIGHTS.epic;
+  let roll = Math.random() * total;
+  for (const rarity of Object.keys(RARITY_WEIGHTS) as Rarity[]) {
+    roll -= RARITY_WEIGHTS[rarity];
+    if (roll <= 0) return rarity;
+  }
+  return "common";
+}
+
+// Item instances are threaded through Colyseus ArraySchema<string>/plain string fields and a
+// VARCHAR(32) DB column as a composite "itemId@rarity" token, rather than restructuring those
+// to carry a structured object - every existing string-typed field/column/message keeps its type.
+export function encodeItemToken(itemId: string, rarity: Rarity): string {
+  return `${itemId}@${rarity}`;
+}
+
+export function decodeItemToken(token: string): { itemId: string; rarity: Rarity } {
+  const at = token.indexOf("@");
+  if (at === -1) return { itemId: token, rarity: "common" }; // legacy bare id predating rarity
+  const rarity = token.slice(at + 1);
+  return { itemId: token.slice(0, at), rarity: rarity in RARITY_MULTIPLIER ? (rarity as Rarity) : "common" };
+}
+
 export const LOOT_DROP_CHANCE = 0.5;
 export const LOOT_BAG_AGGREGATE_RADIUS = 3;
 export const LOOT_BAG_DESPAWN_MS = 180_000;
@@ -198,11 +229,14 @@ export interface EquippedItems {
 
 export function getEffectiveStats(base: PlayerStats, equipped: EquippedItems): PlayerStats {
   const total: PlayerStats = { ...base };
-  for (const itemId of Object.values(equipped)) {
-    const item = itemId ? ITEMS[itemId] : undefined;
+  for (const token of Object.values(equipped)) {
+    if (!token) continue;
+    const { itemId, rarity } = decodeItemToken(token);
+    const item = ITEMS[itemId];
     if (!item) continue;
+    const multiplier = RARITY_MULTIPLIER[rarity];
     for (const [stat, value] of Object.entries(item.bonuses)) {
-      total[stat as keyof PlayerStats] += value ?? 0;
+      total[stat as keyof PlayerStats] += Math.round((value ?? 0) * multiplier);
     }
   }
   return total;
@@ -219,4 +253,143 @@ export interface EquipMessage {
 
 export interface UnequipMessage {
   slot: EquipSlot;
+}
+
+export type TalentEffectKey = "damagePercent" | "critChanceBonus" | "cooldownPercent" | "armorBonus" | "maxHpPercent";
+
+export interface TalentDef {
+  id: string;
+  classId: ClassId;
+  name: string;
+  description: string;
+  maxRank: number;
+  effectKey: TalentEffectKey;
+  perRank: number;
+}
+
+export const TALENT_POINTS_PER_LEVEL = 1;
+const TALENT_MAX_RANK = 12;
+
+function talent(
+  classId: ClassId,
+  slug: string,
+  name: string,
+  description: string,
+  effectKey: TalentEffectKey,
+  perRank: number,
+): TalentDef {
+  return { id: `${classId}_${slug}`, classId, name, description, maxRank: TALENT_MAX_RANK, effectKey, perRank };
+}
+
+export const TALENTS: Record<string, TalentDef> = Object.fromEntries(
+  [
+    talent("warrior", "iron_skin", "Iron Skin", "Years of taking hits taught your body to shrug them off.", "armorBonus", 1),
+    talent("warrior", "crushing_blows", "Crushing Blows", "Every swing carries a little more weight.", "damagePercent", 1.5),
+    talent(
+      "warrior",
+      "stalwart_heart",
+      "Stalwart Heart",
+      "Your resolve keeps you standing after lesser warriors would fall.",
+      "maxHpPercent",
+      1.25,
+    ),
+    talent("warrior", "battle_fury", "Battle Fury", "Momentum builds with every clash.", "cooldownPercent", 0.8),
+    talent(
+      "warrior",
+      "killer_instinct",
+      "Killer Instinct",
+      "You've learned exactly where the armor gives.",
+      "critChanceBonus",
+      0.6,
+    ),
+
+    talent("rogue", "cutthroat", "Cutthroat", "You don't need much of an opening.", "critChanceBonus", 0.6),
+    talent(
+      "rogue",
+      "fleet_footed",
+      "Fleet Footed",
+      "Never in one place long enough to be predictable.",
+      "cooldownPercent",
+      0.8,
+    ),
+    talent("rogue", "vicious_strikes", "Vicious Strikes", "Precision over brute force.", "damagePercent", 1.5),
+    talent(
+      "rogue",
+      "hardened_reflexes",
+      "Hardened Reflexes",
+      "If you can't dodge it, you'd better be able to take it.",
+      "armorBonus",
+      1,
+    ),
+    talent("rogue", "grim_endurance", "Grim Endurance", "A life of close calls builds a thick skin.", "maxHpPercent", 1.25),
+
+    talent(
+      "ranger",
+      "marksmans_eye",
+      "Marksman's Eye",
+      "You aim for the gaps others don't even see.",
+      "critChanceBonus",
+      0.6,
+    ),
+    talent(
+      "ranger",
+      "quickdraw",
+      "Quickdraw",
+      "Nocked, drawn, loosed — before they've registered the threat.",
+      "cooldownPercent",
+      0.8,
+    ),
+    talent("ranger", "hunters_focus", "Hunter's Focus", "Every shot is a lesson from the last.", "damagePercent", 1.5),
+    talent("ranger", "camouflage", "Camouflage", "Half-seen is half-hit.", "armorBonus", 1),
+    talent(
+      "ranger",
+      "wilderness_vigor",
+      "Wilderness Vigor",
+      "Years in the field harden more than just your aim.",
+      "maxHpPercent",
+      1.25,
+    ),
+
+    talent("oracle", "focused_mind", "Focused Mind", "Clarity finds the weak point in anything.", "critChanceBonus", 0.6),
+    talent("oracle", "swift_rites", "Swift Rites", "The words come easier with practice.", "cooldownPercent", 0.8),
+    talent("oracle", "arcane_insight", "Arcane Insight", "Understanding is its own weapon.", "damagePercent", 1.5),
+    talent("oracle", "warding_sigil", "Warding Sigil", "A shimmer of protection, always half-drawn.", "armorBonus", 1),
+    talent(
+      "oracle",
+      "vital_current",
+      "Vital Current",
+      "Life force ebbs and flows — you've learned to hold onto more of it.",
+      "maxHpPercent",
+      1.25,
+    ),
+
+    talent("mage", "piercing_cold", "Piercing Cold", "Ice finds every crack.", "critChanceBonus", 0.6),
+    talent("mage", "overchannel", "Overchannel", "You've stopped waiting for the mana to settle.", "cooldownPercent", 0.8),
+    talent("mage", "arcane_power", "Arcane Power", "Raw force, barely contained.", "damagePercent", 1.5),
+    talent("mage", "mana_shield", "Mana Shield", "A thin barrier is still a barrier.", "armorBonus", 1),
+    talent("mage", "deep_reserves", "Deep Reserves", "More to draw on means more to survive.", "maxHpPercent", 1.25),
+  ].map((def) => [def.id, def]),
+);
+
+export interface TalentBonus {
+  damagePercent: number;
+  critChanceBonus: number;
+  cooldownPercent: number;
+  armorBonus: number;
+  maxHpPercent: number;
+}
+
+export function getTalentBonus(classId: ClassId, talentRanks: Iterable<[string, number]>): TalentBonus {
+  const ranks = new Map(talentRanks);
+  const bonus: TalentBonus = { damagePercent: 0, critChanceBonus: 0, cooldownPercent: 0, armorBonus: 0, maxHpPercent: 0 };
+  for (const def of Object.values(TALENTS)) {
+    if (def.classId !== classId) continue;
+    const rank = ranks.get(def.id) ?? 0;
+    if (rank > 0) bonus[def.effectKey] += def.perRank * rank;
+  }
+  return bonus;
+}
+
+export interface SpendTalentMessage {
+  talentId: string;
 }

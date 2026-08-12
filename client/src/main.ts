@@ -15,9 +15,14 @@ import {
   MAP_HALF_EXTENT,
   PLAYER_SPEED,
   PlayerStats,
+  RARITY_COLOR,
+  RARITY_MULTIPLIER,
   SPELLS,
   SpellId,
+  SpendTalentMessage,
+  TALENTS,
   UnequipMessage,
+  decodeItemToken,
   getEffectiveStats,
   xpForNextLevel,
 } from "@mmo/shared";
@@ -84,6 +89,10 @@ const inventoryListEl = document.getElementById("inventory-list")!;
 const lootWindow = document.getElementById("loot-window")!;
 const lootListEl = document.getElementById("loot-list")!;
 
+const talentPanel = document.getElementById("talent-panel")!;
+const talentListEl = document.getElementById("talent-list")!;
+const talentPointsEl = document.querySelector<HTMLElement>("[data-talent-points]")!;
+
 const itemTooltipEl = document.getElementById("item-tooltip")!;
 const itemTooltipNameEl = document.querySelector<HTMLElement>("[data-tooltip-name]")!;
 const itemTooltipSlotEl = document.querySelector<HTMLElement>("[data-tooltip-slot]")!;
@@ -107,14 +116,17 @@ function positionItemTooltip(event: MouseEvent) {
   itemTooltipEl.style.top = `${Math.min(event.clientY + offset, Math.max(8, maxTop))}px`;
 }
 
-function showItemTooltip(itemId: string, event: MouseEvent) {
+function showItemTooltip(token: string, event: MouseEvent) {
+  const { itemId, rarity } = decodeItemToken(token);
   const item = ITEMS[itemId];
   if (!item) return;
 
+  const multiplier = RARITY_MULTIPLIER[rarity];
   itemTooltipNameEl.textContent = item.name;
+  itemTooltipNameEl.style.color = RARITY_COLOR[rarity];
   itemTooltipSlotEl.textContent = capitalize(item.slot);
   itemTooltipStatsEl.innerHTML = Object.entries(item.bonuses)
-    .map(([stat, value]) => `<span>+${value} ${STAT_LABELS[stat as keyof PlayerStats]}</span>`)
+    .map(([stat, value]) => `<span>+${Math.round((value ?? 0) * multiplier)} ${STAT_LABELS[stat as keyof PlayerStats]}</span>`)
     .join("");
   itemTooltipDescEl.textContent = item.description;
 
@@ -153,6 +165,7 @@ makeDraggable(document.getElementById("character-panel")!, "character");
 makeDraggable(document.getElementById("xp-panel")!, "xp");
 makeDraggable(inventoryPanel, "inventory");
 makeDraggable(lootWindow, "loot");
+makeDraggable(talentPanel, "talents");
 
 // Set once main() establishes a connection; the equip/unequip/inventory click handlers
 // below are bound once at module scope (their DOM elements are static), so they read
@@ -181,6 +194,8 @@ interface PlayerStatsSnapshot {
   equippedArmor: string;
   equippedTrinket: string;
   inventory: Iterable<string>;
+  talentPoints: number;
+  talentRanks: Iterable<[string, number]>;
 }
 
 function renderEquipment(player: PlayerStatsSnapshot) {
@@ -191,34 +206,68 @@ function renderEquipment(player: PlayerStatsSnapshot) {
   };
 
   for (const slot of Object.keys(equipped) as EquipSlot[]) {
-    const itemId = equipped[slot];
-    const item = itemId ? ITEMS[itemId] : undefined;
+    const token = equipped[slot];
+    const decoded = token ? decodeItemToken(token) : undefined;
+    const item = decoded ? ITEMS[decoded.itemId] : undefined;
     const el = equipRowEls[slot];
     el.textContent = item ? item.icon : "";
     el.classList.toggle("empty", !item);
-    if (item) el.dataset.itemId = itemId;
+    el.style.borderColor = item && decoded ? RARITY_COLOR[decoded.rarity] : "";
+    if (item) el.dataset.itemId = token;
     else delete el.dataset.itemId;
   }
 }
 
 function renderInventory(player: PlayerStatsSnapshot) {
   inventoryListEl.innerHTML = "";
-  const items = [...player.inventory];
+  const tokens = [...player.inventory];
   for (let i = 0; i < INVENTORY_SIZE; i++) {
-    const itemId = items[i];
-    const item = itemId ? ITEMS[itemId] : undefined;
+    const token = tokens[i];
+    const decoded = token ? decodeItemToken(token) : undefined;
+    const item = decoded ? ITEMS[decoded.itemId] : undefined;
 
     const slotEl = document.createElement("button");
     slotEl.className = item ? "item-slot" : "item-slot empty";
     slotEl.textContent = item ? item.icon : "";
-    if (item && itemId) {
+    if (item && decoded) slotEl.style.borderColor = RARITY_COLOR[decoded.rarity];
+    if (item && token) {
       slotEl.addEventListener("click", () => {
-        const message: EquipMessage = { itemId };
+        const message: EquipMessage = { itemId: token };
         activeRoom?.send("equip", message);
       });
-      attachItemTooltip(slotEl, itemId);
+      attachItemTooltip(slotEl, token);
     }
     inventoryListEl.appendChild(slotEl);
+  }
+}
+
+function renderTalents(player: PlayerStatsSnapshot) {
+  talentPointsEl.textContent = `${player.talentPoints} point${player.talentPoints === 1 ? "" : "s"}`;
+
+  const ranks = new Map(player.talentRanks);
+  talentListEl.innerHTML = "";
+  for (const def of Object.values(TALENTS)) {
+    if (def.classId !== player.classId) continue;
+
+    const rank = ranks.get(def.id) ?? 0;
+    const maxed = rank >= def.maxRank;
+
+    const card = document.createElement("button");
+    card.className = maxed ? "talent-card maxed" : "talent-card";
+    card.innerHTML = `
+      <div class="talent-card-top">
+        <span>${def.name}</span>
+        <span class="talent-rank">${rank} / ${def.maxRank}</span>
+      </div>
+      <span class="talent-desc">${def.description}</span>
+    `;
+    if (!maxed) {
+      card.addEventListener("click", () => {
+        const message: SpendTalentMessage = { talentId: def.id };
+        activeRoom?.send("spend_talent", message);
+      });
+    }
+    talentListEl.appendChild(card);
   }
 }
 
@@ -254,6 +303,7 @@ function updateCharacterPanel(player: PlayerStatsSnapshot) {
 
   renderEquipment(player);
   renderInventory(player);
+  renderTalents(player);
 }
 
 function hpColor(fraction: number): string {
@@ -359,15 +409,16 @@ async function main(token: string, characterId: number) {
     }
 
     lootListEl.innerHTML = "";
-    for (const itemId of bag.items) {
+    for (const token of bag.items) {
+      const { itemId, rarity } = decodeItemToken(token);
       const item = ITEMS[itemId];
       if (!item) continue;
 
       const row = document.createElement("button");
       row.className = "item-row";
-      row.innerHTML = `<span>${item.name}</span><span class="item-slot-tag">${capitalize(item.slot)}</span>`;
+      row.innerHTML = `<span style="color: ${RARITY_COLOR[rarity]}">${item.name}</span><span class="item-slot-tag">${capitalize(item.slot)}</span>`;
       row.addEventListener("click", () => {
-        const message: LootTakeMessage = { bagId: currentLootBagId!, itemId };
+        const message: LootTakeMessage = { bagId: currentLootBagId!, itemId: token };
         room?.send("loot_take", message);
       });
       lootListEl.appendChild(row);
@@ -404,6 +455,7 @@ async function main(token: string, characterId: number) {
     else if (e.code === "Digit3") castSpell(3);
     else if (e.code === "KeyP") characterPanel.hidden = !characterPanel.hidden;
     else if (e.code === "KeyI") inventoryPanel.hidden = !inventoryPanel.hidden;
+    else if (e.code === "KeyK") talentPanel.hidden = !talentPanel.hidden;
   });
 
   const raycaster = new THREE.Raycaster();

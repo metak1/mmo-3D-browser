@@ -26,6 +26,9 @@ export class Player extends Schema {
   @type("string") equippedArmor = "";
   @type("string") equippedTrinket = "";
   @type(["string"]) inventory = new ArraySchema<string>();
+
+  @type("number") talentPoints = 0;
+  @type({ map: "number" }) talentRanks = new MapSchema<number>();
 }
 
 export class Enemy extends Schema {

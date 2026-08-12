@@ -29,12 +29,20 @@ import {
   PlayerStats,
   SPELLS,
   SpellId,
+  SpendTalentMessage,
+  TALENTS,
+  TALENT_POINTS_PER_LEVEL,
+  TalentBonus,
   UnequipMessage,
   VITALITY_PER_LEVEL,
   VITALITY_TO_HP,
   XP_PER_ENEMY_KIND,
   critChanceFromLuck,
+  decodeItemToken,
+  encodeItemToken,
   getEffectiveStats,
+  getTalentBonus,
+  rollRarity,
   xpForNextLevel,
 } from "@mmo/shared";
 import { verifyToken } from "../auth/jwt.js";
@@ -112,6 +120,7 @@ export class WorldRoom extends Room<WorldState> {
     this.onMessage("loot_take", (client, message: LootTakeMessage) => this.handleLootTake(client, message));
     this.onMessage("equip", (client, message: EquipMessage) => this.handleEquip(client, message));
     this.onMessage("unequip", (client, message: UnequipMessage) => this.handleUnequip(client, message));
+    this.onMessage("spend_talent", (client, message: SpendTalentMessage) => this.handleSpendTalent(client, message));
 
     this.setSimulationInterval(() => this.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
@@ -149,6 +158,11 @@ export class WorldRoom extends Room<WorldState> {
     player.vitality = character.vitality;
     player.luck = character.luck;
     player.armor = character.armor;
+    player.talentPoints = character.talent_points;
+    const savedRanks = (character.talent_ranks as Record<string, number>) ?? {};
+    for (const [talentId, rank] of Object.entries(savedRanks)) {
+      player.talentRanks.set(talentId, rank);
+    }
 
     const items = await listCharacterItems(character.id);
     for (const row of items) {
@@ -158,7 +172,7 @@ export class WorldRoom extends Room<WorldState> {
       else player.inventory.push(row.item_id);
     }
 
-    player.maxHp = this.getEffectiveStatsFor(player).vitality * VITALITY_TO_HP;
+    this.recomputeMaxHp(player);
     player.hp = player.maxHp;
 
     this.state.players.set(client.sessionId, player);
@@ -201,6 +215,10 @@ export class WorldRoom extends Room<WorldState> {
     );
   }
 
+  private getTalentBonusFor(player: Player): TalentBonus {
+    return getTalentBonus(this.resolveClassId(player.classId), player.talentRanks);
+  }
+
   private getEquippedItemId(player: Player, slot: EquipSlot): string {
     switch (slot) {
       case "weapon":
@@ -227,7 +245,9 @@ export class WorldRoom extends Room<WorldState> {
   }
 
   private recomputeMaxHp(player: Player) {
-    player.maxHp = this.getEffectiveStatsFor(player).vitality * VITALITY_TO_HP;
+    const maxHpPercent = this.getTalentBonusFor(player).maxHpPercent;
+    const baseMaxHp = this.getEffectiveStatsFor(player).vitality * VITALITY_TO_HP;
+    player.maxHp = Math.round(baseMaxHp * (1 + maxHpPercent / 100));
     player.hp = Math.min(player.hp, player.maxHp);
   }
 
@@ -258,6 +278,8 @@ export class WorldRoom extends Room<WorldState> {
           luck: player.luck,
           armor: player.armor,
         },
+        talentPoints: player.talentPoints,
+        talentRanks: Object.fromEntries(player.talentRanks),
       });
     } catch (err) {
       console.error(`[WorldRoom] failed to save character ${characterId}:`, err);
@@ -308,7 +330,9 @@ export class WorldRoom extends Room<WorldState> {
     const cooldownKey = `${client.sessionId}:${message.spellId}`;
     const now = Date.now();
     const lastCast = this.lastCastAt.get(cooldownKey) ?? 0;
-    if (now - lastCast < spell.cooldownMs) return;
+    const cooldownPercent = this.getTalentBonusFor(player).cooldownPercent;
+    const effectiveCooldownMs = Math.max(100, spell.cooldownMs * (1 - cooldownPercent / 100));
+    if (now - lastCast < effectiveCooldownMs) return;
 
     const target = this.state.enemies.get(message.targetId);
     if (!target || target.hp <= 0) return;
@@ -354,7 +378,7 @@ export class WorldRoom extends Room<WorldState> {
   private maybeDropLoot(x: number, z: number) {
     if (Math.random() >= LOOT_DROP_CHANCE) return;
     const itemId = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
-    this.dropLoot(x, z, itemId);
+    this.dropLoot(x, z, encodeItemToken(itemId, rollRarity()));
   }
 
   private dropLoot(x: number, z: number, itemId: string) {
@@ -402,7 +426,7 @@ export class WorldRoom extends Room<WorldState> {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
-    const item = ITEMS[message.itemId];
+    const item = ITEMS[decodeItemToken(message.itemId).itemId];
     if (!item) return;
 
     const index = player.inventory.indexOf(message.itemId);
@@ -433,27 +457,46 @@ export class WorldRoom extends Room<WorldState> {
     this.persistItems(client.sessionId);
   }
 
+  private handleSpendTalent(client: Client, message: SpendTalentMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+    if (player.talentPoints <= 0) return;
+
+    const def = TALENTS[message.talentId];
+    if (!def || def.classId !== this.resolveClassId(player.classId)) return;
+
+    const currentRank = player.talentRanks.get(def.id) ?? 0;
+    if (currentRank >= def.maxRank) return;
+
+    player.talentRanks.set(def.id, currentRank + 1);
+    player.talentPoints -= 1;
+    this.recomputeMaxHp(player);
+  }
+
   private grantXp(player: Player, amount: number) {
     player.xp += amount;
 
     while (player.level < MAX_LEVEL && player.xp >= xpForNextLevel(player.level)) {
       player.xp -= xpForNextLevel(player.level);
       player.level += 1;
+      player.talentPoints += TALENT_POINTS_PER_LEVEL;
       player.vitality += VITALITY_PER_LEVEL;
       this.bumpMainStat(player, CLASSES[this.resolveClassId(player.classId)].mainStat, MAIN_STAT_PER_LEVEL);
-      player.maxHp = this.getEffectiveStatsFor(player).vitality * VITALITY_TO_HP;
+      this.recomputeMaxHp(player);
       player.hp = player.maxHp;
     }
   }
 
   private computePlayerDamage(player: Player, baseDamage: number): number {
     const effective = this.getEffectiveStatsFor(player);
+    const talentBonus = this.getTalentBonusFor(player);
     const statBonus = Math.floor((effective.strength + effective.dexterity + effective.intellect) * DAMAGE_STAT_FACTOR);
-    let damage = baseDamage + statBonus;
-    if (Math.random() < critChanceFromLuck(effective.luck)) {
-      damage = Math.round(damage * CRIT_MULTIPLIER);
+    let damage = (baseDamage + statBonus) * (1 + talentBonus.damagePercent / 100);
+    const critChance = Math.min(1, critChanceFromLuck(effective.luck) + talentBonus.critChanceBonus / 100);
+    if (Math.random() < critChance) {
+      damage = damage * CRIT_MULTIPLIER;
     }
-    return damage;
+    return Math.round(damage);
   }
 
   private killEnemy(enemyId: string) {
@@ -666,7 +709,8 @@ export class WorldRoom extends Room<WorldState> {
 
   private damagePlayer(sessionId: string, player: Player, amount: number) {
     const effective = this.getEffectiveStatsFor(player);
-    const mitigated = Math.max(1, amount - effective.armor);
+    const armorBonus = this.getTalentBonusFor(player).armorBonus;
+    const mitigated = Math.max(1, amount - (effective.armor + armorBonus));
     player.hp = Math.max(0, player.hp - mitigated);
     if (player.hp === 0) {
       this.respawnPlayer(sessionId, player);

@@ -404,6 +404,61 @@
       #loot-window[hidden] {
         display: none;
       }
+      #talent-panel {
+        left: auto;
+        right: 12px;
+        top: 300px;
+        width: 260px;
+      }
+      #talent-panel[hidden] {
+        display: none;
+      }
+      .talent-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 6px;
+        max-height: 320px;
+        overflow-y: auto;
+      }
+      .talent-card {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        width: 100%;
+        padding: 6px 8px;
+        border: 2px solid #4a5578;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.3);
+        color: #e6e6e6;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .talent-card:hover:not(.maxed) {
+        border-color: #c9a63c;
+        background: rgba(40, 36, 20, 0.5);
+      }
+      .talent-card.maxed {
+        cursor: default;
+        opacity: 0.7;
+      }
+      .talent-card-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        font-weight: 600;
+        font-size: 12px;
+      }
+      .talent-rank {
+        font-size: 11px;
+        font-weight: 400;
+        color: #c9a63c;
+      }
+      .talent-desc {
+        font-size: 10px;
+        color: #a7b0c8;
+      }
       .loot-actions {
         display: flex;
         gap: 6px;
@@ -559,6 +614,12 @@
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <div class="unit-name">Inventory</div>
       <div class="item-grid" id="inventory-list"></div>
+    </div>
+
+    <div id="talent-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Talents <span class="level-tag" data-talent-points></span></div>
+      <div class="talent-list" id="talent-list"></div>
     </div>
 
     <div id="item-tooltip" class="item-tooltip" hidden>

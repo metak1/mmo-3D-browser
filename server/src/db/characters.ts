@@ -21,6 +21,8 @@ export interface CharacterRow {
   vitality: number;
   luck: number;
   armor: number;
+  talent_points: number;
+  talent_ranks: unknown;
   created_at: Date;
 }
 
@@ -58,7 +60,13 @@ export async function createCharacter(userId: number, name: string, classId: Cla
 
 export async function saveCharacterProgress(
   characterId: number,
-  progress: { level: number; xp: number; stats: PlayerStats },
+  progress: {
+    level: number;
+    xp: number;
+    stats: PlayerStats;
+    talentPoints: number;
+    talentRanks: Record<string, number>;
+  },
 ): Promise<void> {
   await prisma.character.update({
     where: { id: characterId },
@@ -71,6 +79,8 @@ export async function saveCharacterProgress(
       vitality: progress.stats.vitality,
       luck: progress.stats.luck,
       armor: progress.stats.armor,
+      talent_points: progress.talentPoints,
+      talent_ranks: progress.talentRanks,
     },
   });
 }
