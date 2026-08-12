@@ -4,25 +4,29 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "postinstall": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:generate": "prisma generate"
   },
   "dependencies": {
     "@colyseus/core": "0.16.24",
     "@colyseus/schema": "^3.0.43",
     "@colyseus/ws-transport": "^0.16.5",
     "@mmo/shared": "*",
+    "@prisma/client": "^6.2.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.3",
-    "pg": "^8.23.0"
+    "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.5",
-    "@types/pg": "^8.21.0",
+    "prisma": "^6.2.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

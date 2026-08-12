@@ -112,18 +112,74 @@ export interface ItemDef {
   name: string;
   slot: EquipSlot;
   bonuses: Partial<PlayerStats>;
+  icon: string;
+  description: string;
 }
 
 export const ITEMS: Record<string, ItemDef> = {
-  rusty_sword: { name: "Rusty Sword", slot: "weapon", bonuses: { strength: 3 } },
-  hunting_bow: { name: "Hunting Bow", slot: "weapon", bonuses: { dexterity: 3 } },
-  apprentice_wand: { name: "Apprentice Wand", slot: "weapon", bonuses: { intellect: 3 } },
-  leather_vest: { name: "Leather Vest", slot: "armor", bonuses: { vitality: 2, armor: 2 } },
-  chainmail_hauberk: { name: "Chainmail Hauberk", slot: "armor", bonuses: { armor: 5 } },
-  padded_robe: { name: "Padded Robe", slot: "armor", bonuses: { vitality: 3, intellect: 1 } },
-  lucky_charm: { name: "Lucky Charm", slot: "trinket", bonuses: { luck: 4 } },
-  signet_ring: { name: "Signet Ring", slot: "trinket", bonuses: { strength: 2, dexterity: 2 } },
-  amulet_of_vigor: { name: "Amulet of Vigor", slot: "trinket", bonuses: { vitality: 3 } },
+  rusty_sword: {
+    name: "Rusty Sword",
+    slot: "weapon",
+    bonuses: { strength: 3 },
+    icon: "🗡️",
+    description: "Pitted and dull, but it still holds an edge.",
+  },
+  hunting_bow: {
+    name: "Hunting Bow",
+    slot: "weapon",
+    bonuses: { dexterity: 3 },
+    icon: "🏹",
+    description: "Favored by scouts for its light draw weight.",
+  },
+  apprentice_wand: {
+    name: "Apprentice Wand",
+    slot: "weapon",
+    bonuses: { intellect: 3 },
+    icon: "🪄",
+    description: "A first wand, worn smooth by nervous hands.",
+  },
+  leather_vest: {
+    name: "Leather Vest",
+    slot: "armor",
+    bonuses: { vitality: 2, armor: 2 },
+    icon: "🦺",
+    description: "Boiled leather, stiff enough to turn a blade.",
+  },
+  chainmail_hauberk: {
+    name: "Chainmail Hauberk",
+    slot: "armor",
+    bonuses: { armor: 5 },
+    icon: "🥋",
+    description: "Interlocked rings, heavy but dependable.",
+  },
+  padded_robe: {
+    name: "Padded Robe",
+    slot: "armor",
+    bonuses: { vitality: 3, intellect: 1 },
+    icon: "👘",
+    description: "Woven with faint warding sigils along the hem.",
+  },
+  lucky_charm: {
+    name: "Lucky Charm",
+    slot: "trinket",
+    bonuses: { luck: 4 },
+    icon: "🍀",
+    description: "Rumored to have never left its owner's pocket.",
+  },
+  signet_ring: {
+    name: "Signet Ring",
+    slot: "trinket",
+    bonuses: { strength: 2, dexterity: 2 },
+    icon: "💍",
+    description: "A minor house crest, edges worn smooth.",
+  },
+  amulet_of_vigor: {
+    name: "Amulet of Vigor",
+    slot: "trinket",
+    bonuses: { vitality: 3 },
+    icon: "📿",
+    description: "Warm to the touch, even in the cold.",
+  },
 };
 
 export const ITEM_IDS = Object.keys(ITEMS);

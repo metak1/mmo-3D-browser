@@ -267,7 +267,7 @@
         display: none;
       }
       #inventory-panel {
-        top: 288px;
+        top: 420px;
       }
       #inventory-panel[hidden] {
         display: none;
@@ -299,24 +299,101 @@
         color: #a7b0c8;
         font-size: 10px;
       }
-      .equipped-row {
+      .item-slot {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 1;
         display: flex;
-        justify-content: space-between;
         align-items: center;
-        padding: 4px 6px;
-        margin-top: 3px;
-        border: 1px solid #4a5578;
+        justify-content: center;
+        padding: 0;
+        border: 2px solid #4a5578;
         border-radius: 6px;
-        font-size: 11px;
+        background: rgba(0, 0, 0, 0.3);
+        font-size: 20px;
+        line-height: 1;
         cursor: pointer;
       }
-      .equipped-row.empty {
-        color: #6b7390;
+      .item-slot.empty {
+        border-style: dashed;
+        opacity: 0.45;
         cursor: default;
       }
-      .equipped-row:not(.empty):hover {
+      .item-slot:not(.empty):hover {
         border-color: #c9a63c;
         background: rgba(40, 36, 20, 0.5);
+      }
+      .equip-slots {
+        display: flex;
+        gap: 10px;
+        margin-top: 6px;
+      }
+      .equip-slot-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        width: 44px;
+      }
+      .equip-slot-wrap .item-slot {
+        width: 44px;
+        height: 44px;
+      }
+      .slot-caption {
+        font-size: 9px;
+        color: #a7b0c8;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .item-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 5px;
+        margin-top: 6px;
+        max-height: 240px;
+        overflow-y: auto;
+      }
+      .item-tooltip {
+        position: fixed;
+        z-index: 50;
+        min-width: 160px;
+        max-width: 240px;
+        padding: 8px 10px;
+        background: rgba(10, 10, 16, 0.96);
+        border: 2px solid #c9a63c;
+        border-radius: 6px;
+        color: #e6e6e6;
+        font: 12px/1.4 -apple-system, system-ui, sans-serif;
+        pointer-events: none;
+      }
+      .item-tooltip[hidden] {
+        display: none;
+      }
+      .item-tooltip-name {
+        font-weight: 700;
+        color: #fff6d5;
+        margin-bottom: 2px;
+      }
+      .item-tooltip-slot {
+        color: #a7b0c8;
+        font-size: 11px;
+        margin-bottom: 4px;
+      }
+      .item-tooltip-stats {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        color: #4fd166;
+        font-size: 11px;
+        margin-bottom: 4px;
+      }
+      .item-tooltip-stats:empty {
+        display: none;
+      }
+      .item-tooltip-desc {
+        color: #8f97b3;
+        font-style: italic;
+        font-size: 11px;
       }
       #loot-window {
         left: auto;
@@ -462,21 +539,33 @@
         <div class="stat-row"><span class="stat-label">Armor</span><span data-stat-armor></span></div>
       </div>
       <div class="unit-name" style="margin-top: 8px">Equipment</div>
-      <div class="equipped-row empty" data-equip-row="weapon">
-        <span class="stat-label">Weapon</span><span data-equip-name="weapon">Empty</span>
-      </div>
-      <div class="equipped-row empty" data-equip-row="armor">
-        <span class="stat-label">Armor</span><span data-equip-name="armor">Empty</span>
-      </div>
-      <div class="equipped-row empty" data-equip-row="trinket">
-        <span class="stat-label">Trinket</span><span data-equip-name="trinket">Empty</span>
+      <div class="equip-slots">
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="weapon"></button>
+          <span class="slot-caption">Weapon</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="armor"></button>
+          <span class="slot-caption">Armor</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="trinket"></button>
+          <span class="slot-caption">Trinket</span>
+        </div>
       </div>
     </div>
 
     <div id="inventory-panel" class="unit-panel" hidden>
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <div class="unit-name">Inventory</div>
-      <div class="item-list" id="inventory-list"></div>
+      <div class="item-grid" id="inventory-list"></div>
+    </div>
+
+    <div id="item-tooltip" class="item-tooltip" hidden>
+      <div class="item-tooltip-name" data-tooltip-name></div>
+      <div class="item-tooltip-slot" data-tooltip-slot></div>
+      <div class="item-tooltip-stats" data-tooltip-stats></div>
+      <div class="item-tooltip-desc" data-tooltip-desc></div>
     </div>
 
     <div id="loot-window" class="unit-panel" hidden>

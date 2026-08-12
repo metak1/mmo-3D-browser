@@ -9,10 +9,12 @@ import {
   EquipMessage,
   EquipSlot,
   InputMessage,
+  INVENTORY_SIZE,
   ITEMS,
   LootTakeMessage,
   MAP_HALF_EXTENT,
   PLAYER_SPEED,
+  PlayerStats,
   SPELLS,
   SpellId,
   UnequipMessage,
@@ -75,17 +77,74 @@ const equipRowEls: Record<EquipSlot, HTMLElement> = {
   armor: document.querySelector<HTMLElement>('[data-equip-row="armor"]')!,
   trinket: document.querySelector<HTMLElement>('[data-equip-row="trinket"]')!,
 };
-const equipNameEls: Record<EquipSlot, HTMLElement> = {
-  weapon: document.querySelector<HTMLElement>('[data-equip-name="weapon"]')!,
-  armor: document.querySelector<HTMLElement>('[data-equip-name="armor"]')!,
-  trinket: document.querySelector<HTMLElement>('[data-equip-name="trinket"]')!,
-};
 
 const inventoryPanel = document.getElementById("inventory-panel")!;
 const inventoryListEl = document.getElementById("inventory-list")!;
 
 const lootWindow = document.getElementById("loot-window")!;
 const lootListEl = document.getElementById("loot-list")!;
+
+const itemTooltipEl = document.getElementById("item-tooltip")!;
+const itemTooltipNameEl = document.querySelector<HTMLElement>("[data-tooltip-name]")!;
+const itemTooltipSlotEl = document.querySelector<HTMLElement>("[data-tooltip-slot]")!;
+const itemTooltipStatsEl = document.querySelector<HTMLElement>("[data-tooltip-stats]")!;
+const itemTooltipDescEl = document.querySelector<HTMLElement>("[data-tooltip-desc]")!;
+
+const STAT_LABELS: Record<keyof PlayerStats, string> = {
+  strength: "Strength",
+  dexterity: "Dexterity",
+  intellect: "Intellect",
+  vitality: "Vitality",
+  luck: "Luck",
+  armor: "Armor",
+};
+
+function positionItemTooltip(event: MouseEvent) {
+  const offset = 16;
+  const maxLeft = window.innerWidth - itemTooltipEl.offsetWidth - 8;
+  const maxTop = window.innerHeight - itemTooltipEl.offsetHeight - 8;
+  itemTooltipEl.style.left = `${Math.min(event.clientX + offset, Math.max(8, maxLeft))}px`;
+  itemTooltipEl.style.top = `${Math.min(event.clientY + offset, Math.max(8, maxTop))}px`;
+}
+
+function showItemTooltip(itemId: string, event: MouseEvent) {
+  const item = ITEMS[itemId];
+  if (!item) return;
+
+  itemTooltipNameEl.textContent = item.name;
+  itemTooltipSlotEl.textContent = capitalize(item.slot);
+  itemTooltipStatsEl.innerHTML = Object.entries(item.bonuses)
+    .map(([stat, value]) => `<span>+${value} ${STAT_LABELS[stat as keyof PlayerStats]}</span>`)
+    .join("");
+  itemTooltipDescEl.textContent = item.description;
+
+  itemTooltipEl.hidden = false;
+  positionItemTooltip(event);
+}
+
+function hideItemTooltip() {
+  itemTooltipEl.hidden = true;
+}
+
+// Inventory slots are rebuilt on every render, so a plain listener bound at creation
+// is fine. Equip slots are static DOM nodes reused across renders, so their tooltip
+// listeners are bound once (below) and read the item id from a data attribute that
+// renderEquipment keeps up to date, rather than rebinding a listener every render.
+function attachItemTooltip(el: HTMLElement, itemId: string) {
+  el.addEventListener("mouseenter", (event) => showItemTooltip(itemId, event as MouseEvent));
+  el.addEventListener("mousemove", (event) => positionItemTooltip(event as MouseEvent));
+  el.addEventListener("mouseleave", hideItemTooltip);
+}
+
+function bindPersistentItemTooltip(el: HTMLElement) {
+  el.addEventListener("mouseenter", (event) => {
+    if (el.dataset.itemId) showItemTooltip(el.dataset.itemId, event as MouseEvent);
+  });
+  el.addEventListener("mousemove", (event) => {
+    if (el.dataset.itemId) positionItemTooltip(event as MouseEvent);
+  });
+  el.addEventListener("mouseleave", hideItemTooltip);
+}
 
 makeDraggable(document.getElementById("player-panel")!, "player");
 makeDraggable(document.getElementById("target-panel")!, "target");
@@ -105,6 +164,7 @@ for (const slot of Object.keys(equipRowEls) as EquipSlot[]) {
     const message: UnequipMessage = { slot };
     activeRoom?.send("unequip", message);
   });
+  bindPersistentItemTooltip(equipRowEls[slot]);
 }
 
 interface PlayerStatsSnapshot {
@@ -133,25 +193,32 @@ function renderEquipment(player: PlayerStatsSnapshot) {
   for (const slot of Object.keys(equipped) as EquipSlot[]) {
     const itemId = equipped[slot];
     const item = itemId ? ITEMS[itemId] : undefined;
-    equipNameEls[slot].textContent = item ? item.name : "Empty";
-    equipRowEls[slot].classList.toggle("empty", !item);
+    const el = equipRowEls[slot];
+    el.textContent = item ? item.icon : "";
+    el.classList.toggle("empty", !item);
+    if (item) el.dataset.itemId = itemId;
+    else delete el.dataset.itemId;
   }
 }
 
 function renderInventory(player: PlayerStatsSnapshot) {
   inventoryListEl.innerHTML = "";
-  for (const itemId of player.inventory) {
-    const item = ITEMS[itemId];
-    if (!item) continue;
+  const items = [...player.inventory];
+  for (let i = 0; i < INVENTORY_SIZE; i++) {
+    const itemId = items[i];
+    const item = itemId ? ITEMS[itemId] : undefined;
 
-    const row = document.createElement("button");
-    row.className = "item-row";
-    row.innerHTML = `<span>${item.name}</span><span class="item-slot-tag">${capitalize(item.slot)}</span>`;
-    row.addEventListener("click", () => {
-      const message: EquipMessage = { itemId };
-      activeRoom?.send("equip", message);
-    });
-    inventoryListEl.appendChild(row);
+    const slotEl = document.createElement("button");
+    slotEl.className = item ? "item-slot" : "item-slot empty";
+    slotEl.textContent = item ? item.icon : "";
+    if (item && itemId) {
+      slotEl.addEventListener("click", () => {
+        const message: EquipMessage = { itemId };
+        activeRoom?.send("equip", message);
+      });
+      attachItemTooltip(slotEl, itemId);
+    }
+    inventoryListEl.appendChild(slotEl);
   }
 }
 

@@ -8,7 +8,6 @@ import { WORLD_ROOM_NAME } from "@mmo/shared";
 import { WorldRoom } from "./rooms/WorldRoom.js";
 import { authRouter } from "./routes/auth.js";
 import { charactersRouter } from "./routes/characters.js";
-import { initDb } from "./db/init.js";
 
 const app = express();
 app.use(cors());
@@ -32,8 +31,8 @@ gameServer.define(WORLD_ROOM_NAME, WorldRoom);
 
 const port = Number(process.env.PORT ?? 2567);
 
-initDb()
-  .then(() => gameServer.listen(port))
+gameServer
+  .listen(port)
   .then(() => {
     console.log(`Colyseus server listening on ws://localhost:${port}`);
   })

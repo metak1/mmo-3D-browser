@@ -1,5 +1,6 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
+import { Prisma } from "@prisma/client";
 import { createUser, findUserById, findUserByUsername } from "../db/users.js";
 import { signToken } from "../auth/jwt.js";
 import { AuthedRequest, requireAuth } from "../http/authMiddleware.js";
@@ -44,8 +45,8 @@ authRouter.post(
       const user = await createUser(username, email, passwordHash);
       const token = signToken({ userId: user.id, username: user.username });
       res.status(201).json({ token, user: publicUser(user) });
-    } catch (err: any) {
-      if (err?.code === "23505") {
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
         res.status(409).json({ error: "Username or email already taken" });
         return;
       }
