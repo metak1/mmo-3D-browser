@@ -4,6 +4,10 @@ import {
   AcceptQuestMessage,
   BOSS_PHASE_2_HP_FRACTION,
   CastMessage,
+  CHAT_MAX_LENGTH,
+  ChatBroadcast,
+  ChatChannel,
+  ChatMessage,
   CLASSES,
   ClassId,
   ClassRole,
@@ -104,6 +108,11 @@ const dungeonStartBtn = document.querySelector<HTMLButtonElement>("[data-dungeon
 const dungeonStatusPanel = document.getElementById("dungeon-status-panel")!;
 const dungeonEncounterLabelEl = document.querySelector<HTMLElement>("[data-dungeon-encounter-label]")!;
 const leaveDungeonBtn = document.querySelector<HTMLButtonElement>("[data-leave-dungeon]")!;
+
+const chatPanel = document.getElementById("chat-panel")!;
+const chatLogEl = document.getElementById("chat-log")!;
+const chatInputEl = document.getElementById("chat-input") as HTMLInputElement;
+const chatTabEls = [...document.querySelectorAll<HTMLButtonElement>("[data-chat-channel]")];
 
 const playerLevelEl = document.querySelector<HTMLElement>("[data-player-level]")!;
 const playerClassEl = document.querySelector<HTMLElement>("[data-player-class]")!;
@@ -274,6 +283,7 @@ makeDraggable(questLogPanel, "quest-log");
 makeDraggable(partyPanel, "party");
 makeDraggable(dungeonFinderPanel, "dungeon-finder");
 makeDraggable(dungeonStatusPanel, "dungeon-status");
+makeDraggable(chatPanel, "chat");
 
 // Set once main() establishes a connection; the equip/unequip/inventory click handlers
 // below are bound once at module scope (their DOM elements are static), so they read
@@ -985,9 +995,28 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     window.location.reload();
   });
 
+  let activeChatChannel: ChatChannel = "say";
+  for (const tab of chatTabEls) {
+    tab.addEventListener("click", () => {
+      activeChatChannel = tab.dataset.chatChannel as ChatChannel;
+      for (const other of chatTabEls) other.classList.toggle("active", other === tab);
+    });
+  }
+
+  chatInputEl.addEventListener("keydown", (e) => {
+    if (e.code !== "Enter") return;
+    const text = chatInputEl.value.trim();
+    chatInputEl.value = "";
+    chatInputEl.blur(); // hands movement/hotkeys back to the game immediately
+    if (!text) return;
+    const message: ChatMessage = { channel: activeChatChannel, text: text.slice(0, CHAT_MAX_LENGTH) };
+    room?.send("chat", message);
+  });
+
   const characterPanel = document.getElementById("character-panel")!;
 
   window.addEventListener("keydown", (e) => {
+    if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) return;
     if (e.code === "Digit1") castSpell(0);
     else if (e.code === "Digit2") castSpell(1);
     else if (e.code === "Digit3") castSpell(2);
@@ -1122,6 +1151,27 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     room.onMessage("dungeon_ready", (reservation: SeatReservation) => {
       sessionStorage.setItem("mmo:pendingConnect", JSON.stringify({ mode: "dungeon", reservation, token, characterId }));
       window.location.reload();
+    });
+
+    // Works identically in the overworld and inside a dungeon instance - both room types
+    // broadcast the same "chat" message shape (see server/src/rooms/chat.ts).
+    room.onMessage("chat", (payload: ChatBroadcast) => {
+      const row = document.createElement("div");
+      row.className = `chat-message ${payload.channel}`;
+      const sender = document.createElement("span");
+      sender.className = "chat-sender";
+      sender.textContent = `${payload.senderName}: `;
+      row.appendChild(sender);
+      row.appendChild(document.createTextNode(payload.text));
+
+      const wasAtBottom = chatLogEl.scrollTop + chatLogEl.clientHeight >= chatLogEl.scrollHeight - 4;
+      chatLogEl.appendChild(row);
+      while (chatLogEl.children.length > 100) chatLogEl.removeChild(chatLogEl.firstChild!);
+      if (wasAtBottom) chatLogEl.scrollTop = chatLogEl.scrollHeight;
+
+      if (payload.channel === "say") {
+        avatars.get(payload.senderSessionId)?.chatBubble.show(payload.text);
+      }
     });
 
     dungeonStatusPanel.hidden = !isDungeon;

@@ -2,6 +2,7 @@ import { Room, Client, matchMaker } from "@colyseus/core";
 import {
   AcceptQuestMessage,
   BOSS_ARENA_CENTER,
+  ChatMessage,
   DUNGEON_PARTY_SIZE,
   DUNGEON_ROOM_NAME,
   DungeonJoinListingMessage,
@@ -41,6 +42,7 @@ import {
 import { verifyToken } from "../auth/jwt.js";
 import { getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
 import { listCharacterItems, replaceCharacterItems } from "../db/items.js";
+import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
 import { DungeonListing, Enemy, LootBag, Player, WorldState } from "./schema/WorldState.js";
 
@@ -101,6 +103,7 @@ export class WorldRoom extends Room<WorldState> {
       this.handleDungeonJoinListing(client, message),
     );
     this.onMessage("dungeon_start", (client) => this.handleDungeonStart(client));
+    this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { ChatBubble } from "./ChatBubble";
 import { HealthBar } from "./HealthBar";
 
 const INTERPOLATION_LERP = 0.25;
@@ -7,6 +8,7 @@ const SELECTION_RING_COLOR = 0x6ee7ff;
 export class PlayerAvatar {
   readonly group = new THREE.Group();
   readonly healthBar = new HealthBar();
+  readonly chatBubble = new ChatBubble();
   private readonly selectionRing: THREE.Mesh;
   private targetPosition = new THREE.Vector3();
   private targetRotationY = 0;
@@ -53,27 +55,30 @@ export class PlayerAvatar {
   addTo(scene: THREE.Scene) {
     scene.add(this.group);
     scene.add(this.healthBar.group);
-    this.syncHealthBarPosition();
+    scene.add(this.chatBubble.group);
+    this.syncOverheadPositions();
   }
 
   removeFrom(scene: THREE.Scene) {
     scene.remove(this.group);
     scene.remove(this.healthBar.group);
+    scene.remove(this.chatBubble.group);
   }
 
   snapToTarget() {
     this.group.position.copy(this.targetPosition);
     this.group.rotation.y = this.targetRotationY;
-    this.syncHealthBarPosition();
+    this.syncOverheadPositions();
   }
 
   update() {
     this.group.position.lerp(this.targetPosition, INTERPOLATION_LERP);
     this.group.rotation.y = THREE.MathUtils.lerp(this.group.rotation.y, this.targetRotationY, INTERPOLATION_LERP);
-    this.syncHealthBarPosition();
+    this.syncOverheadPositions();
   }
 
-  private syncHealthBarPosition() {
+  private syncOverheadPositions() {
     this.healthBar.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
+    this.chatBubble.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
   }
 }

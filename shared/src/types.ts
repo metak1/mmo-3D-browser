@@ -750,3 +750,22 @@ export const DUNGEON_COMPOSITION: Record<ClassRole, number> = { tank: 1, healer:
 export interface DungeonJoinListingMessage {
   partyId: string;
 }
+
+export const CHAT_MAX_LENGTH = 200;
+
+export type ChatChannel = "say" | "party";
+
+// Chat is deliberately not part of synced schema state (see server/src/rooms/chat.ts) -
+// these are plain onMessage/broadcast payloads, not @type fields.
+export interface ChatMessage {
+  channel: ChatChannel;
+  text: string;
+}
+
+export interface ChatBroadcast {
+  channel: ChatChannel;
+  senderName: string;
+  senderSessionId: string;
+  text: string;
+  sentAt: number;
+}

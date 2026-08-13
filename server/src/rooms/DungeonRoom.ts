@@ -1,6 +1,7 @@
 import { Room, Client } from "@colyseus/core";
 import {
   CastMessage,
+  ChatMessage,
   ENEMY_STATS,
   EnemyKind,
   INVENTORY_SIZE,
@@ -20,6 +21,7 @@ import {
 import { verifyToken } from "../auth/jwt.js";
 import { getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
 import { listCharacterItems, replaceCharacterItems } from "../db/items.js";
+import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
 import { DungeonState, Enemy, LootBag, Player } from "./schema/DungeonState.js";
 
@@ -70,6 +72,7 @@ export class DungeonRoom extends Room<DungeonState> {
     this.onMessage("input", (client, message: InputMessage) => this.combat.handleInput(client.sessionId, message));
     this.onMessage("cast", (client, message: CastMessage) => this.combat.handleCast(client, message));
     this.onMessage("loot_take", (client, message: LootTakeMessage) => this.handleLootTake(client, message));
+    this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.checkEncounterProgress(), ENCOUNTER_CHECK_INTERVAL_MS);

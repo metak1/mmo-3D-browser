@@ -9,13 +9,29 @@ const KEY_TO_AXIS: Record<string, [x: number, z: number]> = {
   ArrowRight: [1, 0],
 };
 
+function isTypingTarget(): boolean {
+  const el = document.activeElement;
+  return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+}
+
 export class InputController {
   private pressed = new Set<string>();
 
   constructor() {
-    window.addEventListener("keydown", (e) => this.pressed.add(e.code));
-    window.addEventListener("keyup", (e) => this.pressed.delete(e.code));
+    window.addEventListener("keydown", (e) => {
+      if (isTypingTarget()) return;
+      this.pressed.add(e.code);
+    });
+    window.addEventListener("keyup", (e) => {
+      if (isTypingTarget()) return;
+      this.pressed.delete(e.code);
+    });
     window.addEventListener("blur", () => this.pressed.clear());
+    // Focusing a text field mid-keypress (e.g. pressing Enter to open chat while still holding
+    // W) must not leave that key stuck "pressed" forever, since keyup will now be swallowed too.
+    window.addEventListener("focusin", () => {
+      if (isTypingTarget()) this.pressed.clear();
+    });
   }
 
   getMovement(): { moveX: number; moveZ: number } {
