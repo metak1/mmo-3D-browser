@@ -66,9 +66,18 @@ export class LootBag extends Schema {
   @type(["string"]) items = new ArraySchema<string>();
 }
 
+// A listing is just a party advertising itself for the dungeon finder - member list and
+// composition are derived on demand from players filtered by partyId, never duplicated here.
+export class DungeonListing extends Schema {
+  @type("string") partyId = "";
+  @type("string") leaderSessionId = "";
+  @type("number") createdAt = 0;
+}
+
 export class WorldState extends Schema {
   @type({ map: Player }) players = new MapSchema<Player>();
   @type({ map: Enemy }) enemies = new MapSchema<Enemy>();
   @type({ map: Projectile }) projectiles = new MapSchema<Projectile>();
   @type({ map: LootBag }) lootBags = new MapSchema<LootBag>();
+  @type({ map: DungeonListing }) dungeonListings = new MapSchema<DungeonListing>();
 }

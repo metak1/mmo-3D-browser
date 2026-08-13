@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BOSS_ARENA_CENTER, BOSS_ARENA_RADIUS, MAP_HALF_EXTENT } from "@mmo/shared";
+import { BOSS_ARENA_CENTER, BOSS_ARENA_RADIUS, DUNGEON_HALF_EXTENT, MAP_HALF_EXTENT } from "@mmo/shared";
 
 const CAMERA_OFFSET = new THREE.Vector3(0, 21, 13.5);
 const CAMERA_LERP = 0.08;
@@ -16,7 +16,10 @@ export class GameScene {
 
   private cameraTarget = new THREE.Vector3();
 
-  constructor(container: HTMLElement) {
+  constructor(
+    container: HTMLElement,
+    private readonly isDungeon = false,
+  ) {
     // High-DPI screens (e.g. Retina) report devicePixelRatio 2-3, which multiplies
     // the number of pixels the GPU has to shade every frame. Cap it, and skip MSAA
     // once we're already supersampling at 2x — running both tanks framerate for
@@ -31,8 +34,9 @@ export class GameScene {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     container.appendChild(this.renderer.domElement);
 
-    this.scene.background = new THREE.Color(0x10121a);
-    this.scene.fog = new THREE.Fog(0x10121a, 38, 80);
+    const backgroundColor = isDungeon ? 0x140f1a : 0x10121a;
+    this.scene.background = new THREE.Color(backgroundColor);
+    this.scene.fog = new THREE.Fog(backgroundColor, isDungeon ? 22 : 38, isDungeon ? 45 : 80);
 
     this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
     this.camera.position.copy(CAMERA_OFFSET);
@@ -54,15 +58,21 @@ export class GameScene {
   }
 
   private setupGround() {
-    const size = MAP_HALF_EXTENT * 2;
+    const size = (this.isDungeon ? DUNGEON_HALF_EXTENT : MAP_HALF_EXTENT) * 2;
+    const groundColor = this.isDungeon ? 0x241a2e : 0x2b3348;
+    const gridColor = this.isDungeon ? 0x5a3a6e : 0x4a5578;
+    const gridColorDark = this.isDungeon ? 0x432c52 : 0x3a4260;
+
     const groundGeometry = new THREE.PlaneGeometry(size, size);
-    const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x2b3348 });
+    const groundMaterial = new THREE.MeshStandardMaterial({ color: groundColor });
     const ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
     this.scene.add(ground);
 
-    const grid = new THREE.GridHelper(size, size / 2, 0x4a5578, 0x3a4260);
+    const grid = new THREE.GridHelper(size, size / 2, gridColor, gridColorDark);
     this.scene.add(grid);
+
+    if (this.isDungeon) return; // no boss arena patch inside the instance - that's overworld-only
 
     // Purely decorative marker for the boss arena - no collision, just tells the player
     // "you've entered a different area" before the boss itself comes into view.

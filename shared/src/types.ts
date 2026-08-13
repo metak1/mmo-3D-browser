@@ -37,21 +37,32 @@ export const MAX_LEVEL = 60;
 
 export type MainStat = "strength" | "dexterity" | "intellect";
 export type ClassId = "warrior" | "rogue" | "ranger" | "oracle" | "mage";
+export type ClassRole = "tank" | "healer" | "dps";
 
 export interface ClassDef {
   name: string;
   mainStat: MainStat;
+  role: ClassRole;
 }
 
 export const CLASSES: Record<ClassId, ClassDef> = {
-  warrior: { name: "Warrior", mainStat: "strength" },
-  rogue: { name: "Rogue", mainStat: "dexterity" },
-  ranger: { name: "Ranger", mainStat: "dexterity" },
-  oracle: { name: "Oracle", mainStat: "intellect" },
-  mage: { name: "Mage", mainStat: "intellect" },
+  warrior: { name: "Warrior", mainStat: "strength", role: "tank" },
+  rogue: { name: "Rogue", mainStat: "dexterity", role: "dps" },
+  ranger: { name: "Ranger", mainStat: "dexterity", role: "dps" },
+  oracle: { name: "Oracle", mainStat: "intellect", role: "healer" },
+  mage: { name: "Mage", mainStat: "intellect", role: "dps" },
 };
 
 export const DEFAULT_CLASS_ID: ClassId = "warrior";
+
+// Universal (no room-specific state), so both WorldRoom and DungeonRoom's combat engines
+// share this one implementation instead of each carrying their own copy.
+export function resolveClassId(raw: unknown): ClassId {
+  if (typeof raw === "string" && Object.prototype.hasOwnProperty.call(CLASSES, raw)) {
+    return raw as ClassId;
+  }
+  return DEFAULT_CLASS_ID;
+}
 export const MAIN_STAT_START_BONUS = 5; // extra points in your class's main stat at level 1
 
 export const DAMAGE_STAT_FACTOR = 0.3; // flat damage/heal bonus = floor(mainStat * factor)
@@ -722,4 +733,20 @@ export interface PartyInviteMessage {
 
 export interface PartyRespondMessage {
   accept: boolean;
+}
+
+export const PORTAL_POSITION = { x: -24, z: -24 }; // clear of every existing spawn/quest/arena position
+
+export const DUNGEON_HALF_EXTENT = 16; // the dungeon's own small ground, purely decorative sizing for the client
+
+export const DUNGEON_ROOM_NAME = "dungeon_room";
+export const DUNGEON_PARTY_SIZE = 4;
+export const DUNGEON_COMPOSITION: Record<ClassRole, number> = { tank: 1, healer: 1, dps: 2 };
+
+// A "listing" is just a party advertising itself - composition is only enforced at
+// dungeon_start, not at dungeon_join_listing (only a size check, "except if it's full").
+// The member list/roles are derived on demand from state.players filtered by partyId,
+// never duplicated onto the listing itself.
+export interface DungeonJoinListingMessage {
+  partyId: string;
 }

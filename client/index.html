@@ -552,6 +552,43 @@
         height: 8px;
         margin-top: 0;
       }
+      #dungeon-finder-panel {
+        left: auto;
+        right: 300px;
+        top: 300px;
+        width: 280px;
+      }
+      #dungeon-finder-panel[hidden] {
+        display: none;
+      }
+      .dungeon-section-label {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #a7b0c8;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .dungeon-role-checklist {
+        display: flex;
+        gap: 8px;
+        margin-top: 4px;
+        font-size: 10px;
+      }
+      .dungeon-role-tag.filled {
+        color: #4fd166;
+      }
+      .dungeon-role-tag.missing {
+        color: #e0503c;
+      }
+      #dungeon-status-panel {
+        left: auto;
+        right: 12px;
+        top: 460px;
+        width: 220px;
+      }
+      #dungeon-status-panel[hidden] {
+        display: none;
+      }
       #party-invite-prompt {
         left: auto;
         right: 300px;
@@ -806,6 +843,35 @@
         <button type="button" class="overlay-button" data-party-invite-accept>Accept</button>
         <button type="button" class="overlay-button" data-party-invite-decline>Decline</button>
       </div>
+    </div>
+
+    <div id="dungeon-finder-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Dungeon Finder</div>
+
+      <div class="dungeon-section-label">Your Group</div>
+      <div class="item-list" id="dungeon-your-group" data-no-drag></div>
+      <div class="dungeon-role-checklist" id="dungeon-role-checklist"></div>
+      <div class="loot-actions" style="margin-top: 6px">
+        <button type="button" class="overlay-button" data-dungeon-open-listing>Open Group</button>
+        <button type="button" class="overlay-button" data-dungeon-start disabled>Start Dungeon</button>
+      </div>
+
+      <div class="dungeon-section-label">Open Groups</div>
+      <div class="item-list" id="dungeon-listing-list" data-no-drag></div>
+
+      <button type="button" class="overlay-button" data-dungeon-finder-close style="margin-top: 8px; width: 100%">
+        Close
+      </button>
+    </div>
+
+    <div id="dungeon-status-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Dungeon</div>
+      <div data-dungeon-encounter-label></div>
+      <button type="button" class="overlay-button" data-leave-dungeon hidden style="margin-top: 8px; width: 100%">
+        Leave Dungeon
+      </button>
     </div>
 
     <div id="spell-panel" class="unit-panel">

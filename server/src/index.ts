@@ -4,8 +4,9 @@ import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import { Server } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
-import { WORLD_ROOM_NAME } from "@mmo/shared";
+import { DUNGEON_ROOM_NAME, WORLD_ROOM_NAME } from "@mmo/shared";
 import { WorldRoom } from "./rooms/WorldRoom.js";
+import { DungeonRoom } from "./rooms/DungeonRoom.js";
 import { authRouter } from "./routes/auth.js";
 import { charactersRouter } from "./routes/characters.js";
 
@@ -28,6 +29,7 @@ const gameServer = new Server({
 });
 
 gameServer.define(WORLD_ROOM_NAME, WorldRoom);
+gameServer.define(DUNGEON_ROOM_NAME, DungeonRoom);
 
 const port = Number(process.env.PORT ?? 2567);
 

@@ -1,11 +1,15 @@
 import * as THREE from "three";
-import type { Room } from "colyseus.js";
+import type { Room, SeatReservation } from "colyseus.js";
 import {
   AcceptQuestMessage,
   BOSS_PHASE_2_HP_FRACTION,
   CastMessage,
   CLASSES,
   ClassId,
+  ClassRole,
+  DUNGEON_COMPOSITION,
+  DUNGEON_PARTY_SIZE,
+  DungeonJoinListingMessage,
   ENEMY_STATS,
   EnemyKind,
   EquipMessage,
@@ -20,6 +24,7 @@ import {
   NpcDef,
   PARTY_MAX_SIZE,
   PLAYER_SPEED,
+  PORTAL_POSITION,
   PartyInviteMessage,
   PartyRespondMessage,
   PlayerStats,
@@ -41,10 +46,11 @@ import { GameScene } from "./game/Scene";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
 import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
+import { PortalAvatar } from "./game/Portal";
 import { ProjectileAvatar } from "./game/Projectile";
 import { LootBagAvatar } from "./game/LootBagAvatar";
 import { InputController } from "./game/InputController";
-import { connectToWorld } from "./network/connection";
+import { connectToWorld, consumeDungeonReservation } from "./network/connection";
 import * as api from "./network/api";
 import { makeDraggable } from "./ui/DraggablePanel";
 
@@ -87,6 +93,17 @@ const partyPanel = document.getElementById("party-panel")!;
 const partyMemberListEl = document.getElementById("party-member-list")!;
 const partyInvitePromptEl = document.getElementById("party-invite-prompt")!;
 const partyInviteTextEl = document.querySelector<HTMLElement>("[data-party-invite-text]")!;
+
+const dungeonFinderPanel = document.getElementById("dungeon-finder-panel")!;
+const dungeonYourGroupEl = document.getElementById("dungeon-your-group")!;
+const dungeonRoleChecklistEl = document.getElementById("dungeon-role-checklist")!;
+const dungeonListingListEl = document.getElementById("dungeon-listing-list")!;
+const dungeonOpenListingBtn = document.querySelector<HTMLButtonElement>("[data-dungeon-open-listing]")!;
+const dungeonStartBtn = document.querySelector<HTMLButtonElement>("[data-dungeon-start]")!;
+
+const dungeonStatusPanel = document.getElementById("dungeon-status-panel")!;
+const dungeonEncounterLabelEl = document.querySelector<HTMLElement>("[data-dungeon-encounter-label]")!;
+const leaveDungeonBtn = document.querySelector<HTMLButtonElement>("[data-leave-dungeon]")!;
 
 const playerLevelEl = document.querySelector<HTMLElement>("[data-player-level]")!;
 const playerClassEl = document.querySelector<HTMLElement>("[data-player-class]")!;
@@ -255,6 +272,8 @@ makeDraggable(talentPanel, "talents");
 makeDraggable(npcDialoguePanel, "npc-dialogue");
 makeDraggable(questLogPanel, "quest-log");
 makeDraggable(partyPanel, "party");
+makeDraggable(dungeonFinderPanel, "dungeon-finder");
+makeDraggable(dungeonStatusPanel, "dungeon-status");
 
 // Set once main() establishes a connection; the equip/unequip/inventory click handlers
 // below are bound once at module scope (their DOM elements are static), so they read
@@ -404,8 +423,11 @@ function updateHpBar(fillEl: HTMLElement, labelEl: HTMLElement, hp: number, maxH
   labelEl.textContent = `${Math.ceil(hp)}/${Math.ceil(maxHp)}`;
 }
 
-async function main(token: string, characterId: number) {
-  const gameScene = new GameScene(container);
+type Connector = () => ReturnType<typeof connectToWorld>;
+
+async function main(token: string, characterId: number, connectOverride?: Connector) {
+  const isDungeon = !!connectOverride;
+  const gameScene = new GameScene(container, isDungeon);
   const input = new InputController();
 
   const avatars = new Map<string, PlayerAvatar>();
@@ -431,6 +453,7 @@ async function main(token: string, characterId: number) {
   const projectiles = new Map<string, ProjectileAvatar>();
   const lootBags = new Map<string, LootBagAvatar>();
   const lootBagSchemaById = new Map<string, { x: number; z: number; items: Iterable<string> }>();
+  const dungeonListingSchemaById = new Map<string, { partyId: string; leaderSessionId: string; createdAt: number }>();
 
   // NPCs are static shared data (no hp, never move), so they're spawned once from NPCS
   // rather than synced through room state like enemies/players/loot bags.
@@ -441,6 +464,16 @@ async function main(token: string, characterId: number) {
     avatar.setPosition(def.x, def.z);
     avatar.addTo(gameScene.scene);
     npcs.set(def.id, avatar);
+  }
+
+  // The portal only exists in the overworld - it's how a dungeon instance is entered in
+  // the first place, so it has no reason to be present once already inside one.
+  let portal: PortalAvatar | undefined;
+  if (!isDungeon) {
+    portal = new PortalAvatar();
+    portal.group.userData.isPortal = true;
+    portal.setPosition(PORTAL_POSITION.x, PORTAL_POSITION.z);
+    portal.addTo(gameScene.scene);
   }
 
   let room: Room | undefined;
@@ -820,6 +853,99 @@ async function main(token: string, characterId: number) {
     npcDialoguePanel.hidden = true;
   }
 
+  function computePartyRoleCounts(partyId: string): Record<ClassRole, number> {
+    const counts: Record<ClassRole, number> = { tank: 0, healer: 0, dps: 0 };
+    for (const schema of playerSchemaById.values()) {
+      if (schema.partyId !== partyId) continue;
+      const role = CLASSES[schema.classId as ClassId]?.role;
+      if (role) counts[role]++;
+    }
+    return counts;
+  }
+
+  function renderDungeonFinderPanel() {
+    const local = localSessionId ? playerSchemaById.get(localSessionId) : undefined;
+    const partyId = local?.partyId ?? "";
+
+    dungeonYourGroupEl.innerHTML = "";
+    let groupSize = 0;
+    if (partyId) {
+      for (const [sessionId, schema] of playerSchemaById) {
+        if (schema.partyId !== partyId) continue;
+        groupSize++;
+
+        const className = CLASSES[schema.classId as ClassId]?.name ?? schema.classId;
+        const role = CLASSES[schema.classId as ClassId]?.role;
+        const label = sessionId === localSessionId ? `${schema.name} (You)` : schema.name;
+
+        const row = document.createElement("div");
+        row.className = "item-row";
+        row.innerHTML = `<span>${label}</span><span class="item-slot-tag">${className}${role ? ` · ${capitalize(role)}` : ""}</span>`;
+        dungeonYourGroupEl.appendChild(row);
+      }
+    }
+
+    const roleCounts = partyId ? computePartyRoleCounts(partyId) : { tank: 0, healer: 0, dps: 0 };
+    dungeonRoleChecklistEl.innerHTML = (Object.keys(DUNGEON_COMPOSITION) as ClassRole[])
+      .map((role) => {
+        const have = roleCounts[role];
+        const need = DUNGEON_COMPOSITION[role];
+        return `<span class="dungeon-role-tag ${have === need ? "filled" : "missing"}">${capitalize(role)} ${have}/${need}</span>`;
+      })
+      .join("");
+
+    dungeonOpenListingBtn.hidden = !!partyId && dungeonListingSchemaById.has(partyId);
+
+    const compositionValid =
+      groupSize === DUNGEON_PARTY_SIZE &&
+      (Object.keys(DUNGEON_COMPOSITION) as ClassRole[]).every((role) => roleCounts[role] === DUNGEON_COMPOSITION[role]);
+    dungeonStartBtn.disabled = !compositionValid;
+
+    dungeonListingListEl.innerHTML = "";
+    for (const [listingPartyId, listing] of dungeonListingSchemaById) {
+      const size = [...playerSchemaById.values()].filter((s) => s.partyId === listingPartyId).length;
+      const isOwnGroup = listingPartyId === partyId;
+      const wouldFit = !isOwnGroup && size + groupSize <= DUNGEON_PARTY_SIZE;
+      const leaderLabel = playerSchemaById.get(listing.leaderSessionId)?.name ?? "Someone";
+
+      const row = document.createElement("div");
+      row.className = "talent-card";
+      row.innerHTML = `
+        <div class="talent-card-top">
+          <span>${leaderLabel}'s Group</span>
+          <span class="talent-rank">${size} / ${DUNGEON_PARTY_SIZE}</span>
+        </div>
+      `;
+
+      if (isOwnGroup) {
+        const tag = document.createElement("span");
+        tag.className = "talent-desc";
+        tag.textContent = "This is your group";
+        row.appendChild(tag);
+      } else {
+        const btn = document.createElement("button");
+        btn.className = "overlay-button";
+        btn.textContent = "Join";
+        btn.disabled = !wouldFit;
+        btn.addEventListener("click", () => {
+          const message: DungeonJoinListingMessage = { partyId: listingPartyId };
+          activeRoom?.send("dungeon_join_listing", message);
+        });
+        row.appendChild(btn);
+      }
+      dungeonListingListEl.appendChild(row);
+    }
+  }
+
+  function openDungeonFinder() {
+    dungeonFinderPanel.hidden = false;
+    renderDungeonFinderPanel();
+  }
+
+  function closeDungeonFinder() {
+    dungeonFinderPanel.hidden = true;
+  }
+
   function renderQuestLog() {
     questLogListEl.innerHTML = "";
     if (!localPlayerSchema) return;
@@ -848,6 +974,14 @@ async function main(token: string, characterId: number) {
   document.querySelector("[data-party-invite-decline]")!.addEventListener("click", () => {
     const message: PartyRespondMessage = { accept: false };
     room?.send("party_respond", message);
+  });
+
+  document.querySelector("[data-dungeon-finder-close]")!.addEventListener("click", () => closeDungeonFinder());
+  dungeonOpenListingBtn.addEventListener("click", () => room?.send("dungeon_open_listing"));
+  dungeonStartBtn.addEventListener("click", () => room?.send("dungeon_start"));
+  leaveDungeonBtn.addEventListener("click", () => {
+    sessionStorage.setItem("mmo:pendingConnect", JSON.stringify({ mode: "world", token, characterId }));
+    window.location.reload();
   });
 
   const characterPanel = document.getElementById("character-panel")!;
@@ -893,6 +1027,7 @@ async function main(token: string, characterId: number) {
       ...[...avatars.values()].map((avatar) => avatar.group),
       ...[...lootBags.values()].map((avatar) => avatar.group),
       ...[...npcs.values()].map((avatar) => avatar.group),
+      ...(portal ? [portal.group] : []),
     ];
     const hits = raycaster.intersectObjects(clickable, true);
 
@@ -902,7 +1037,14 @@ async function main(token: string, characterId: number) {
     }
 
     let obj: THREE.Object3D | null = hits[0].object;
-    while (obj && !obj.userData.enemyId && !obj.userData.bagId && !obj.userData.sessionId && !obj.userData.npcId) {
+    while (
+      obj &&
+      !obj.userData.enemyId &&
+      !obj.userData.bagId &&
+      !obj.userData.sessionId &&
+      !obj.userData.npcId &&
+      !obj.userData.isPortal
+    ) {
       obj = obj.parent;
     }
 
@@ -912,6 +1054,10 @@ async function main(token: string, characterId: number) {
     }
     if (obj?.userData.npcId) {
       openNpcDialogue(obj.userData.npcId as string);
+      return;
+    }
+    if (obj?.userData.isPortal) {
+      openDungeonFinder();
       return;
     }
 
@@ -961,11 +1107,41 @@ async function main(token: string, characterId: number) {
   });
 
   try {
-    const connection = await connectToWorld(token, characterId);
+    const connection = connectOverride ? await connectOverride() : await connectToWorld(token, characterId);
     room = connection.room;
     activeRoom = room;
     const $ = connection.$;
     localSessionId = room.sessionId;
+
+    // Room transitions (overworld <-> dungeon) are a reservation + full page reload rather
+    // than an in-place scene rebuild - main() only ever fully sets up one room connection
+    // per page load, so switching rooms just stashes what's needed and reloads into it.
+    room.onMessage("dungeon_ready", (reservation: SeatReservation) => {
+      sessionStorage.setItem("mmo:pendingConnect", JSON.stringify({ mode: "dungeon", reservation, token, characterId }));
+      window.location.reload();
+    });
+
+    dungeonStatusPanel.hidden = !isDungeon;
+    if (isDungeon) {
+      const updateDungeonStatusPanel = () => {
+        const dungeonState = room!.state as unknown as { encounterIndex: number; cleared: boolean };
+        dungeonEncounterLabelEl.textContent = dungeonState.cleared
+          ? "Cleared!"
+          : `Encounter ${dungeonState.encounterIndex + 1} / 3`;
+        leaveDungeonBtn.hidden = !dungeonState.cleared;
+      };
+      $(room.state).onChange(updateDungeonStatusPanel);
+      updateDungeonStatusPanel();
+    } else {
+      $(room.state).dungeonListings.onAdd((listing, partyId) => {
+        dungeonListingSchemaById.set(partyId, listing);
+        renderDungeonFinderPanel();
+      });
+      $(room.state).dungeonListings.onRemove((_listing, partyId) => {
+        dungeonListingSchemaById.delete(partyId);
+        renderDungeonFinderPanel();
+      });
+    }
 
     $(room.state).players.onAdd((player, sessionId) => {
       const avatar = new PlayerAvatar(sessionId === localSessionId ? LOCAL_COLOR : REMOTE_COLOR);
@@ -989,6 +1165,7 @@ async function main(token: string, characterId: number) {
         setupHotbarForClass(player.classId);
         updateNpcQuestIndicators();
         renderPartyPanel();
+        renderDungeonFinderPanel();
         renderPartyInvitePrompt(player);
 
         // Mutating a nested MapSchema (questProgress/questCompleted/ailments) does not
@@ -1014,6 +1191,7 @@ async function main(token: string, characterId: number) {
         // Called before the local-player branch's early `return` below, so a partyId/hp
         // change on ANY player (local or remote) always keeps the party frame list live.
         renderPartyPanel();
+        renderDungeonFinderPanel();
 
         avatar.setHp(player.hp, player.maxHp);
 
@@ -1067,6 +1245,7 @@ async function main(token: string, characterId: number) {
       playerSchemaById.delete(sessionId);
       if (currentTargetId === sessionId) setTarget(null);
       renderPartyPanel();
+      renderDungeonFinderPanel();
     });
 
     $(room.state).enemies.onAdd((enemy, enemyId) => {
@@ -1209,6 +1388,7 @@ async function main(token: string, characterId: number) {
 
     for (const avatar of enemies.values()) avatar.update();
     for (const avatar of projectiles.values()) avatar.update();
+    portal?.update(dt);
 
     if (localCastActive && localCastSpellId !== "") {
       const durationMs = SPELLS[localCastSpellId].castTimeMs;
@@ -1434,20 +1614,52 @@ authForm.addEventListener("submit", async (event) => {
   }
 });
 
-applyAuthMode();
+// A pending room transition (see the "dungeon_ready" handler and the Leave Dungeon button
+// in main()) takes priority over the normal auth/character-select boot flow - it means
+// this load is a deliberate reload mid-session, not a fresh visit.
+const PENDING_CONNECT_KEY = "mmo:pendingConnect";
 
-const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
-if (storedToken) {
-  api
-    .me(storedToken)
-    .then(() => {
-      authToken = storedToken;
-      return showCharacterSelect();
-    })
-    .catch(() => {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      showAuthScreen();
-    });
+interface PendingConnect {
+  mode: "dungeon" | "world";
+  token: string;
+  characterId: number;
+  reservation?: SeatReservation;
+}
+
+function consumePendingConnect(): PendingConnect | null {
+  const raw = sessionStorage.getItem(PENDING_CONNECT_KEY);
+  if (!raw) return null;
+  sessionStorage.removeItem(PENDING_CONNECT_KEY);
+  try {
+    return JSON.parse(raw) as PendingConnect;
+  } catch {
+    return null;
+  }
+}
+
+const pendingConnect = consumePendingConnect();
+if (pendingConnect?.mode === "dungeon" && pendingConnect.reservation) {
+  hideAllOverlays();
+  main(pendingConnect.token, pendingConnect.characterId, () => consumeDungeonReservation(pendingConnect.reservation!));
+} else if (pendingConnect?.mode === "world") {
+  hideAllOverlays();
+  main(pendingConnect.token, pendingConnect.characterId);
 } else {
-  showAuthScreen();
+  applyAuthMode();
+
+  const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+  if (storedToken) {
+    api
+      .me(storedToken)
+      .then(() => {
+        authToken = storedToken;
+        return showCharacterSelect();
+      })
+      .catch(() => {
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        showAuthScreen();
+      });
+  } else {
+    showAuthScreen();
+  }
 }
