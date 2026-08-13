@@ -304,6 +304,7 @@ interface PlayerStatsSnapshot {
   talentRanks: Iterable<[string, number]>;
   questProgress: Iterable<[string, number]>;
   questCompleted: Iterable<[string, number]>;
+  partyId: string;
 }
 
 function renderEquipment(player: PlayerStatsSnapshot) {
@@ -425,7 +426,7 @@ function updateHpBar(fillEl: HTMLElement, labelEl: HTMLElement, hp: number, maxH
 
 type Connector = () => ReturnType<typeof connectToWorld>;
 
-async function main(token: string, characterId: number, connectOverride?: Connector) {
+async function main(token: string, characterId: number, connectOverride?: Connector, restorePartyId?: string) {
   const isDungeon = !!connectOverride;
   const gameScene = new GameScene(container, isDungeon);
   const input = new InputController();
@@ -976,7 +977,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   dungeonOpenListingBtn.addEventListener("click", () => room?.send("dungeon_open_listing"));
   dungeonStartBtn.addEventListener("click", () => room?.send("dungeon_start"));
   leaveDungeonBtn.addEventListener("click", () => {
-    sessionStorage.setItem("mmo:pendingConnect", JSON.stringify({ mode: "world", token, characterId }));
+    // Carries the party (if any) through the return trip - see the matching restorePartyId
+    // plumbing in main()'s connect call and WorldRoom.onJoin, and DungeonRoom.onJoin's
+    // identical carry-through on the way in.
+    const partyId = localPlayerSchema?.partyId || undefined;
+    sessionStorage.setItem("mmo:pendingConnect", JSON.stringify({ mode: "world", token, characterId, partyId }));
     window.location.reload();
   });
 
@@ -1103,7 +1108,9 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   });
 
   try {
-    const connection = connectOverride ? await connectOverride() : await connectToWorld(token, characterId);
+    const connection = connectOverride
+      ? await connectOverride()
+      : await connectToWorld(token, characterId, restorePartyId);
     room = connection.room;
     activeRoom = room;
     const $ = connection.$;
@@ -1620,6 +1627,7 @@ interface PendingConnect {
   token: string;
   characterId: number;
   reservation?: SeatReservation;
+  partyId?: string;
 }
 
 function consumePendingConnect(): PendingConnect | null {
@@ -1639,7 +1647,7 @@ if (pendingConnect?.mode === "dungeon" && pendingConnect.reservation) {
   main(pendingConnect.token, pendingConnect.characterId, () => consumeDungeonReservation(pendingConnect.reservation!));
 } else if (pendingConnect?.mode === "world") {
   hideAllOverlays();
-  main(pendingConnect.token, pendingConnect.characterId);
+  main(pendingConnect.token, pendingConnect.characterId, undefined, pendingConnect.partyId);
 } else {
   applyAuthMode();
 

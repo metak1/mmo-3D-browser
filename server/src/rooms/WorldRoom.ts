@@ -106,7 +106,7 @@ export class WorldRoom extends Room<WorldState> {
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
   }
 
-  async onJoin(client: Client, options?: { token?: string; characterId?: number }) {
+  async onJoin(client: Client, options?: { token?: string; characterId?: number; partyId?: string }) {
     if (!options?.token || !options?.characterId) {
       throw new Error("Missing token or characterId");
     }
@@ -130,6 +130,11 @@ export class WorldRoom extends Room<WorldState> {
     player.y = 0;
     player.z = 0;
     player.name = character.name;
+    // Restores a party that was already formed before entering a dungeon (see
+    // DungeonRoom.onJoin's identical carry-through and the Leave Dungeon flow in main.ts) -
+    // without this, returning from a dungeon silently drops everyone from their group even
+    // though nothing about the party actually changed.
+    player.partyId = options.partyId ?? "";
     player.classId = classId;
     player.level = character.level;
     player.xp = character.xp;

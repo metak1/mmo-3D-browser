@@ -3,9 +3,9 @@ import { WORLD_ROOM_NAME } from "@mmo/shared";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "ws://localhost:2567";
 
-export async function connectToWorld(token: string, characterId: number) {
+export async function connectToWorld(token: string, characterId: number, partyId?: string) {
   const client = new Client(SERVER_URL);
-  const room: Room = await client.joinOrCreate(WORLD_ROOM_NAME, { token, characterId });
+  const room: Room = await client.joinOrCreate(WORLD_ROOM_NAME, { token, characterId, partyId });
   const $ = getStateCallbacks(room);
   return { room, $ };
 }
