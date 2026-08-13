@@ -75,7 +75,7 @@ export class DungeonRoom extends Room<DungeonState> {
     this.clock.setInterval(() => this.checkEncounterProgress(), ENCOUNTER_CHECK_INTERVAL_MS);
   }
 
-  async onJoin(client: Client, options?: { token?: string; characterId?: number }) {
+  async onJoin(client: Client, options?: { token?: string; characterId?: number; partyId?: string }) {
     if (!options?.token || !options?.characterId) {
       throw new Error("Missing token or characterId");
     }
@@ -97,6 +97,11 @@ export class DungeonRoom extends Room<DungeonState> {
     player.y = 0;
     player.z = 0;
     player.name = character.name;
+    // Carried over from the WorldRoom party that started this instance (see
+    // WorldRoom.handleDungeonStart) - without this every dungeon Player defaults to the
+    // schema's "" partyId, which reads client-side as "not grouped" and hides the party UI
+    // the moment players arrive, even though they're the same party that queued together.
+    player.partyId = options.partyId ?? "";
     player.classId = resolveClassId(character.class_id);
     player.level = character.level;
     player.xp = character.xp;

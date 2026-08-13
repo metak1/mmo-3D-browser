@@ -2,9 +2,6 @@ import { Room, Client, matchMaker } from "@colyseus/core";
 import {
   AcceptQuestMessage,
   BOSS_ARENA_CENTER,
-  CLASSES,
-  ClassRole,
-  DUNGEON_COMPOSITION,
   DUNGEON_PARTY_SIZE,
   DUNGEON_ROOM_NAME,
   DungeonJoinListingMessage,
@@ -409,19 +406,17 @@ export class WorldRoom extends Room<WorldState> {
   // listing can be "not ready yet" the same way a real LFG lobby can be.
   private async handleDungeonStart(client: Client) {
     const caller = this.state.players.get(client.sessionId);
-    if (!caller || !caller.partyId) return;
+    if (!caller) return;
 
-    const members = [...this.state.players.entries()].filter(([, p]) => p.partyId === caller.partyId);
-    if (members.length !== DUNGEON_PARTY_SIZE) return;
-
-    const roleCounts: Record<ClassRole, number> = { tank: 0, healer: 0, dps: 0 };
-    for (const [, p] of members) {
-      roleCounts[CLASSES[resolveClassId(p.classId)].role] += 1;
-    }
-    const compositionValid = (Object.keys(DUNGEON_COMPOSITION) as ClassRole[]).every(
-      (role) => roleCounts[role] === DUNGEON_COMPOSITION[role],
-    );
-    if (!compositionValid) return;
+    // No composition or full-party requirement on purpose: an appropriately-built group of
+    // 4 (tank/healer/2dps) is how the dungeon is *designed* to be played, but someone
+    // sufficiently over-leveled/geared should be able to solo or duo-rush it instead of being
+    // blocked from entering. A caller with no party (partyId "") just enters alone - "" is the
+    // shared "ungrouped" sentinel, not a real party id, so it must never be used to filter.
+    const members: [string, Player][] = caller.partyId
+      ? [...this.state.players.entries()].filter(([, p]) => p.partyId === caller.partyId)
+      : [[client.sessionId, caller]];
+    if (members.length < 1 || members.length > DUNGEON_PARTY_SIZE) return;
 
     let roomCache;
     try {
@@ -438,7 +433,7 @@ export class WorldRoom extends Room<WorldState> {
       if (!memberClient || !token || !characterId) continue;
 
       try {
-        const reservation = await matchMaker.reserveSeatFor(roomCache, { token, characterId });
+        const reservation = await matchMaker.reserveSeatFor(roomCache, { token, characterId, partyId: caller.partyId });
         memberClient.send("dungeon_ready", reservation);
       } catch (err) {
         console.error(`[WorldRoom] failed to reserve a dungeon seat for ${sessionId}:`, err);

@@ -853,39 +853,34 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     npcDialoguePanel.hidden = true;
   }
 
-  function computePartyRoleCounts(partyId: string): Record<ClassRole, number> {
-    const counts: Record<ClassRole, number> = { tank: 0, healer: 0, dps: 0 };
-    for (const schema of playerSchemaById.values()) {
-      if (schema.partyId !== partyId) continue;
-      const role = CLASSES[schema.classId as ClassId]?.role;
-      if (role) counts[role]++;
-    }
-    return counts;
-  }
-
   function renderDungeonFinderPanel() {
     const local = localSessionId ? playerSchemaById.get(localSessionId) : undefined;
     const partyId = local?.partyId ?? "";
 
+    // No party ("" partyId) just means "group of one, yourself" - mirrors
+    // WorldRoom.handleDungeonStart, which allows the same solo/undersized entry.
+    const members = partyId
+      ? [...playerSchemaById.entries()].filter(([, schema]) => schema.partyId === partyId)
+      : local
+        ? [[localSessionId!, local] as [string, typeof local]]
+        : [];
+
     dungeonYourGroupEl.innerHTML = "";
-    let groupSize = 0;
-    if (partyId) {
-      for (const [sessionId, schema] of playerSchemaById) {
-        if (schema.partyId !== partyId) continue;
-        groupSize++;
+    const roleCounts: Record<ClassRole, number> = { tank: 0, healer: 0, dps: 0 };
+    for (const [sessionId, schema] of members) {
+      const className = CLASSES[schema.classId as ClassId]?.name ?? schema.classId;
+      const role = CLASSES[schema.classId as ClassId]?.role;
+      if (role) roleCounts[role]++;
+      const label = sessionId === localSessionId ? `${schema.name} (You)` : schema.name;
 
-        const className = CLASSES[schema.classId as ClassId]?.name ?? schema.classId;
-        const role = CLASSES[schema.classId as ClassId]?.role;
-        const label = sessionId === localSessionId ? `${schema.name} (You)` : schema.name;
-
-        const row = document.createElement("div");
-        row.className = "item-row";
-        row.innerHTML = `<span>${label}</span><span class="item-slot-tag">${className}${role ? ` · ${capitalize(role)}` : ""}</span>`;
-        dungeonYourGroupEl.appendChild(row);
-      }
+      const row = document.createElement("div");
+      row.className = "item-row";
+      row.innerHTML = `<span>${label}</span><span class="item-slot-tag">${className}${role ? ` · ${capitalize(role)}` : ""}</span>`;
+      dungeonYourGroupEl.appendChild(row);
     }
 
-    const roleCounts = partyId ? computePartyRoleCounts(partyId) : { tank: 0, healer: 0, dps: 0 };
+    // Shown as guidance ("this is the dungeon's designed composition"), not a hard gate -
+    // see the Start button below.
     dungeonRoleChecklistEl.innerHTML = (Object.keys(DUNGEON_COMPOSITION) as ClassRole[])
       .map((role) => {
         const have = roleCounts[role];
@@ -896,10 +891,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     dungeonOpenListingBtn.hidden = !!partyId && dungeonListingSchemaById.has(partyId);
 
-    const compositionValid =
-      groupSize === DUNGEON_PARTY_SIZE &&
-      (Object.keys(DUNGEON_COMPOSITION) as ClassRole[]).every((role) => roleCounts[role] === DUNGEON_COMPOSITION[role]);
-    dungeonStartBtn.disabled = !compositionValid;
+    // Composition is guidance, not a requirement - an over-leveled/geared group (down to
+    // soloing) can still push Start rather than being blocked, matching the relaxed server-side
+    // check in WorldRoom.handleDungeonStart. Only the group size cap is actually enforced.
+    const groupSize = members.length;
+    dungeonStartBtn.disabled = groupSize < 1 || groupSize > DUNGEON_PARTY_SIZE;
 
     dungeonListingListEl.innerHTML = "";
     for (const [listingPartyId, listing] of dungeonListingSchemaById) {
