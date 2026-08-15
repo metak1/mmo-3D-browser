@@ -20,6 +20,7 @@ export class Player extends Schema {
   @type("number") vitality = BASE_STATS.vitality;
   @type("number") luck = BASE_STATS.luck;
   @type("number") armor = BASE_STATS.armor;
+  @type("number") gold = 0;
 
   @type("string") equippedWeapon = "";
   @type("string") equippedArmor = "";
@@ -38,10 +39,12 @@ export class Player extends Schema {
   // two players are grouped iff both have the same non-empty partyId - no separate Party object.
   @type("string") partyId = "";
   @type("string") pendingPartyInviteFrom = ""; // sessionId of pending inviter, or ""
+  @type("string") pendingTradeRequestFrom = ""; // sessionId of pending trade requester, or ""
 }
 
 export class Enemy extends Schema {
-  @type("string") kind = "melee";
+  @type("string") enemyTypeId = ""; // admin-authored identity, e.g. "goblin_grunt" - see ENEMY_TYPES
+  @type("string") behavior = "melee"; // fixed AI archetype ("melee"|"caster"|"boss"), copied from EnemyTypeDef at spawn
   @type("number") x = 0;
   @type("number") z = 0;
   @type("number") hp = 0;

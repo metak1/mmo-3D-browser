@@ -9,8 +9,8 @@ import { asyncHandler } from "../http/asyncHandler.js";
 const SALT_ROUNDS = 10;
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,32}$/;
 
-function publicUser(user: { id: number; username: string; email: string }) {
-  return { id: user.id, username: user.username, email: user.email };
+function publicUser(user: { id: number; username: string; email: string; role: string }) {
+  return { id: user.id, username: user.username, email: user.email, role: user.role };
 }
 
 export const authRouter = Router();

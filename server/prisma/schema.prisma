@@ -12,6 +12,7 @@ model User {
   username      String      @unique @db.VarChar(32)
   email         String      @unique @db.VarChar(255)
   password_hash String      @db.VarChar(255)
+  role          String      @default("player") @db.VarChar(16) // "player" | "admin"
   created_at    DateTime    @default(now()) @db.Timestamptz(6)
   characters    Character[]
 
@@ -28,6 +29,7 @@ model Character {
   vitality        Int
   luck            Int
   armor           Int
+  gold            Int             @default(50)
   created_at      DateTime        @default(now()) @db.Timestamptz(6)
   talent_points   Int             @default(0)
   talent_ranks    Json            @default("{}")
@@ -48,4 +50,188 @@ model CharacterItem {
   character    Character @relation(fields: [character_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@map("character_items")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Admin-editable game content. Character.class_id / CharacterItem.item_id are deliberately NOT
+// foreign keys into these tables (they never were, and identity strings predate this feature) -
+// the admin API guards deletes with explicit reference-count checks instead of relying on DB
+// constraints for that specific risk. Constraints below cover admin-table-to-admin-table
+// references only. See the "Admin Content Backend" plan for the full design.
+// ---------------------------------------------------------------------------------------------
+
+model GameClass {
+  id        String   @id @db.VarChar(32)
+  name      String   @db.VarChar(64)
+  main_stat String   @db.VarChar(16)
+  role      String   @db.VarChar(16)
+  spells    Spell[]
+  talents   Talent[]
+
+  @@map("game_classes")
+}
+
+model Spell {
+  id               String    @id @db.VarChar(64)
+  class_id         String    @db.VarChar(32)
+  name             String    @db.VarChar(64)
+  description      String    @db.VarChar(255)
+  effect_type      String    @db.VarChar(16)
+  target_type      String    @db.VarChar(16)
+  amount           Int?
+  aoe_radius       Float?
+  interrupts_cast  Boolean   @default(false)
+  cooldown_ms      Int
+  cast_time_ms     Int
+  range            Float
+  projectile_speed Float?
+  game_class       GameClass @relation(fields: [class_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("spells")
+}
+
+model Item {
+  id          String          @id @db.VarChar(32)
+  name        String          @db.VarChar(64)
+  slot        String          @db.VarChar(16)
+  bonuses     Json            @default("{}")
+  icon        String          @db.VarChar(16)
+  description String          @db.VarChar(255)
+  base_price  Int
+  quests      Quest[]
+  vendors     NpcVendorItem[]
+
+  @@map("items")
+}
+
+model Talent {
+  id          String    @id @db.VarChar(64)
+  class_id    String    @db.VarChar(32)
+  name        String    @db.VarChar(64)
+  description String    @db.VarChar(255)
+  max_rank    Int
+  effect_key  String    @db.VarChar(32)
+  per_rank    Float
+  game_class  GameClass @relation(fields: [class_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("talents")
+}
+
+model EnemyType {
+  id          String       @id @db.VarChar(32)
+  name        String       @db.VarChar(64)
+  behavior    String       @db.VarChar(16) // "melee" | "caster" | "boss"
+  xp_reward   Int
+  gold_reward Int
+  stats       Json // shape depends on behavior - see MeleeStats/CasterStats/BossStats
+  spawns      EnemySpawn[]
+  quests      Quest[]
+
+  @@map("enemy_types")
+}
+
+model GameMap {
+  id                String       @id @db.VarChar(32)
+  name              String       @db.VarChar(64)
+  kind              String       @db.VarChar(16) // "overworld" | "dungeon"
+  half_extent       Float
+  // Only meaningful (and exclusively enforced - exactly one true) among kind:"overworld" rows.
+  is_active         Boolean      @default(false)
+  portal_x          Float?
+  portal_z          Float?
+  boss_arena_x      Float?
+  boss_arena_z      Float?
+  boss_arena_radius Float?
+  npcs              Npc[]
+  spawns            EnemySpawn[]
+  structures        Structure[]
+  dungeons          Dungeon[]
+
+  @@map("game_maps")
+}
+
+model EnemySpawn {
+  id            String    @id @db.VarChar(32) // admin-chosen, e.g. "melee-1" - also the colyseus Enemy schema key for respawn tracking
+  map_id        String    @db.VarChar(32)
+  enemy_type_id String    @db.VarChar(32)
+  x             Float
+  z             Float
+  respawn_ms    Int?
+  game_map      GameMap   @relation(fields: [map_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  enemy_type    EnemyType @relation(fields: [enemy_type_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@map("enemy_spawns")
+}
+
+// Purely decorative geometry (no collision anywhere in this game) - kind selects which
+// procedural shape the client builds, see shared StructureKind/client/src/game/Structure.ts.
+model Structure {
+  id         String  @id @db.VarChar(32)
+  name       String  @db.VarChar(64)
+  map_id     String  @db.VarChar(32)
+  kind       String  @db.VarChar(16) // "house" | "shop" | "wall" | "tower" | "gate"
+  x          Float
+  z          Float
+  rotation_y Float   @default(0)
+  width      Float
+  depth      Float
+  height     Float
+  color      String  @db.VarChar(16) // hex, e.g. "#8a6d4b"
+  game_map   GameMap @relation(fields: [map_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("structures")
+}
+
+model Npc {
+  id      String          @id @db.VarChar(32)
+  name    String          @db.VarChar(64)
+  x       Float
+  z       Float
+  map_id  String          @db.VarChar(32)
+  game_map GameMap        @relation(fields: [map_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  quests  Quest[]
+  vendors NpcVendorItem[]
+
+  @@map("npcs")
+}
+
+// Pure join table - an NPC's vendor catalog. Presence of any row for an NPC marks it as a
+// vendor (see shared/src/types.ts's NpcDef.vendorItemIds, built by joining this table).
+model NpcVendorItem {
+  npc_id  String @db.VarChar(32)
+  item_id String @db.VarChar(32)
+  npc     Npc    @relation(fields: [npc_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  item    Item   @relation(fields: [item_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([npc_id, item_id])
+  @@map("npc_vendor_items")
+}
+
+model Quest {
+  id                       String    @id @db.VarChar(64)
+  name                     String    @db.VarChar(64)
+  description              String    @db.VarChar(255)
+  giver_npc_id             String    @db.VarChar(32)
+  objective_enemy_type_id  String    @db.VarChar(32)
+  objective_count          Int
+  reward_xp                Int
+  reward_item_id           String?   @db.VarChar(32)
+  npc                      Npc       @relation(fields: [giver_npc_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  enemy_type               EnemyType @relation(fields: [objective_enemy_type_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reward_item              Item?     @relation(fields: [reward_item_id], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@map("quests")
+}
+
+model Dungeon {
+  id          String  @id @db.VarChar(32)
+  name        String  @db.VarChar(64)
+  map_id      String  @db.VarChar(32)
+  is_active   Boolean @default(false)
+  party_size  Int
+  composition Json // Record<ClassRole, number>
+  encounters  Json // DungeonEncounterSpec[][] - ordered waves
+  game_map    GameMap @relation(fields: [map_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@map("dungeons")
 }

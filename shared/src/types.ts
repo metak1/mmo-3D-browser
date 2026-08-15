@@ -2,7 +2,11 @@ export const WORLD_ROOM_NAME = "world_room";
 
 export const PLAYER_SPEED = 4; // meters per second, server-authoritative
 
-export const MAP_HALF_EXTENT = 34; // flat test ground spans [-34, 34] on x and z
+// World/map constants below are `let`, not `const` - they're populated from the active
+// GameMap/Dungeon by loadGameContent() (see bottom of this file) rather than being fixed at
+// build time. Every existing reference to these exact names keeps compiling unchanged; only
+// their value now comes from the database instead of a source-code literal.
+export let MAP_HALF_EXTENT = 34; // flat test ground spans [-34, 34] on x and z by default
 
 export interface InputMessage {
   moveX: number; // normalized direction, -1..1
@@ -10,7 +14,12 @@ export interface InputMessage {
   seq: number; // client-assigned sequence number, echoed back for reconciliation
 }
 
-export type EnemyKind = "melee" | "caster" | "boss";
+// The fixed set of combat AI archetypes CombatEngine knows how to run - this stays a closed
+// union (it selects a hardcoded code path), unlike an enemy's *identity* (EnemyTypeId below),
+// which is admin-created content. Two different admin-authored enemy types can share a
+// behavior (e.g. two different "melee" monsters with different names/stats/rewards).
+export type EnemyBehavior = "melee" | "caster" | "boss";
+export type EnemyTypeId = string;
 
 // A character only ever has one relevant combat stat - whichever CLASSES[classId].mainStat
 // names (strength/dexterity/intellect). That identity is metadata for display labeling only;
@@ -36,30 +45,33 @@ export const BASE_XP_PER_LEVEL = 100;
 export const MAX_LEVEL = 60;
 
 export type MainStat = "strength" | "dexterity" | "intellect";
-export type ClassId = "warrior" | "rogue" | "ranger" | "oracle" | "mage";
+// ClassId/NpcId/MapId/DungeonId are admin-created identity strings, not closed unions - any
+// value that exists as a row in the corresponding content table is valid. Only the *shape* of
+// each entity (ClassDef, NpcDef, ...) and the small fixed behavior/role/slot unions stay closed.
+export type ClassId = string;
+export type NpcId = string;
+export type MapId = string;
+export type DungeonId = string;
 export type ClassRole = "tank" | "healer" | "dps";
 
 export interface ClassDef {
+  id: ClassId;
   name: string;
   mainStat: MainStat;
   role: ClassRole;
 }
 
-export const CLASSES: Record<ClassId, ClassDef> = {
-  warrior: { name: "Warrior", mainStat: "strength", role: "tank" },
-  rogue: { name: "Rogue", mainStat: "dexterity", role: "dps" },
-  ranger: { name: "Ranger", mainStat: "dexterity", role: "dps" },
-  oracle: { name: "Oracle", mainStat: "intellect", role: "healer" },
-  mage: { name: "Mage", mainStat: "intellect", role: "dps" },
-};
+export let CLASSES: Record<ClassId, ClassDef> = {};
 
-export const DEFAULT_CLASS_ID: ClassId = "warrior";
+// Recomputed in loadGameContent as "first key of CLASSES" - not a hardcoded literal, since an
+// admin could delete whichever class was originally seeded as the default.
+export let DEFAULT_CLASS_ID: ClassId = "warrior";
 
 // Universal (no room-specific state), so both WorldRoom and DungeonRoom's combat engines
 // share this one implementation instead of each carrying their own copy.
 export function resolveClassId(raw: unknown): ClassId {
   if (typeof raw === "string" && Object.prototype.hasOwnProperty.call(CLASSES, raw)) {
-    return raw as ClassId;
+    return raw;
   }
   return DEFAULT_CLASS_ID;
 }
@@ -69,12 +81,6 @@ export const DAMAGE_STAT_FACTOR = 0.3; // flat damage/heal bonus = floor(mainSta
 export const CRIT_PER_LUCK = 1.5; // % crit chance per luck point
 export const MAX_CRIT_CHANCE = 75; // %
 export const CRIT_MULTIPLIER = 1.5;
-
-export const XP_PER_ENEMY_KIND: Record<EnemyKind, number> = {
-  melee: 20,
-  caster: 30,
-  boss: 300,
-};
 
 export function xpForNextLevel(level: number): number {
   return BASE_XP_PER_LEVEL * level;
@@ -105,231 +111,55 @@ export interface SpellDef {
   projectileSpeed?: number; // only used when castTimeMs > 0 (cast-time spells may travel as a projectile)
 }
 
-function spell(def: Omit<SpellDef, "id"> & { slug: string }): SpellDef {
-  const { slug, ...rest } = def;
-  return { id: `${def.classId}_${slug}`, ...rest };
+export let SPELLS: Record<SpellId, SpellDef> = {};
+
+export interface MeleeStats {
+  maxHp: number;
+  damage: number;
+  range: number;
+  intervalMs: number;
 }
 
-export const SPELLS: Record<SpellId, SpellDef> = Object.fromEntries(
-  [
-    // Warrior
-    spell({
-      classId: "warrior",
-      slug: "slash",
-      name: "Slash",
-      description: "A quick, brutal cut.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 14,
-      cooldownMs: 1200,
-      range: 2.5,
-      castTimeMs: 0,
-    }),
-    spell({
-      classId: "warrior",
-      slug: "shield_bash",
-      name: "Shield Bash",
-      description: "Slams a foe with your shield, breaking their concentration.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 6,
-      interruptsCast: true,
-      cooldownMs: 6000,
-      range: 2.5,
-      castTimeMs: 0,
-    }),
-    spell({
-      classId: "warrior",
-      slug: "whirlwind",
-      name: "Whirlwind",
-      description: "Spin and strike every enemy in reach.",
-      effectType: "damage",
-      targetType: "self",
-      amount: 10,
-      aoeRadius: 4,
-      cooldownMs: 4000,
-      range: 4,
-      castTimeMs: 0,
-    }),
+export interface CasterStats {
+  maxHp: number;
+  damage: number;
+  range: number;
+  cooldownMs: number;
+  projectileSpeed: number;
+  castTimeMs: number;
+}
 
-    // Rogue
-    spell({
-      classId: "rogue",
-      slug: "backstab",
-      name: "Backstab",
-      description: "A blade in exactly the wrong place.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 16,
-      cooldownMs: 1200,
-      range: 2.5,
-      castTimeMs: 0,
-    }),
-    spell({
-      classId: "rogue",
-      slug: "garrote",
-      name: "Garrote",
-      description: "Chokes off a foe's breath, and their spell.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 6,
-      interruptsCast: true,
-      cooldownMs: 6000,
-      range: 2.5,
-      castTimeMs: 0,
-    }),
-    spell({
-      classId: "rogue",
-      slug: "fan_of_knives",
-      name: "Fan of Knives",
-      description: "A spray of blades around your target.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 10,
-      aoeRadius: 4,
-      cooldownMs: 4000,
-      range: 2.5,
-      castTimeMs: 0,
-    }),
+// A boss runs the melee pattern always, and gains the aoe (caster-shaped) pattern once it
+// enters phase 2 - see BOSS_PHASE_2_HP_FRACTION. Deliberately not the same shape as
+// melee/caster since it combines both.
+export interface BossStats {
+  maxHp: number;
+  meleeDamage: number;
+  meleeRange: number;
+  meleeIntervalMs: number;
+  aoeDamage: number;
+  aoeRadius: number;
+  aoeRange: number;
+  aoeCooldownMs: number;
+  aoeCastTimeMs: number;
+  aoeProjectileSpeed: number;
+}
 
-    // Ranger
-    spell({
-      classId: "ranger",
-      slug: "aimed_shot",
-      name: "Aimed Shot",
-      description: "A carefully placed arrow.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 18,
-      cooldownMs: 1500,
-      range: 9,
-      castTimeMs: 400,
-      projectileSpeed: 12,
-    }),
-    spell({
-      classId: "ranger",
-      slug: "disabling_shot",
-      name: "Disabling Shot",
-      description: "Pins a caster's hands before they finish the gesture.",
-      effectType: "interrupt",
-      targetType: "enemy",
-      cooldownMs: 6000,
-      range: 9,
-      castTimeMs: 0,
-    }),
-    spell({
-      classId: "ranger",
-      slug: "explosive_trap",
-      name: "Explosive Trap",
-      description: "Rigs a patch of ground to blow.",
-      effectType: "damage",
-      targetType: "ground",
-      amount: 16,
-      aoeRadius: 3,
-      cooldownMs: 5000,
-      range: 8,
-      castTimeMs: 500,
-    }),
+export type EnemyStats = MeleeStats | CasterStats | BossStats;
 
-    // Oracle
-    spell({
-      classId: "oracle",
-      slug: "smite",
-      name: "Smite",
-      description: "A bolt of judgment.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 14,
-      cooldownMs: 1500,
-      range: 9,
-      castTimeMs: 300,
-      projectileSpeed: 10,
-    }),
-    spell({
-      classId: "oracle",
-      slug: "renew",
-      name: "Renew",
-      description: "Knits flesh and spirit back together. Heals yourself if no ally is targeted.",
-      effectType: "heal",
-      targetType: "ally",
-      amount: 20,
-      cooldownMs: 3000,
-      range: 8,
-      castTimeMs: 800,
-    }),
-    spell({
-      classId: "oracle",
-      slug: "cleanse",
-      name: "Cleanse",
-      description: "Washes away ailments afflicting an ally (or yourself).",
-      effectType: "dispel",
-      targetType: "ally",
-      cooldownMs: 8000,
-      range: 8,
-      castTimeMs: 0,
-    }),
+// An admin-authored enemy identity - unifies what used to be three inconsistent boss-stat
+// sources (the overworld's ENEMY_STATS.boss, the dungeon's separately-hardcoded mini-boss HP,
+// and a per-behavior XP/gold table) into one row per enemy type.
+export interface EnemyTypeDef {
+  id: EnemyTypeId;
+  name: string;
+  behavior: EnemyBehavior;
+  xpReward: number;
+  goldReward: number;
+  stats: EnemyStats;
+}
 
-    // Mage
-    spell({
-      classId: "mage",
-      slug: "frostbolt",
-      name: "Frostbolt",
-      description: "A shard of ice, slow to arrive and hard to forgive.",
-      effectType: "damage",
-      targetType: "enemy",
-      amount: 22,
-      cooldownMs: 2000,
-      range: 9,
-      castTimeMs: 1000,
-      projectileSpeed: 9,
-    }),
-    spell({
-      classId: "mage",
-      slug: "blizzard",
-      name: "Blizzard",
-      description: "Calls down a storm over a patch of ground.",
-      effectType: "damage",
-      targetType: "ground",
-      amount: 18,
-      aoeRadius: 3.5,
-      cooldownMs: 6000,
-      range: 9,
-      castTimeMs: 1200,
-    }),
-    spell({
-      classId: "mage",
-      slug: "counterspell",
-      name: "Counterspell",
-      description: "Unravels a spell before it finishes forming.",
-      effectType: "interrupt",
-      targetType: "enemy",
-      cooldownMs: 8000,
-      range: 9,
-      castTimeMs: 0,
-    }),
-  ].map((def) => [def.id, def]),
-);
-
-export const ENEMY_STATS = {
-  melee: { maxHp: 40, damage: 8, range: 1.8, intervalMs: 1500 },
-  caster: { maxHp: 25, damage: 6, range: 10, cooldownMs: 2200, projectileSpeed: 6, castTimeMs: 1000 },
-  // A boss runs the melee pattern always, and gains the aoe (caster-shaped) pattern once
-  // it enters phase 2 - see BOSS_PHASE_2_HP_FRACTION. Deliberately not the same shape as
-  // melee/caster since it combines both; this object is a plain `as const` literal, not a
-  // uniform Record, so a differently-shaped third key is safe.
-  boss: {
-    maxHp: 500,
-    meleeDamage: 16,
-    meleeRange: 2.2,
-    meleeIntervalMs: 1400,
-    aoeDamage: 20,
-    aoeRadius: 4,
-    aoeRange: 12,
-    aoeCooldownMs: 6000,
-    aoeCastTimeMs: 1200,
-    aoeProjectileSpeed: 8,
-  },
-} as const;
+export let ENEMY_TYPES: Record<EnemyTypeId, EnemyTypeDef> = {};
 
 export const PROJECTILE_HIT_RADIUS = 0.6;
 
@@ -340,8 +170,8 @@ export const ENEMY_RESPAWN_MS = 6000;
 // on what "phase 2" or "enraged" means - both just compute the same threshold locally.
 export const BOSS_PHASE_2_HP_FRACTION = 0.5;
 export const BOSS_ENRAGE_DAMAGE_MULTIPLIER = 2;
-export const BOSS_ARENA_CENTER = { x: 0, z: 28 };
-export const BOSS_ARENA_RADIUS = 10;
+export let BOSS_ARENA_CENTER = { x: 0, z: 28 };
+export let BOSS_ARENA_RADIUS = 10;
 
 export const PROJECTILE_MAX_LIFETIME_MS = 4000;
 
@@ -363,87 +193,17 @@ export interface CastMessage {
 export type EquipSlot = "weapon" | "armor" | "trinket";
 
 export interface ItemDef {
+  id: string;
   name: string;
   slot: EquipSlot;
   bonuses: Partial<PlayerStats>;
   icon: string;
   description: string;
+  basePrice: number; // vendor buy price at common rarity - see VENDOR_SELL_FRACTION for sell price
 }
 
-export const ITEMS: Record<string, ItemDef> = {
-  rusty_sword: {
-    name: "Rusty Sword",
-    slot: "weapon",
-    bonuses: { mainStat: 3 },
-    icon: "🗡️",
-    description: "Pitted and dull, but it still holds an edge.",
-  },
-  hunting_bow: {
-    name: "Hunting Bow",
-    slot: "weapon",
-    bonuses: { mainStat: 3 },
-    icon: "🏹",
-    description: "Favored by scouts for its light draw weight.",
-  },
-  apprentice_wand: {
-    name: "Apprentice Wand",
-    slot: "weapon",
-    bonuses: { mainStat: 3 },
-    icon: "🪄",
-    description: "A first wand, worn smooth by nervous hands.",
-  },
-  leather_vest: {
-    name: "Leather Vest",
-    slot: "armor",
-    bonuses: { vitality: 2, armor: 2 },
-    icon: "🦺",
-    description: "Boiled leather, stiff enough to turn a blade.",
-  },
-  chainmail_hauberk: {
-    name: "Chainmail Hauberk",
-    slot: "armor",
-    bonuses: { armor: 5 },
-    icon: "🥋",
-    description: "Interlocked rings, heavy but dependable.",
-  },
-  padded_robe: {
-    name: "Padded Robe",
-    slot: "armor",
-    bonuses: { vitality: 3, mainStat: 1 },
-    icon: "👘",
-    description: "Woven with faint warding sigils along the hem.",
-  },
-  lucky_charm: {
-    name: "Lucky Charm",
-    slot: "trinket",
-    bonuses: { luck: 4 },
-    icon: "🍀",
-    description: "Rumored to have never left its owner's pocket.",
-  },
-  signet_ring: {
-    name: "Signet Ring",
-    slot: "trinket",
-    bonuses: { mainStat: 4 },
-    icon: "💍",
-    description: "A minor house crest, edges worn smooth.",
-  },
-  amulet_of_vigor: {
-    name: "Amulet of Vigor",
-    slot: "trinket",
-    bonuses: { vitality: 3 },
-    icon: "📿",
-    description: "Warm to the touch, even in the cold.",
-  },
-  warden_relic: {
-    name: "Warden's Relic",
-    slot: "trinket",
-    bonuses: { mainStat: 6, vitality: 4 },
-    icon: "🔱",
-    description: "Torn from the Warden's shattered core, still humming with old power.",
-  },
-};
-
-export const ITEM_IDS = Object.keys(ITEMS);
+export let ITEMS: Record<string, ItemDef> = {};
+export let ITEM_IDS: string[] = [];
 
 export type Rarity = "common" | "rare" | "epic";
 
@@ -529,108 +289,8 @@ export interface TalentDef {
 }
 
 export const TALENT_POINTS_PER_LEVEL = 1;
-const TALENT_MAX_RANK = 12;
 
-function talent(
-  classId: ClassId,
-  slug: string,
-  name: string,
-  description: string,
-  effectKey: TalentEffectKey,
-  perRank: number,
-): TalentDef {
-  return { id: `${classId}_${slug}`, classId, name, description, maxRank: TALENT_MAX_RANK, effectKey, perRank };
-}
-
-export const TALENTS: Record<string, TalentDef> = Object.fromEntries(
-  [
-    talent("warrior", "iron_skin", "Iron Skin", "Years of taking hits taught your body to shrug them off.", "armorBonus", 1),
-    talent("warrior", "crushing_blows", "Crushing Blows", "Every swing carries a little more weight.", "damagePercent", 1.5),
-    talent(
-      "warrior",
-      "stalwart_heart",
-      "Stalwart Heart",
-      "Your resolve keeps you standing after lesser warriors would fall.",
-      "maxHpPercent",
-      1.25,
-    ),
-    talent("warrior", "battle_fury", "Battle Fury", "Momentum builds with every clash.", "cooldownPercent", 0.8),
-    talent(
-      "warrior",
-      "killer_instinct",
-      "Killer Instinct",
-      "You've learned exactly where the armor gives.",
-      "critChanceBonus",
-      0.6,
-    ),
-
-    talent("rogue", "cutthroat", "Cutthroat", "You don't need much of an opening.", "critChanceBonus", 0.6),
-    talent(
-      "rogue",
-      "fleet_footed",
-      "Fleet Footed",
-      "Never in one place long enough to be predictable.",
-      "cooldownPercent",
-      0.8,
-    ),
-    talent("rogue", "vicious_strikes", "Vicious Strikes", "Precision over brute force.", "damagePercent", 1.5),
-    talent(
-      "rogue",
-      "hardened_reflexes",
-      "Hardened Reflexes",
-      "If you can't dodge it, you'd better be able to take it.",
-      "armorBonus",
-      1,
-    ),
-    talent("rogue", "grim_endurance", "Grim Endurance", "A life of close calls builds a thick skin.", "maxHpPercent", 1.25),
-
-    talent(
-      "ranger",
-      "marksmans_eye",
-      "Marksman's Eye",
-      "You aim for the gaps others don't even see.",
-      "critChanceBonus",
-      0.6,
-    ),
-    talent(
-      "ranger",
-      "quickdraw",
-      "Quickdraw",
-      "Nocked, drawn, loosed — before they've registered the threat.",
-      "cooldownPercent",
-      0.8,
-    ),
-    talent("ranger", "hunters_focus", "Hunter's Focus", "Every shot is a lesson from the last.", "damagePercent", 1.5),
-    talent("ranger", "camouflage", "Camouflage", "Half-seen is half-hit.", "armorBonus", 1),
-    talent(
-      "ranger",
-      "wilderness_vigor",
-      "Wilderness Vigor",
-      "Years in the field harden more than just your aim.",
-      "maxHpPercent",
-      1.25,
-    ),
-
-    talent("oracle", "focused_mind", "Focused Mind", "Clarity finds the weak point in anything.", "critChanceBonus", 0.6),
-    talent("oracle", "swift_rites", "Swift Rites", "The words come easier with practice.", "cooldownPercent", 0.8),
-    talent("oracle", "arcane_insight", "Arcane Insight", "Understanding is its own weapon.", "damagePercent", 1.5),
-    talent("oracle", "warding_sigil", "Warding Sigil", "A shimmer of protection, always half-drawn.", "armorBonus", 1),
-    talent(
-      "oracle",
-      "vital_current",
-      "Vital Current",
-      "Life force ebbs and flows — you've learned to hold onto more of it.",
-      "maxHpPercent",
-      1.25,
-    ),
-
-    talent("mage", "piercing_cold", "Piercing Cold", "Ice finds every crack.", "critChanceBonus", 0.6),
-    talent("mage", "overchannel", "Overchannel", "You've stopped waiting for the mana to settle.", "cooldownPercent", 0.8),
-    talent("mage", "arcane_power", "Arcane Power", "Raw force, barely contained.", "damagePercent", 1.5),
-    talent("mage", "mana_shield", "Mana Shield", "A thin barrier is still a barrier.", "armorBonus", 1),
-    talent("mage", "deep_reserves", "Deep Reserves", "More to draw on means more to survive.", "maxHpPercent", 1.25),
-  ].map((def) => [def.id, def]),
-);
+export let TALENTS: Record<string, TalentDef> = {};
 
 export interface TalentBonus {
   damagePercent: number;
@@ -658,17 +318,34 @@ export interface SpendTalentMessage {
 export const NPC_INTERACT_RADIUS = 3; // mirrors LOOT_PICKUP_RADIUS
 
 export interface NpcDef {
-  id: string;
+  id: NpcId;
   name: string;
   x: number;
   z: number;
-  questIds: string[];
+  mapId: MapId;
+  vendorItemIds?: string[]; // presence marks this NPC as a vendor - see VENDOR_SELL_FRACTION
 }
 
-export const NPCS: Record<string, NpcDef> = {
-  quest_giver: { id: "quest_giver", name: "Weary Quartermaster", x: 0, z: -3, questIds: ["kill_melee_3", "kill_caster_3"] },
-  boss_watcher: { id: "boss_watcher", name: "Scarred Sentinel", x: 0, z: 20, questIds: ["defeat_boss"] },
-};
+export let NPCS: Record<NpcId, NpcDef> = {};
+
+// An NPC's quest list is derived from Quest.giverNpcId, not separately authored - recomputed
+// in loadGameContent alongside ITEM_IDS. Replaces what used to be a redundant parallel
+// `questIds` list on NpcDef itself.
+export let NPC_QUEST_IDS: Record<NpcId, string[]> = {};
+
+// Selling always nets less than buying back would cost, even at the lowest (common) rarity a
+// purchase produces - buyPrice * VENDOR_SELL_FRACTION < buyPrice, so there's no arbitrage loop.
+export const VENDOR_SELL_FRACTION = 0.4;
+
+export interface BuyItemMessage {
+  npcId: string;
+  itemId: string; // base item id, must be in that NPC's vendorItemIds
+}
+
+export interface SellItemMessage {
+  npcId: string;
+  token: string; // the exact encoded inventory entry, e.g. "rusty_sword@rare"
+}
 
 export type QuestId = string;
 
@@ -676,45 +353,14 @@ export interface QuestDef {
   id: QuestId;
   name: string;
   description: string;
-  giverNpcId: string;
-  objectiveEnemyKind: EnemyKind;
+  giverNpcId: NpcId;
+  objectiveEnemyTypeId: EnemyTypeId;
   objectiveCount: number;
   rewardXp: number;
   rewardItemId?: string;
 }
 
-export const QUESTS: Record<QuestId, QuestDef> = {
-  kill_melee_3: {
-    id: "kill_melee_3",
-    name: "Thin the Ranks",
-    description: "Melee attackers keep probing the perimeter. Kill 3 of them.",
-    giverNpcId: "quest_giver",
-    objectiveEnemyKind: "melee",
-    objectiveCount: 3,
-    rewardXp: 150,
-    rewardItemId: "lucky_charm",
-  },
-  kill_caster_3: {
-    id: "kill_caster_3",
-    name: "Silence the Casters",
-    description: "Enemy casters are the bigger threat. Kill 3 of them.",
-    giverNpcId: "quest_giver",
-    objectiveEnemyKind: "caster",
-    objectiveCount: 3,
-    rewardXp: 200,
-    rewardItemId: "signet_ring",
-  },
-  defeat_boss: {
-    id: "defeat_boss",
-    name: "The Ashen Warden",
-    description: "A monstrous warden has claimed the ruins to the north. End its watch - bring friends.",
-    giverNpcId: "boss_watcher",
-    objectiveEnemyKind: "boss",
-    objectiveCount: 1,
-    rewardXp: 500,
-    rewardItemId: "warden_relic",
-  },
-};
+export let QUESTS: Record<QuestId, QuestDef> = {};
 
 export interface AcceptQuestMessage {
   questId: QuestId;
@@ -735,13 +381,13 @@ export interface PartyRespondMessage {
   accept: boolean;
 }
 
-export const PORTAL_POSITION = { x: -24, z: -24 }; // clear of every existing spawn/quest/arena position
+export let PORTAL_POSITION = { x: -24, z: -24 }; // clear of every existing spawn/quest/arena position
 
-export const DUNGEON_HALF_EXTENT = 16; // the dungeon's own small ground, purely decorative sizing for the client
+export let DUNGEON_HALF_EXTENT = 16; // the active dungeon's own ground, purely decorative sizing for the client
 
 export const DUNGEON_ROOM_NAME = "dungeon_room";
-export const DUNGEON_PARTY_SIZE = 4;
-export const DUNGEON_COMPOSITION: Record<ClassRole, number> = { tank: 1, healer: 1, dps: 2 };
+export let DUNGEON_PARTY_SIZE = 4;
+export let DUNGEON_COMPOSITION: Record<ClassRole, number> = { tank: 1, healer: 1, dps: 2 };
 
 // A "listing" is just a party advertising itself - composition is only enforced at
 // dungeon_start, not at dungeon_join_listing (only a size check, "except if it's full").
@@ -768,4 +414,184 @@ export interface ChatBroadcast {
   senderSessionId: string;
   text: string;
   sentAt: number;
+}
+
+export const TRADE_RANGE = 5; // slightly larger than LOOT_PICKUP_RADIUS/NPC_INTERACT_RADIUS since it targets a moving player
+export const TRADE_RANGE_CHECK_INTERVAL_MS = 1000;
+
+export interface TradeRequestMessage {
+  targetSessionId: string;
+}
+
+export interface TradeRespondMessage {
+  accept: boolean;
+}
+
+// Full-replace, not incremental: the client always resends its complete intended offer, and
+// items are token values (not inventory indices) since indices shift under concurrent
+// equip/unequip splices - see server/src/rooms/trade.ts.
+export interface TradeOfferMessage {
+  items: string[];
+  gold: number;
+}
+
+// Server -> client, pushed after every mutating trade action (open, either side's offer
+// change, either side's accept). One call per participant, with self/partner swapped -
+// never synced schema state, since that would leak both offers to every room bystander.
+export interface TradeSnapshot {
+  partnerSessionId: string;
+  partnerName: string;
+  selfOffer: string[];
+  selfGold: number;
+  partnerOffer: string[];
+  partnerGold: number;
+  selfAccepted: boolean;
+  partnerAccepted: boolean;
+}
+
+export type TradeCancelReason = "declined" | "left_range" | "disconnected" | "cancelled" | "trade_failed";
+
+export interface TradeCancelledMessage {
+  reason: TradeCancelReason;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Admin-editable content: maps, dungeons, enemy spawns, and the loader that ties everything
+// above together. See the "Admin Content Backend" plan for the full design.
+// ---------------------------------------------------------------------------------------------
+
+export interface EnemySpawnDef {
+  id: string;
+  enemyTypeId: EnemyTypeId;
+  mapId: MapId;
+  x: number;
+  z: number;
+  respawnMs?: number;
+}
+
+export let SPAWN_POINTS: EnemySpawnDef[] = [];
+
+// Purely decorative/non-collidable geometry - see Player/Npc/Enemy movement, none of which
+// checks structures. kind is a closed union selecting a hardcoded procedural shape builder
+// client-side (client/src/game/Structure.ts); everything else is open admin content.
+export type StructureKind = "house" | "shop" | "wall" | "tower" | "gate";
+
+export interface StructureDef {
+  id: string;
+  name: string;
+  mapId: MapId;
+  kind: StructureKind;
+  x: number;
+  z: number;
+  rotationY: number;
+  width: number;
+  depth: number;
+  height: number;
+  color: string; // hex, e.g. "#8a6d4b"
+}
+
+export let STRUCTURES: StructureDef[] = [];
+
+export type MapKind = "overworld" | "dungeon";
+
+export interface GameMapDef {
+  id: MapId;
+  name: string;
+  kind: MapKind;
+  halfExtent: number;
+  // isActive is only meaningful (and exclusively enforced - exactly one true) among
+  // kind:"overworld" rows. A kind:"dungeon" map's liveness is entirely determined by whether
+  // the Dungeon row pointing at it (via Dungeon.mapId) has isActive=true.
+  isActive: boolean;
+  portalX?: number;
+  portalZ?: number;
+  bossArenaX?: number;
+  bossArenaZ?: number;
+  bossArenaRadius?: number;
+}
+
+export let ACTIVE_MAP: GameMapDef | null = null;
+
+export interface DungeonEncounterSpec {
+  enemyTypeId: EnemyTypeId;
+  x: number;
+  z: number;
+}
+
+export interface DungeonDef {
+  id: DungeonId;
+  name: string;
+  mapId: MapId;
+  isActive: boolean;
+  partySize: number;
+  composition: Record<ClassRole, number>;
+  encounters: DungeonEncounterSpec[][]; // ordered waves
+}
+
+export let ACTIVE_DUNGEON: DungeonDef | null = null;
+
+export interface ContentSnapshot {
+  classes: ClassDef[];
+  spells: SpellDef[];
+  items: ItemDef[];
+  talents: TalentDef[];
+  enemyTypes: EnemyTypeDef[];
+  npcs: NpcDef[];
+  quests: QuestDef[];
+  maps: GameMapDef[];
+  dungeons: DungeonDef[];
+  spawns: EnemySpawnDef[];
+  structures: StructureDef[];
+}
+
+// The single entry point that turns a fetched content snapshot into every live table/constant
+// above. Two rules matter for correctness (see the admin backend plan for why):
+//   1. Callers must build the WHOLE snapshot before calling this - one fetch/one set of
+//      parallel queries, never several sequential awaits each assigning as they resolve. This
+//      function itself is synchronous precisely so nothing else can run on the event loop
+//      between assignments and observe a torn mix of old/new tables.
+//   2. Every derived value (ITEM_IDS, NPC_QUEST_IDS, ACTIVE_MAP/DUNGEON, the world-position
+//      constants) is recomputed here, in the same pass - never persisted separately.
+export function loadGameContent(snapshot: ContentSnapshot): void {
+  CLASSES = Object.fromEntries(snapshot.classes.map((c) => [c.id, c]));
+  SPELLS = Object.fromEntries(snapshot.spells.map((s) => [s.id, s]));
+  ITEMS = Object.fromEntries(snapshot.items.map((i) => [i.id, i]));
+  TALENTS = Object.fromEntries(snapshot.talents.map((t) => [t.id, t]));
+  ENEMY_TYPES = Object.fromEntries(snapshot.enemyTypes.map((e) => [e.id, e]));
+  QUESTS = Object.fromEntries(snapshot.quests.map((q) => [q.id, q]));
+
+  ITEM_IDS = Object.keys(ITEMS);
+  DEFAULT_CLASS_ID = snapshot.classes[0]?.id ?? DEFAULT_CLASS_ID;
+
+  NPC_QUEST_IDS = {};
+  for (const quest of snapshot.quests) {
+    (NPC_QUEST_IDS[quest.giverNpcId] ??= []).push(quest.id);
+  }
+
+  ACTIVE_MAP = snapshot.maps.find((m) => m.kind === "overworld" && m.isActive) ?? ACTIVE_MAP;
+  ACTIVE_DUNGEON = snapshot.dungeons.find((d) => d.isActive) ?? ACTIVE_DUNGEON;
+  const dungeonMap = snapshot.maps.find((m) => m.id === ACTIVE_DUNGEON?.mapId) ?? null;
+
+  // NPCs/spawns/structures are scoped to whichever map is currently ACTIVE_MAP, computed just
+  // above - so a draft/inactive "overworld"-kind map can carry its own content in the DB without
+  // it leaking into the live game (only one overworld map is ever active at a time).
+  NPCS = Object.fromEntries(snapshot.npcs.filter((n) => n.mapId === ACTIVE_MAP?.id).map((n) => [n.id, n]));
+  SPAWN_POINTS = snapshot.spawns.filter((s) => s.mapId === ACTIVE_MAP?.id);
+  STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_MAP?.id);
+
+  if (ACTIVE_MAP) {
+    MAP_HALF_EXTENT = ACTIVE_MAP.halfExtent;
+    if (ACTIVE_MAP.portalX != null && ACTIVE_MAP.portalZ != null) {
+      PORTAL_POSITION = { x: ACTIVE_MAP.portalX, z: ACTIVE_MAP.portalZ };
+    }
+    if (ACTIVE_MAP.bossArenaX != null && ACTIVE_MAP.bossArenaZ != null) {
+      BOSS_ARENA_CENTER = { x: ACTIVE_MAP.bossArenaX, z: ACTIVE_MAP.bossArenaZ };
+    }
+    if (ACTIVE_MAP.bossArenaRadius != null) BOSS_ARENA_RADIUS = ACTIVE_MAP.bossArenaRadius;
+  }
+  if (dungeonMap) DUNGEON_HALF_EXTENT = dungeonMap.halfExtent;
+  if (ACTIVE_DUNGEON) {
+    DUNGEON_PARTY_SIZE = ACTIVE_DUNGEON.partySize;
+    DUNGEON_COMPOSITION = ACTIVE_DUNGEON.composition;
+  }
 }

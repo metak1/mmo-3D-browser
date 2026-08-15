@@ -1,9 +1,9 @@
 import { Room, Client } from "@colyseus/core";
 import {
+  ACTIVE_DUNGEON,
   CastMessage,
   ChatMessage,
-  ENEMY_STATS,
-  EnemyKind,
+  ENEMY_TYPES,
   INVENTORY_SIZE,
   InputMessage,
   LOOT_BAG_AGGREGATE_RADIUS,
@@ -12,7 +12,6 @@ import {
   LOOT_PICKUP_RADIUS,
   LootTakeMessage,
   ITEM_IDS,
-  XP_PER_ENEMY_KIND,
   decodeItemToken,
   encodeItemToken,
   resolveClassId,
@@ -28,29 +27,7 @@ import { DungeonState, Enemy, LootBag, Player } from "./schema/DungeonState.js";
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const ENCOUNTER_CHECK_INTERVAL_MS = 1000;
 const ENCOUNTER_GAP_MS = 3000; // pause between one cleared encounter and the next spawning
-const BOSS_MAX_HP = 350; // a "mini" version of the overworld boss's 500 - same attack patterns
 const BOSS_GUARANTEED_DROPS = 3;
-
-interface EncounterEnemySpec {
-  id: string;
-  kind: EnemyKind;
-  x: number;
-  z: number;
-}
-
-// All three encounters sit at the same spot - this is a small sequential-wave instance,
-// not a spatial dungeon crawl, so there's nothing to walk between.
-const ENCOUNTERS: EncounterEnemySpec[][] = [
-  [
-    { id: "pack1-a", kind: "melee", x: -1.5, z: 8 },
-    { id: "pack1-b", kind: "melee", x: 1.5, z: 8 },
-  ],
-  [
-    { id: "pack2-a", kind: "melee", x: -1.5, z: 8 },
-    { id: "pack2-b", kind: "caster", x: 1.5, z: 8 },
-  ],
-  [{ id: "dungeon-boss", kind: "boss", x: 0, z: 8 }],
-];
 
 export class DungeonRoom extends Room<DungeonState> {
   private combat!: CombatEngine;
@@ -63,7 +40,8 @@ export class DungeonRoom extends Room<DungeonState> {
 
     this.combat = new CombatEngine({
       state: this.state,
-      onEnemyKilled: (enemyId, kind, killerSessionId, x, z) => this.handleEnemyKilled(enemyId, kind, killerSessionId, x, z),
+      onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
+        this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
       onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
     });
 
@@ -112,6 +90,7 @@ export class DungeonRoom extends Room<DungeonState> {
     player.vitality = character.vitality;
     player.luck = character.luck;
     player.armor = character.armor;
+    player.gold = character.gold;
     player.talentPoints = character.talent_points;
     // Talent ranks matter for combat formulas (getTalentBonusFor) even though talents
     // aren't spendable mid-dungeon, so they're loaded read-only here.
@@ -145,6 +124,7 @@ export class DungeonRoom extends Room<DungeonState> {
           level: player.level,
           xp: player.xp,
           stats: { mainStat: player.mainStat, vitality: player.vitality, luck: player.luck, armor: player.armor },
+          gold: player.gold,
           talentPoints: player.talentPoints,
           talentRanks: Object.fromEntries(player.talentRanks),
           questProgress: {},
@@ -161,19 +141,26 @@ export class DungeonRoom extends Room<DungeonState> {
   }
 
   private spawnEncounter(index: number) {
-    const encounter = ENCOUNTERS[index];
+    const encounter = ACTIVE_DUNGEON?.encounters[index];
     this.currentEncounterEnemyIds.clear();
-    for (const spec of encounter) {
+    if (!encounter) return; // no active dungeon content configured - nothing to spawn
+
+    encounter.forEach((spec, i) => {
+      const enemyType = ENEMY_TYPES[spec.enemyTypeId];
+      if (!enemyType) return; // admin deleted/renamed this enemy type after the wave was authored
+
       const enemy = new Enemy();
-      enemy.kind = spec.kind;
+      enemy.enemyTypeId = spec.enemyTypeId;
+      enemy.behavior = enemyType.behavior;
       enemy.x = spec.x;
       enemy.z = spec.z;
-      const maxHp = spec.kind === "boss" ? BOSS_MAX_HP : ENEMY_STATS[spec.kind].maxHp;
-      enemy.hp = maxHp;
-      enemy.maxHp = maxHp;
-      this.state.enemies.set(spec.id, enemy);
-      this.currentEncounterEnemyIds.add(spec.id);
-    }
+      enemy.hp = enemyType.stats.maxHp;
+      enemy.maxHp = enemyType.stats.maxHp;
+
+      const id = `encounter-${index}-${i}`;
+      this.state.enemies.set(id, enemy);
+      this.currentEncounterEnemyIds.add(id);
+    });
   }
 
   private checkEncounterProgress() {
@@ -185,7 +172,7 @@ export class DungeonRoom extends Room<DungeonState> {
 
     this.currentEncounterEnemyIds.clear(); // stop this check from re-firing during the gap
     const nextIndex = this.state.encounterIndex + 1;
-    if (nextIndex >= ENCOUNTERS.length) return; // that was the boss - handleEnemyKilled already set cleared
+    if (nextIndex >= (ACTIVE_DUNGEON?.encounters.length ?? 0)) return; // that was the boss - handleEnemyKilled already set cleared
 
     this.clock.setTimeout(() => {
       this.state.encounterIndex = nextIndex;
@@ -194,12 +181,16 @@ export class DungeonRoom extends Room<DungeonState> {
   }
 
   // CombatEngine hook: called once an enemy's hp hits 0 (already removed from state by then).
-  private handleEnemyKilled(_enemyId: string, kind: EnemyKind, _killerSessionId: string, x: number, z: number) {
+  private handleEnemyKilled(_enemyId: string, enemyTypeId: string, _killerSessionId: string, x: number, z: number) {
+    const enemyType = ENEMY_TYPES[enemyTypeId];
+    if (!enemyType) return;
+
     for (const player of this.state.players.values()) {
-      this.combat.grantXp(player, XP_PER_ENEMY_KIND[kind]);
+      this.combat.grantXp(player, enemyType.xpReward);
+      player.gold += enemyType.goldReward;
     }
 
-    if (kind === "boss") {
+    if (enemyType.behavior === "boss") {
       for (let i = 0; i < BOSS_GUARANTEED_DROPS; i++) this.maybeDropLoot(x, z, true);
       this.state.cleared = true;
     } else {

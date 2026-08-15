@@ -36,9 +36,17 @@ export class GameScene {
 
     const backgroundColor = isDungeon ? 0x140f1a : 0x10121a;
     this.scene.background = new THREE.Color(backgroundColor);
-    this.scene.fog = new THREE.Fog(backgroundColor, isDungeon ? 22 : 38, isDungeon ? 45 : 80);
 
-    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
+    // Derived from the live (admin-editable) map size rather than fixed constants, so growing
+    // the map via the admin panel doesn't leave distant ground with no fog falloff or hard-clip
+    // objects at a fixed distance. Factors are tuned to land close to the old fixed values
+    // (38/80 for the overworld) at today's default map sizes.
+    const relevantHalfExtent = isDungeon ? DUNGEON_HALF_EXTENT : MAP_HALF_EXTENT;
+    const fogNear = relevantHalfExtent * 1.1;
+    const fogFar = relevantHalfExtent * 2.3;
+    this.scene.fog = new THREE.Fog(backgroundColor, fogNear, fogFar);
+
+    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, fogFar + 20);
     this.camera.position.copy(CAMERA_OFFSET);
     this.camera.lookAt(0, 0, 0);
 

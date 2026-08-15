@@ -1,14 +1,14 @@
 import { Room, Client, matchMaker } from "@colyseus/core";
 import {
   AcceptQuestMessage,
-  BOSS_ARENA_CENTER,
+  BuyItemMessage,
   ChatMessage,
   DUNGEON_PARTY_SIZE,
   DUNGEON_ROOM_NAME,
   DungeonJoinListingMessage,
   ENEMY_RESPAWN_MS,
-  ENEMY_STATS,
-  EnemyKind,
+  ENEMY_TYPES,
+  EnemySpawnDef,
   EquipMessage,
   EquipSlot,
   INVENTORY_SIZE,
@@ -28,12 +28,19 @@ import {
   PartyInviteMessage,
   PartyRespondMessage,
   QUESTS,
+  RARITY_MULTIPLIER,
+  SPAWN_POINTS,
+  SellItemMessage,
   SpendTalentMessage,
   TALENTS,
+  TRADE_RANGE_CHECK_INTERVAL_MS,
+  TradeOfferMessage,
+  TradeRequestMessage,
+  TradeRespondMessage,
   TurnInQuestMessage,
   UnequipMessage,
+  VENDOR_SELL_FRACTION,
   CastMessage,
-  XP_PER_ENEMY_KIND,
   decodeItemToken,
   encodeItemToken,
   resolveClassId,
@@ -45,42 +52,35 @@ import { listCharacterItems, replaceCharacterItems } from "../db/items.js";
 import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
 import { DungeonListing, Enemy, LootBag, Player, WorldState } from "./schema/WorldState.js";
+import { TradeManager } from "./trade.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const AUTOSAVE_INTERVAL_MS = 30_000;
-const BOSS_RESPAWN_MS = 60_000; // a boss should feel rarer than a trash mob's ENEMY_RESPAWN_MS
 const BOSS_GUARANTEED_DROPS = 3; // bypasses LOOT_DROP_CHANCE - a group should always walk away with something
-
-interface EnemySpawnPoint {
-  id: string;
-  kind: EnemyKind;
-  x: number;
-  z: number;
-  respawnMs?: number; // falls back to ENEMY_RESPAWN_MS when unset
-}
-
-const SPAWN_POINTS: EnemySpawnPoint[] = [
-  { id: "melee-1", kind: "melee", x: 8, z: 8 },
-  { id: "melee-2", kind: "melee", x: -8, z: 8 },
-  { id: "caster-1", kind: "caster", x: 8, z: -8 },
-  { id: "caster-2", kind: "caster", x: -8, z: -8 },
-  { id: "boss-1", kind: "boss", x: BOSS_ARENA_CENTER.x, z: BOSS_ARENA_CENTER.z, respawnMs: BOSS_RESPAWN_MS },
-];
 
 export class WorldRoom extends Room<WorldState> {
   private combat!: CombatEngine;
+  private trade!: TradeManager;
   private characterIdBySession = new Map<string, number>();
   private tokenBySession = new Map<string, string>(); // kept for re-use when reserving dungeon seats
   private lootBagSeq = 0;
+  // Colyseus doesn't await onMessage handlers before processing the next message (confirmed in
+  // its dispatch loop), so persistItems/saveCharacter are otherwise fire-and-forget - two rapid
+  // writes for the same session (e.g. buy then sell) can race and let a stale write clobber a
+  // newer one in the DB. Chaining every persistence call for a session through this queue makes
+  // them apply strictly in call order, so the last one always wins.
+  private persistQueues = new Map<string, Promise<void>>();
 
   onCreate() {
     this.setState(new WorldState());
 
     this.combat = new CombatEngine({
       state: this.state,
-      onEnemyKilled: (enemyId, kind, killerSessionId, x, z) => this.handleEnemyKilled(enemyId, kind, killerSessionId, x, z),
+      onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
+        this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
       onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
     });
+    this.trade = new TradeManager(this);
 
     for (const point of SPAWN_POINTS) {
       this.spawnEnemy(point);
@@ -94,6 +94,8 @@ export class WorldRoom extends Room<WorldState> {
     this.onMessage("spend_talent", (client, message: SpendTalentMessage) => this.handleSpendTalent(client, message));
     this.onMessage("accept_quest", (client, message: AcceptQuestMessage) => this.handleAcceptQuest(client, message));
     this.onMessage("turn_in_quest", (client, message: TurnInQuestMessage) => this.handleTurnInQuest(client, message));
+    this.onMessage("buy_item", (client, message: BuyItemMessage) => this.handleBuyItem(client, message));
+    this.onMessage("sell_item", (client, message: SellItemMessage) => this.handleSellItem(client, message));
     this.onMessage("party_invite", (client, message: PartyInviteMessage) => this.handlePartyInvite(client, message));
     this.onMessage("party_respond", (client, message: PartyRespondMessage) => this.handlePartyRespond(client, message));
     this.onMessage("party_leave", (client) => this.handlePartyLeave(client));
@@ -104,9 +106,15 @@ export class WorldRoom extends Room<WorldState> {
     );
     this.onMessage("dungeon_start", (client) => this.handleDungeonStart(client));
     this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
+    this.onMessage("trade_request", (client, message: TradeRequestMessage) => this.trade.handleRequest(client, message));
+    this.onMessage("trade_respond", (client, message: TradeRespondMessage) => this.trade.handleRespond(client, message));
+    this.onMessage("trade_offer", (client, message: TradeOfferMessage) => this.trade.handleOffer(client, message));
+    this.onMessage("trade_accept", (client) => this.trade.handleAccept(client));
+    this.onMessage("trade_cancel", (client) => this.trade.handleCancel(client));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
+    this.clock.setInterval(() => this.trade.checkRanges(), TRADE_RANGE_CHECK_INTERVAL_MS);
   }
 
   async onJoin(client: Client, options?: { token?: string; characterId?: number; partyId?: string }) {
@@ -145,6 +153,7 @@ export class WorldRoom extends Room<WorldState> {
     player.vitality = character.vitality;
     player.luck = character.luck;
     player.armor = character.armor;
+    player.gold = character.gold;
     player.talentPoints = character.talent_points;
     const savedRanks = (character.talent_ranks as Record<string, number>) ?? {};
     for (const [talentId, rank] of Object.entries(savedRanks)) {
@@ -181,37 +190,51 @@ export class WorldRoom extends Room<WorldState> {
 
     const leavingPlayer = this.state.players.get(client.sessionId);
     if (leavingPlayer) this.removeFromParty(leavingPlayer);
+    this.trade.handleLeave(client.sessionId);
 
     this.combat.clearSessionTracking(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.characterIdBySession.delete(client.sessionId);
     this.tokenBySession.delete(client.sessionId);
+    this.persistQueues.delete(client.sessionId); // the final saveCharacter above already settled
     console.log(`[WorldRoom] ${client.sessionId} left`);
   }
 
-  private async saveCharacter(sessionId: string) {
-    const player = this.state.players.get(sessionId);
-    const characterId = this.characterIdBySession.get(sessionId);
-    if (!player || !characterId) return;
+  // Runs `task` after every previously-queued persistence call for this session has settled,
+  // so concurrent callers (e.g. a quick buy followed by a sell) can never have their writes
+  // complete out of order - see the persistQueues field comment for why this is necessary.
+  private queuePersist(sessionId: string, task: () => Promise<void>): Promise<void> {
+    const next = (this.persistQueues.get(sessionId) ?? Promise.resolve()).then(task);
+    this.persistQueues.set(sessionId, next);
+    return next;
+  }
 
-    try {
-      await saveCharacterProgress(characterId, {
-        level: player.level,
-        xp: player.xp,
-        stats: {
-          mainStat: player.mainStat,
-          vitality: player.vitality,
-          luck: player.luck,
-          armor: player.armor,
-        },
-        talentPoints: player.talentPoints,
-        talentRanks: Object.fromEntries(player.talentRanks),
-        questProgress: Object.fromEntries(player.questProgress),
-        questCompleted: Object.fromEntries(player.questCompleted),
-      });
-    } catch (err) {
-      console.error(`[WorldRoom] failed to save character ${characterId}:`, err);
-    }
+  async saveCharacter(sessionId: string) {
+    return this.queuePersist(sessionId, async () => {
+      const player = this.state.players.get(sessionId);
+      const characterId = this.characterIdBySession.get(sessionId);
+      if (!player || !characterId) return;
+
+      try {
+        await saveCharacterProgress(characterId, {
+          level: player.level,
+          xp: player.xp,
+          stats: {
+            mainStat: player.mainStat,
+            vitality: player.vitality,
+            luck: player.luck,
+            armor: player.armor,
+          },
+          gold: player.gold,
+          talentPoints: player.talentPoints,
+          talentRanks: Object.fromEntries(player.talentRanks),
+          questProgress: Object.fromEntries(player.questProgress),
+          questCompleted: Object.fromEntries(player.questCompleted),
+        });
+      } catch (err) {
+        console.error(`[WorldRoom] failed to save character ${characterId}:`, err);
+      }
+    });
   }
 
   private async autosaveAll() {
@@ -220,37 +243,42 @@ export class WorldRoom extends Room<WorldState> {
     }
   }
 
-  private async persistItems(sessionId: string) {
-    const player = this.state.players.get(sessionId);
-    const characterId = this.characterIdBySession.get(sessionId);
-    if (!player || !characterId) return;
+  async persistItems(sessionId: string) {
+    return this.queuePersist(sessionId, async () => {
+      const player = this.state.players.get(sessionId);
+      const characterId = this.characterIdBySession.get(sessionId);
+      if (!player || !characterId) return;
 
-    try {
-      await replaceCharacterItems(characterId, [...player.inventory], {
-        weapon: player.equippedWeapon,
-        armor: player.equippedArmor,
-        trinket: player.equippedTrinket,
-      });
-    } catch (err) {
-      console.error(`[WorldRoom] failed to persist items for character ${characterId}:`, err);
-    }
+      try {
+        await replaceCharacterItems(characterId, [...player.inventory], {
+          weapon: player.equippedWeapon,
+          armor: player.equippedArmor,
+          trinket: player.equippedTrinket,
+        });
+      } catch (err) {
+        console.error(`[WorldRoom] failed to persist items for character ${characterId}:`, err);
+      }
+    });
   }
 
-  private spawnEnemy(point: EnemySpawnPoint) {
-    const stats = ENEMY_STATS[point.kind];
+  private spawnEnemy(point: EnemySpawnDef) {
+    const enemyType = ENEMY_TYPES[point.enemyTypeId];
+    if (!enemyType) return; // admin deleted/renamed this enemy type after the spawn point was authored
+
     const enemy = new Enemy();
-    enemy.kind = point.kind;
+    enemy.enemyTypeId = point.enemyTypeId;
+    enemy.behavior = enemyType.behavior;
     enemy.x = point.x;
     enemy.z = point.z;
-    enemy.hp = stats.maxHp;
-    enemy.maxHp = stats.maxHp;
+    enemy.hp = enemyType.stats.maxHp;
+    enemy.maxHp = enemyType.stats.maxHp;
     this.state.enemies.set(point.id, enemy);
   }
 
   // CombatEngine hook: called once an enemy's hp hits 0 (already removed from state by then).
-  private handleEnemyKilled(enemyId: string, kind: EnemyKind, killerSessionId: string, x: number, z: number) {
-    this.grantKillRewards(killerSessionId, kind, x, z);
-    if (kind === "boss") {
+  private handleEnemyKilled(enemyId: string, enemyTypeId: string, killerSessionId: string, x: number, z: number) {
+    this.grantKillRewards(killerSessionId, enemyTypeId, x, z);
+    if (ENEMY_TYPES[enemyTypeId]?.behavior === "boss") {
       for (let i = 0; i < BOSS_GUARANTEED_DROPS; i++) this.maybeDropLoot(x, z, true);
     } else {
       this.maybeDropLoot(x, z, false);
@@ -270,13 +298,15 @@ export class WorldRoom extends Room<WorldState> {
   // Every party member within PARTY_XP_SHARE_RADIUS of the kill (and alive) gets the same
   // XP/quest credit the killer would get solo - not a split pool, just shared credit for
   // being nearby. Degrades to exactly the old single-killer behavior when partyId is empty.
-  private grantKillRewards(killerSessionId: string, kind: EnemyKind, x: number, z: number) {
+  private grantKillRewards(killerSessionId: string, enemyTypeId: string, x: number, z: number) {
     const killer = this.state.players.get(killerSessionId);
-    if (!killer) return;
+    const enemyType = ENEMY_TYPES[enemyTypeId];
+    if (!killer || !enemyType) return;
 
     for (const player of this.partyMembersNear(killer, x, z)) {
-      this.combat.grantXp(player, XP_PER_ENEMY_KIND[kind]);
-      this.progressQuestKills(player, kind);
+      this.combat.grantXp(player, enemyType.xpReward);
+      player.gold += enemyType.goldReward;
+      this.progressQuestKills(player, enemyTypeId);
     }
   }
 
@@ -614,11 +644,55 @@ export class WorldRoom extends Room<WorldState> {
     }
   }
 
+  // Purchases are always at common rarity - the vendor's catalog is flat-priced, no rarity RNG
+  // on the buy side (see VENDOR_SELL_FRACTION for why this can't be exploited on the sell side).
+  private handleBuyItem(client: Client, message: BuyItemMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const npc = NPCS[message.npcId];
+    if (!npc?.vendorItemIds?.includes(message.itemId)) return;
+    if (!this.isNearNpc(player, message.npcId)) return;
+
+    const item = ITEMS[message.itemId];
+    if (!item) return;
+    if (player.gold < item.basePrice) return;
+    if (player.inventory.length >= INVENTORY_SIZE) return;
+
+    player.gold -= item.basePrice;
+    player.inventory.push(encodeItemToken(message.itemId, "common"));
+    this.persistItems(client.sessionId);
+    this.saveCharacter(client.sessionId);
+  }
+
+  // Selling doesn't require the specific item to be in that vendor's catalog - any vendor
+  // buys anything, matching the standard MMO convention (unlike buying, which is catalog-gated).
+  private handleSellItem(client: Client, message: SellItemMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const npc = NPCS[message.npcId];
+    if (!npc?.vendorItemIds) return;
+    if (!this.isNearNpc(player, message.npcId)) return;
+
+    const index = player.inventory.indexOf(message.token);
+    if (index === -1) return;
+
+    const { itemId, rarity } = decodeItemToken(message.token);
+    const item = ITEMS[itemId];
+    if (!item) return;
+
+    player.inventory.splice(index, 1);
+    player.gold += Math.floor(item.basePrice * RARITY_MULTIPLIER[rarity] * VENDOR_SELL_FRACTION);
+    this.persistItems(client.sessionId);
+    this.saveCharacter(client.sessionId);
+  }
+
   // Called alongside grantXp from handleEnemyKilled - the single hook point that already
   // covers instant, AoE, and projectile-resolved enemy kills (via CombatEngine).
-  private progressQuestKills(player: Player, enemyKind: EnemyKind) {
+  private progressQuestKills(player: Player, enemyTypeId: string) {
     for (const quest of Object.values(QUESTS)) {
-      if (quest.objectiveEnemyKind !== enemyKind) continue;
+      if (quest.objectiveEnemyTypeId !== enemyTypeId) continue;
       const progress = player.questProgress.get(quest.id);
       if (progress === undefined || progress >= quest.objectiveCount) continue;
       player.questProgress.set(quest.id, progress + 1);

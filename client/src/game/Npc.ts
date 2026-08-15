@@ -9,6 +9,10 @@ const COLOR_AVAILABLE = 0xffd200; // quest to offer - yellow "!"
 const COLOR_ACTIVE = 0x9099ab; // quest in progress, not ready - grey "?"
 const COLOR_READY = 0xffd200; // quest ready to turn in - yellow "?"
 
+const VENDOR_INDICATOR_SIZE = 0.65;
+const VENDOR_INDICATOR_X_OFFSET = 0.55; // offset from the quest indicator so a future NPC could show both at once
+const VENDOR_COLOR = 0x4fd166; // green "$", visually distinct from the yellow/grey quest states
+
 // Drawn once and reused across every NpcAvatar instance - only the plane's material color
 // changes per-instance, not the glyph texture itself.
 function makeGlyphTexture(glyph: string): THREE.CanvasTexture {
@@ -31,6 +35,7 @@ function makeGlyphTexture(glyph: string): THREE.CanvasTexture {
 
 const EXCLAMATION_TEXTURE = makeGlyphTexture("!");
 const QUESTION_TEXTURE = makeGlyphTexture("?");
+const DOLLAR_TEXTURE = makeGlyphTexture("$");
 
 export type QuestIndicatorState = "none" | "available" | "active" | "ready";
 
@@ -38,6 +43,7 @@ export class NpcAvatar {
   readonly group = new THREE.Group();
   private readonly indicator: THREE.Mesh;
   private readonly indicatorMaterial: THREE.MeshBasicMaterial;
+  private readonly vendorIndicator: THREE.Mesh;
 
   constructor() {
     const body = new THREE.Mesh(
@@ -60,6 +66,18 @@ export class NpcAvatar {
     this.indicator.renderOrder = 10;
     this.indicator.visible = false;
     this.group.add(this.indicator);
+
+    // Independent of the quest indicator (offset to the side) - a vendor's shop is always
+    // open regardless of player state, unlike the quest "!"/"?" which reacts to progress.
+    this.vendorIndicator = new THREE.Mesh(
+      new THREE.PlaneGeometry(VENDOR_INDICATOR_SIZE, VENDOR_INDICATOR_SIZE),
+      new THREE.MeshBasicMaterial({ map: DOLLAR_TEXTURE, color: VENDOR_COLOR, transparent: true, depthWrite: false }),
+    );
+    this.vendorIndicator.position.set(VENDOR_INDICATOR_X_OFFSET, INDICATOR_Y_OFFSET, 0);
+    this.vendorIndicator.rotation.x = -CAMERA_PITCH;
+    this.vendorIndicator.renderOrder = 10;
+    this.vendorIndicator.visible = false;
+    this.group.add(this.vendorIndicator);
   }
 
   setQuestIndicator(state: QuestIndicatorState) {
@@ -80,6 +98,10 @@ export class NpcAvatar {
       this.indicatorMaterial.color.setHex(COLOR_ACTIVE);
     }
     this.indicatorMaterial.needsUpdate = true;
+  }
+
+  setVendorIndicator(isVendor: boolean) {
+    this.vendorIndicator.visible = isVendor;
   }
 
   setPosition(x: number, z: number) {

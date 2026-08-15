@@ -16,6 +16,7 @@ export interface CharacterRow {
   vitality: number;
   luck: number;
   armor: number;
+  gold: number;
   talent_points: number;
   talent_ranks: unknown;
   quest_progress: unknown;
@@ -59,6 +60,7 @@ export async function saveCharacterProgress(
     level: number;
     xp: number;
     stats: PlayerStats;
+    gold: number;
     talentPoints: number;
     talentRanks: Record<string, number>;
     questProgress: Record<string, number>;
@@ -74,6 +76,7 @@ export async function saveCharacterProgress(
       vitality: progress.stats.vitality,
       luck: progress.stats.luck,
       armor: progress.stats.armor,
+      gold: progress.gold,
       talent_points: progress.talentPoints,
       talent_ranks: progress.talentRanks,
       quest_progress: progress.questProgress,

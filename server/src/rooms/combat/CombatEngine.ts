@@ -5,17 +5,19 @@ import {
   AilmentKind,
   BOSS_ENRAGE_DAMAGE_MULTIPLIER,
   BOSS_PHASE_2_HP_FRACTION,
+  BossStats,
   CRIT_MULTIPLIER,
+  CasterStats,
   CastMessage,
   ClassId,
   DAMAGE_STAT_FACTOR,
-  ENEMY_STATS,
-  EnemyKind,
+  ENEMY_TYPES,
   INTERRUPT_LOCKOUT_MS,
   InputMessage,
   MAIN_STAT_PER_LEVEL,
   MAP_HALF_EXTENT,
   MAX_LEVEL,
+  MeleeStats,
   PLAYER_SPEED,
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
@@ -76,7 +78,7 @@ export interface CombatEngineConfig {
   // internal attack-tracking cleared - the room decides what happens next (reward the killer
   // and schedule a respawn in the overworld; grant XP to everyone and advance the encounter
   // in a dungeon).
-  onEnemyKilled: (enemyId: string, kind: EnemyKind, killerSessionId: string, x: number, z: number) => void;
+  onEnemyKilled: (enemyId: string, enemyTypeId: string, killerSessionId: string, x: number, z: number) => void;
   // Called after a dead player's hp/ailments/cast have already been reset - the room decides
   // where they land (the overworld's fixed (0,0,0), or a dungeon's own entry point).
   onPlayerRespawn: (sessionId: string, player: Player) => void;
@@ -412,10 +414,9 @@ export class CombatEngine {
   // --- Enemy damage / kill ---
 
   applySpellDamage(target: Enemy, damage: number, targetId: string, killerSessionId: string) {
-    const kind = target.kind as EnemyKind;
     // Starts the enrage clock on the boss's first hit taken, never reset until it dies
     // (each room creates a fresh Enemy() per spawn, so a respawned/re-spawned boss starts clean).
-    if (kind === "boss" && target.enragesAt === 0) target.enragesAt = Date.now() + BOSS_ENRAGE_MS;
+    if (target.behavior === "boss" && target.enragesAt === 0) target.enragesAt = Date.now() + BOSS_ENRAGE_MS;
 
     target.hp = Math.max(0, target.hp - damage);
     if (target.hp === 0) {
@@ -423,7 +424,7 @@ export class CombatEngine {
       const deathZ = target.z;
       this.state.enemies.delete(targetId);
       this.clearEnemyTracking(targetId);
-      this.config.onEnemyKilled(targetId, kind, killerSessionId, deathX, deathZ);
+      this.config.onEnemyKilled(targetId, target.enemyTypeId, killerSessionId, deathX, deathZ);
     }
   }
 
@@ -438,11 +439,11 @@ export class CombatEngine {
   // client and server independently compute the same threshold locally) ---
 
   isBossPhase2(enemy: Enemy): boolean {
-    return enemy.kind === "boss" && enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION;
+    return enemy.behavior === "boss" && enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION;
   }
 
   isBossEnraged(enemy: Enemy): boolean {
-    return enemy.kind === "boss" && enemy.enragesAt !== 0 && Date.now() >= enemy.enragesAt;
+    return enemy.behavior === "boss" && enemy.enragesAt !== 0 && Date.now() >= enemy.enragesAt;
   }
 
   // --- Per-tick simulation ---
@@ -505,14 +506,19 @@ export class CombatEngine {
 
     for (const [enemyId, enemy] of this.state.enemies) {
       if (enemy.hp <= 0) continue;
-      const isBoss = enemy.kind === "boss";
+      const enemyType = ENEMY_TYPES[enemy.enemyTypeId];
+      if (!enemyType) continue; // content deleted after this enemy spawned - skip its AI this tick
+
+      const isBoss = enemy.behavior === "boss";
       const enrageMultiplier = this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1;
 
       // Melee pattern: always active for "melee", and for "boss" in every phase.
-      if (enemy.kind === "melee" || isBoss) {
-        const range = isBoss ? ENEMY_STATS.boss.meleeRange : ENEMY_STATS.melee.range;
-        const interval = isBoss ? ENEMY_STATS.boss.meleeIntervalMs : ENEMY_STATS.melee.intervalMs;
-        const damage = isBoss ? ENEMY_STATS.boss.meleeDamage : ENEMY_STATS.melee.damage;
+      if (enemy.behavior === "melee" || isBoss) {
+        const range = isBoss ? (enemyType.stats as BossStats).meleeRange : (enemyType.stats as MeleeStats).range;
+        const interval = isBoss
+          ? (enemyType.stats as BossStats).meleeIntervalMs
+          : (enemyType.stats as MeleeStats).intervalMs;
+        const damage = isBoss ? (enemyType.stats as BossStats).meleeDamage : (enemyType.stats as MeleeStats).damage;
 
         const lastAttack = this.lastMeleeAttackAt.get(enemyId) ?? 0;
         if (now - lastAttack >= interval) {
@@ -529,13 +535,17 @@ export class CombatEngine {
       }
 
       // Ranged/AoE pattern: always active for "caster"; for "boss" only once phase 2 starts.
-      if (enemy.kind === "caster" || (isBoss && this.isBossPhase2(enemy))) {
+      if (enemy.behavior === "caster" || (isBoss && this.isBossPhase2(enemy))) {
         if (this.pendingEnemyCast.has(enemyId)) continue; // already winding up
         if ((this.interruptLockoutUntil.get(enemyId) ?? 0) > now) continue; // recently interrupted
 
-        const range = isBoss ? ENEMY_STATS.boss.aoeRange : ENEMY_STATS.caster.range;
-        const cooldownMs = isBoss ? ENEMY_STATS.boss.aoeCooldownMs : ENEMY_STATS.caster.cooldownMs;
-        const castTimeMs = isBoss ? ENEMY_STATS.boss.aoeCastTimeMs : ENEMY_STATS.caster.castTimeMs;
+        const range = isBoss ? (enemyType.stats as BossStats).aoeRange : (enemyType.stats as CasterStats).range;
+        const cooldownMs = isBoss
+          ? (enemyType.stats as BossStats).aoeCooldownMs
+          : (enemyType.stats as CasterStats).cooldownMs;
+        const castTimeMs = isBoss
+          ? (enemyType.stats as BossStats).aoeCastTimeMs
+          : (enemyType.stats as CasterStats).castTimeMs;
 
         const lastAttack = this.lastCasterAttackAt.get(enemyId) ?? 0;
         if (now - lastAttack < cooldownMs) continue;
@@ -568,10 +578,15 @@ export class CombatEngine {
       const player = this.state.players.get(pending.targetSessionId);
       if (!player || player.hp <= 0) continue; // target gone, cast fizzles
 
-      const isBoss = enemy.kind === "boss";
+      const enemyType = ENEMY_TYPES[enemy.enemyTypeId];
+      if (!enemyType) continue; // content deleted mid-windup - cast fizzles
+
+      const isBoss = enemy.behavior === "boss";
       const enrageMultiplier = this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1;
-      const baseDamage = isBoss ? ENEMY_STATS.boss.aoeDamage : ENEMY_STATS.caster.damage;
-      const projectileSpeed = isBoss ? ENEMY_STATS.boss.aoeProjectileSpeed : ENEMY_STATS.caster.projectileSpeed;
+      const baseDamage = isBoss ? (enemyType.stats as BossStats).aoeDamage : (enemyType.stats as CasterStats).damage;
+      const projectileSpeed = isBoss
+        ? (enemyType.stats as BossStats).aoeProjectileSpeed
+        : (enemyType.stats as CasterStats).projectileSpeed;
 
       // ownerId lets tickProjectiles recognize a boss-sourced projectile on impact (to
       // splash instead of single-target); harmless for non-boss enemies since nothing
@@ -642,10 +657,12 @@ export class CombatEngine {
         if (projectile.source === "enemy") {
           const player = this.state.players.get(projectile.targetId)!;
           const ownerEnemy = this.state.enemies.get(projectile.ownerId);
-          if (ownerEnemy?.kind === "boss") {
+          if (ownerEnemy?.behavior === "boss") {
             // Phase 2's ranged attack: splash the locked-target's impact point instead of
             // hitting only them - the enrage multiplier is already baked into projectile.damage.
-            forEachAlive(this.state.players, player.x, player.z, ENEMY_STATS.boss.aoeRadius, (splashPlayer, splashSessionId) => {
+            const ownerType = ENEMY_TYPES[ownerEnemy.enemyTypeId];
+            const aoeRadius = (ownerType?.stats as BossStats | undefined)?.aoeRadius ?? 0;
+            forEachAlive(this.state.players, player.x, player.z, aoeRadius, (splashPlayer, splashSessionId) => {
               this.damagePlayer(splashSessionId, splashPlayer, projectile.damage);
               if (splashPlayer.hp > 0) this.applyAilment(splashPlayer, "weaken", AILMENTS.weaken.durationMs);
             });

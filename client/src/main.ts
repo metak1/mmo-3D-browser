@@ -3,7 +3,10 @@ import type { Room, SeatReservation } from "colyseus.js";
 import {
   AcceptQuestMessage,
   BOSS_PHASE_2_HP_FRACTION,
+  BossStats,
+  BuyItemMessage,
   CastMessage,
+  CasterStats,
   CHAT_MAX_LENGTH,
   ChatBroadcast,
   ChatChannel,
@@ -11,20 +14,23 @@ import {
   CLASSES,
   ClassId,
   ClassRole,
+  ContentSnapshot,
   DUNGEON_COMPOSITION,
   DUNGEON_PARTY_SIZE,
   DungeonJoinListingMessage,
-  ENEMY_STATS,
-  EnemyKind,
+  ENEMY_TYPES,
+  EnemyBehavior,
   EquipMessage,
   EquipSlot,
   InputMessage,
   INVENTORY_SIZE,
   ITEMS,
+  loadGameContent,
   LootTakeMessage,
   MAP_HALF_EXTENT,
   MainStat,
   NPCS,
+  NPC_QUEST_IDS,
   NpcDef,
   PARTY_MAX_SIZE,
   PLAYER_SPEED,
@@ -37,12 +43,20 @@ import {
   RARITY_COLOR,
   RARITY_MULTIPLIER,
   SPELLS,
+  SellItemMessage,
   SpellId,
   SpendTalentMessage,
+  STRUCTURES,
   TALENTS,
+  TradeOfferMessage,
+  TradeRequestMessage,
+  TradeRespondMessage,
+  TradeSnapshot,
   TurnInQuestMessage,
   UnequipMessage,
+  VENDOR_SELL_FRACTION,
   decodeItemToken,
+  encodeItemToken,
   getEffectiveStats,
   xpForNextLevel,
 } from "@mmo/shared";
@@ -50,6 +64,7 @@ import { GameScene } from "./game/Scene";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
 import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
+import { StructureAvatar } from "./game/Structure";
 import { PortalAvatar } from "./game/Portal";
 import { ProjectileAvatar } from "./game/Projectile";
 import { LootBagAvatar } from "./game/LootBagAvatar";
@@ -69,11 +84,6 @@ const SERVER_RECONCILE_LERP = 0.02;
 const RECONCILE_SNAP_DISTANCE = 3; // large corrections (e.g. death/respawn teleport) snap instead of creeping
 const HOTBAR_SLOT_COUNT = 3;
 const AILMENT_LABELS: Record<string, string> = { weaken: "Weakened" };
-const ENEMY_LABEL: Record<EnemyKind, string> = {
-  melee: "Melee Enemy",
-  caster: "Caster Enemy",
-  boss: "The Ashen Warden",
-};
 
 const hud = document.getElementById("hud")!;
 const container = document.getElementById("app")!;
@@ -98,6 +108,18 @@ const partyMemberListEl = document.getElementById("party-member-list")!;
 const partyInvitePromptEl = document.getElementById("party-invite-prompt")!;
 const partyInviteTextEl = document.querySelector<HTMLElement>("[data-party-invite-text]")!;
 
+const tradeInvitePromptEl = document.getElementById("trade-invite-prompt")!;
+const tradeInviteTextEl = document.querySelector<HTMLElement>("[data-trade-invite-text]")!;
+const tradeWindowEl = document.getElementById("trade-window")!;
+const tradePartnerNameEl = document.querySelector<HTMLElement>("[data-trade-partner-name]")!;
+const tradeSelfOfferEl = document.getElementById("trade-self-offer")!;
+const tradePartnerOfferEl = document.getElementById("trade-partner-offer")!;
+const tradeSelfGoldInput = document.getElementById("trade-self-gold") as HTMLInputElement;
+const tradePartnerGoldInput = document.getElementById("trade-partner-gold") as HTMLInputElement;
+const tradeSelfAcceptedEl = document.querySelector<HTMLElement>("[data-trade-self-accepted]")!;
+const tradePartnerAcceptedEl = document.querySelector<HTMLElement>("[data-trade-partner-accepted]")!;
+const tradeInventoryListEl = document.getElementById("trade-inventory-list")!;
+
 const dungeonFinderPanel = document.getElementById("dungeon-finder-panel")!;
 const dungeonYourGroupEl = document.getElementById("dungeon-your-group")!;
 const dungeonRoleChecklistEl = document.getElementById("dungeon-role-checklist")!;
@@ -115,6 +137,7 @@ const chatInputEl = document.getElementById("chat-input") as HTMLInputElement;
 const chatTabEls = [...document.querySelectorAll<HTMLButtonElement>("[data-chat-channel]")];
 
 const playerLevelEl = document.querySelector<HTMLElement>("[data-player-level]")!;
+const playerGoldEl = document.querySelector<HTMLElement>("[data-player-gold]")!;
 const playerClassEl = document.querySelector<HTMLElement>("[data-player-class]")!;
 const characterClassEl = document.querySelector<HTMLElement>("[data-character-class]")!;
 const xpFill = document.querySelector<HTMLElement>("[data-xp-fill]")!;
@@ -146,6 +169,10 @@ const talentPointsEl = document.querySelector<HTMLElement>("[data-talent-points]
 const npcDialoguePanel = document.getElementById("npc-dialogue-panel")!;
 const npcDialogueNameEl = document.querySelector<HTMLElement>("[data-npc-dialogue-name]")!;
 const npcDialogueQuestsEl = document.getElementById("npc-dialogue-quests")!;
+const npcDialogueBuyLabelEl = document.querySelector<HTMLElement>("[data-npc-dialogue-buy-label]")!;
+const npcDialogueBuyListEl = document.getElementById("npc-dialogue-buy-list")!;
+const npcDialogueSellLabelEl = document.querySelector<HTMLElement>("[data-npc-dialogue-sell-label]")!;
+const npcDialogueSellListEl = document.getElementById("npc-dialogue-sell-list")!;
 const questLogPanel = document.getElementById("quest-log-panel")!;
 const questLogListEl = document.getElementById("quest-log-list")!;
 
@@ -284,6 +311,7 @@ makeDraggable(partyPanel, "party");
 makeDraggable(dungeonFinderPanel, "dungeon-finder");
 makeDraggable(dungeonStatusPanel, "dungeon-status");
 makeDraggable(chatPanel, "chat");
+makeDraggable(tradeWindowEl, "trade");
 
 // Set once main() establishes a connection; the equip/unequip/inventory click handlers
 // below are bound once at module scope (their DOM elements are static), so they read
@@ -306,6 +334,7 @@ interface PlayerStatsSnapshot {
   vitality: number;
   luck: number;
   armor: number;
+  gold: number;
   equippedWeapon: string;
   equippedArmor: string;
   equippedTrinket: string;
@@ -395,6 +424,7 @@ function updateCharacterPanel(player: PlayerStatsSnapshot) {
   playerClassEl.textContent = className;
   characterClassEl.textContent = className;
   playerLevelEl.textContent = `Lv. ${player.level}`;
+  playerGoldEl.textContent = `💰 ${player.gold}`;
 
   const needed = xpForNextLevel(player.level);
   const fraction = needed > 0 ? Math.max(0, Math.min(1, player.xp / needed)) : 0;
@@ -445,7 +475,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const enemies = new Map<string, EnemyAvatar>();
   const enemySchemaById = new Map<
     string,
-    { kind: string; hp: number; maxHp: number; isCasting: boolean; enragesAt: number }
+    { enemyTypeId: string; behavior: string; hp: number; maxHp: number; isCasting: boolean; enragesAt: number }
   >();
   const playerSchemaById = new Map<
     string,
@@ -459,6 +489,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       ailments: Iterable<[string, number]>;
       partyId: string;
       pendingPartyInviteFrom: string;
+      pendingTradeRequestFrom: string;
     }
   >();
   const projectiles = new Map<string, ProjectileAvatar>();
@@ -473,8 +504,15 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     const avatar = new NpcAvatar();
     avatar.group.userData.npcId = def.id;
     avatar.setPosition(def.x, def.z);
+    avatar.setVendorIndicator(!!def.vendorItemIds);
     avatar.addTo(gameScene.scene);
     npcs.set(def.id, avatar);
+  }
+
+  // Structures are static shared data too (no state, never move) - spawned once at boot the
+  // same way as NPCs.
+  for (const def of STRUCTURES) {
+    new StructureAvatar(def).addTo(gameScene.scene);
   }
 
   // The portal only exists in the overworld - it's how a dungeon instance is entered in
@@ -617,15 +655,129 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     room?.send("party_invite", message);
   }
 
+  function renderTradeInvitePrompt(player: { pendingTradeRequestFrom: string }) {
+    const requesterId = player.pendingTradeRequestFrom;
+    if (!requesterId) {
+      tradeInvitePromptEl.hidden = true;
+      return;
+    }
+
+    const requester = playerSchemaById.get(requesterId);
+    const requesterLabel =
+      requester?.name || (requester ? (CLASSES[requester.classId as ClassId]?.name ?? "Someone") : "Someone");
+    tradeInviteTextEl.textContent = `${requesterLabel} wants to trade with you.`;
+    tradeInvitePromptEl.hidden = false;
+  }
+
+  // No distance check here on purpose, mirroring canInviteToParty's precedent - the server is
+  // the sole authority on TRADE_RANGE, checked at request time and continuously while trading.
+  function canTrade(targetSessionId: string): boolean {
+    if (!localSessionId || targetSessionId === localSessionId) return false;
+    if (activeTradeSnapshot) return false; // already mid-trade
+    return playerSchemaById.has(targetSessionId);
+  }
+
+  function sendTradeRequest(targetSessionId: string) {
+    if (!canTrade(targetSessionId)) return;
+    const message: TradeRequestMessage = { targetSessionId };
+    room?.send("trade_request", message);
+  }
+
   // Right-click (on the 3D avatar or the target panel) opens this menu - the single entry
-  // point for player-targeted actions. "Invite to Party" is the only one today; more get
-  // appended here as they're added, always with Invite first per the established convention.
+  // point for player-targeted actions, always with Invite first per the established convention.
   function actionsForPlayerTarget(targetSessionId: string): ContextMenuAction[] {
     const actions: ContextMenuAction[] = [];
     if (canInviteToParty(targetSessionId)) {
       actions.push({ label: "Invite to Party", onClick: () => sendPartyInvite(targetSessionId) });
     }
+    if (canTrade(targetSessionId)) {
+      actions.push({ label: "Trade", onClick: () => sendTradeRequest(targetSessionId) });
+    }
     return actions;
+  }
+
+  // Trade window state always mirrors the last server-pushed TradeSnapshot - there is no
+  // separately-tracked local offer, so there is nothing that can drift out of sync with it.
+  let activeTradeSnapshot: TradeSnapshot | null = null;
+
+  function closeTradeWindow() {
+    activeTradeSnapshot = null;
+    tradeWindowEl.hidden = true;
+  }
+
+  function sendTradeOffer(items: string[], gold: number) {
+    const message: TradeOfferMessage = { items, gold };
+    room?.send("trade_offer", message);
+  }
+
+  function toggleTradeOfferItem(token: string) {
+    if (!activeTradeSnapshot) return;
+    const offer = [...activeTradeSnapshot.selfOffer];
+    const index = offer.indexOf(token);
+    if (index === -1) offer.push(token);
+    else offer.splice(index, 1);
+    sendTradeOffer(offer, activeTradeSnapshot.selfGold);
+  }
+
+  function renderTradeItemSlot(token: string, onClick?: () => void): HTMLButtonElement {
+    const decoded = decodeItemToken(token);
+    const item = ITEMS[decoded.itemId];
+    const slotEl = document.createElement("button");
+    slotEl.className = "item-slot";
+    slotEl.textContent = item ? item.icon : "";
+    slotEl.style.borderColor = RARITY_COLOR[decoded.rarity];
+    if (onClick) slotEl.addEventListener("click", onClick);
+    else slotEl.disabled = true;
+    attachItemTooltip(slotEl, token);
+    return slotEl;
+  }
+
+  function renderTradeAvailableInventory() {
+    tradeInventoryListEl.innerHTML = "";
+    if (!localPlayerSchema || !activeTradeSnapshot) return;
+
+    // Duplicate tokens: skip exactly one occurrence per offered copy so a second identical
+    // item still shows as available (mirrors trade.ts's hasAtLeast multiset check server-side).
+    const offeredCounts = new Map<string, number>();
+    for (const token of activeTradeSnapshot.selfOffer) offeredCounts.set(token, (offeredCounts.get(token) ?? 0) + 1);
+
+    for (const token of localPlayerSchema.inventory) {
+      const remaining = offeredCounts.get(token) ?? 0;
+      if (remaining > 0) {
+        offeredCounts.set(token, remaining - 1);
+        continue;
+      }
+      tradeInventoryListEl.appendChild(renderTradeItemSlot(token, () => toggleTradeOfferItem(token)));
+    }
+  }
+
+  function renderTradeWindow() {
+    if (!activeTradeSnapshot) return;
+    tradeWindowEl.hidden = false;
+    tradePartnerNameEl.textContent = activeTradeSnapshot.partnerName;
+
+    tradeSelfOfferEl.innerHTML = "";
+    for (const token of activeTradeSnapshot.selfOffer) {
+      tradeSelfOfferEl.appendChild(renderTradeItemSlot(token, () => toggleTradeOfferItem(token)));
+    }
+
+    tradePartnerOfferEl.innerHTML = "";
+    for (const token of activeTradeSnapshot.partnerOffer) {
+      tradePartnerOfferEl.appendChild(renderTradeItemSlot(token));
+    }
+
+    // Never overwrite the input while the player is actively typing in it (see the identical
+    // guard pattern chat's own input avoids via blur-on-send).
+    if (document.activeElement !== tradeSelfGoldInput) tradeSelfGoldInput.value = String(activeTradeSnapshot.selfGold);
+    if (localPlayerSchema) tradeSelfGoldInput.max = String(localPlayerSchema.gold);
+    tradePartnerGoldInput.value = String(activeTradeSnapshot.partnerGold);
+
+    tradeSelfAcceptedEl.textContent = activeTradeSnapshot.selfAccepted ? "Accepted ✓" : "Not accepted";
+    tradeSelfAcceptedEl.classList.toggle("accepted", activeTradeSnapshot.selfAccepted);
+    tradePartnerAcceptedEl.textContent = activeTradeSnapshot.partnerAccepted ? "Accepted ✓" : "Not accepted";
+    tradePartnerAcceptedEl.classList.toggle("accepted", activeTradeSnapshot.partnerAccepted);
+
+    renderTradeAvailableInventory();
   }
 
   function setTarget(id: string | null) {
@@ -646,7 +798,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     if (enemySchema) {
       enemies.get(id)?.setSelected(true);
       targetPanel.hidden = false;
-      targetNameEl.textContent = ENEMY_LABEL[enemySchema.kind as EnemyKind] ?? enemySchema.kind;
+      targetNameEl.textContent = ENEMY_TYPES[enemySchema.enemyTypeId]?.name ?? enemySchema.enemyTypeId;
       updateHpBar(targetHpFill, targetHpLabel, enemySchema.hp, enemySchema.maxHp);
       if (enemySchema.isCasting) {
         targetCastActive = true;
@@ -771,7 +923,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
   function questObjectiveLabel(quest: QuestDef): string {
     const noun = quest.objectiveCount === 1 ? "Enemy" : "Enemies";
-    return `Kill ${quest.objectiveCount} ${capitalize(quest.objectiveEnemyKind)} ${noun}`;
+    const enemyName = ENEMY_TYPES[quest.objectiveEnemyTypeId]?.name ?? quest.objectiveEnemyTypeId;
+    return `Kill ${quest.objectiveCount} ${enemyName} ${noun}`;
   }
 
   // Ready-to-turn-in takes priority (most actionable), then a new quest to offer, then a
@@ -779,7 +932,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   function npcQuestIndicatorState(npc: NpcDef): QuestIndicatorState {
     let anyAvailable = false;
     let anyActive = false;
-    for (const questId of npc.questIds) {
+    for (const questId of NPC_QUEST_IDS[npc.id] ?? []) {
       const state = questStateFor(questId);
       if (state === "ready") return "ready";
       if (state === "available") anyAvailable = true;
@@ -806,7 +959,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     npcDialogueNameEl.textContent = npc.name;
     npcDialogueQuestsEl.innerHTML = "";
 
-    for (const questId of npc.questIds) {
+    for (const questId of NPC_QUEST_IDS[npc.id] ?? []) {
       const quest = QUESTS[questId];
       const state = questStateFor(questId);
       const progress = localPlayerSchema ? (new Map(localPlayerSchema.questProgress).get(questId) ?? 0) : 0;
@@ -850,6 +1003,81 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       }
 
       npcDialogueQuestsEl.appendChild(card);
+    }
+
+    if (npc.vendorItemIds) {
+      npcDialogueBuyLabelEl.hidden = false;
+      npcDialogueSellLabelEl.hidden = false;
+      renderVendorShop(npc);
+    } else {
+      npcDialogueBuyLabelEl.hidden = true;
+      npcDialogueSellLabelEl.hidden = true;
+      npcDialogueBuyListEl.innerHTML = "";
+      npcDialogueSellListEl.innerHTML = "";
+    }
+  }
+
+  function buildShopSlot(
+    icon: string,
+    borderColor: string,
+    tooltipToken: string,
+    priceLabel: string,
+    disabled: boolean,
+    onClick: () => void,
+  ): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "shop-slot-wrap";
+
+    const slotEl = document.createElement("button");
+    slotEl.className = "item-slot";
+    slotEl.textContent = icon;
+    slotEl.style.borderColor = borderColor;
+    slotEl.disabled = disabled;
+    if (!disabled) slotEl.addEventListener("click", onClick);
+    attachItemTooltip(slotEl, tooltipToken);
+    wrap.appendChild(slotEl);
+
+    const caption = document.createElement("span");
+    caption.className = "price-caption";
+    caption.textContent = priceLabel;
+    wrap.appendChild(caption);
+
+    return wrap;
+  }
+
+  // Buy always previews at common rarity (that's what a purchase actually yields, see
+  // WorldRoom.handleBuyItem); Sell lists the player's real inventory tokens at their real rarity.
+  function renderVendorShop(npc: NpcDef) {
+    npcDialogueBuyListEl.innerHTML = "";
+    for (const itemId of npc.vendorItemIds ?? []) {
+      const item = ITEMS[itemId];
+      if (!item) continue;
+
+      const gold = localPlayerSchema?.gold ?? 0;
+      const inventoryFull = (localPlayerSchema ? [...localPlayerSchema.inventory].length : 0) >= INVENTORY_SIZE;
+      const disabled = gold < item.basePrice || inventoryFull;
+
+      npcDialogueBuyListEl.appendChild(
+        buildShopSlot(item.icon, RARITY_COLOR.common, encodeItemToken(itemId, "common"), `💰${item.basePrice}`, disabled, () => {
+          const message: BuyItemMessage = { npcId: npc.id, itemId };
+          activeRoom?.send("buy_item", message);
+        }),
+      );
+    }
+
+    npcDialogueSellListEl.innerHTML = "";
+    for (const token of localPlayerSchema ? [...localPlayerSchema.inventory] : []) {
+      const decoded = decodeItemToken(token);
+      const item = ITEMS[decoded.itemId];
+      if (!item) continue;
+
+      const sellPrice = Math.floor(item.basePrice * RARITY_MULTIPLIER[decoded.rarity] * VENDOR_SELL_FRACTION);
+      npcDialogueSellListEl.appendChild(
+        buildShopSlot(item.icon, RARITY_COLOR[decoded.rarity], token, `💰${sellPrice}`, false, () => {
+          const message: SellItemMessage = { npcId: npc.id, token };
+          activeRoom?.send("sell_item", message);
+        }),
+      );
     }
   }
 
@@ -981,6 +1209,25 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   document.querySelector("[data-party-invite-decline]")!.addEventListener("click", () => {
     const message: PartyRespondMessage = { accept: false };
     room?.send("party_respond", message);
+  });
+
+  document.querySelector("[data-trade-invite-accept]")!.addEventListener("click", () => {
+    const message: TradeRespondMessage = { accept: true };
+    room?.send("trade_respond", message);
+  });
+  document.querySelector("[data-trade-invite-decline]")!.addEventListener("click", () => {
+    const message: TradeRespondMessage = { accept: false };
+    room?.send("trade_respond", message);
+  });
+  document.querySelector("[data-trade-accept]")!.addEventListener("click", () => room?.send("trade_accept"));
+  document.querySelector("[data-trade-cancel]")!.addEventListener("click", () => {
+    room?.send("trade_cancel");
+    closeTradeWindow(); // optimistic - a trade_cancelled echo will also arrive and no-op harmlessly
+  });
+  tradeSelfGoldInput.addEventListener("change", () => {
+    if (!activeTradeSnapshot || !localPlayerSchema) return;
+    const clamped = Math.max(0, Math.min(localPlayerSchema.gold, Math.floor(Number(tradeSelfGoldInput.value) || 0)));
+    sendTradeOffer([...activeTradeSnapshot.selfOffer], clamped);
   });
 
   document.querySelector("[data-dungeon-finder-close]")!.addEventListener("click", () => closeDungeonFinder());
@@ -1174,6 +1421,15 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       }
     });
 
+    // Trade is WorldRoom-only (see plan) but these handlers are harmless to register
+    // unconditionally - a DungeonRoom connection simply never emits these message types.
+    room.onMessage("trade_update", (snapshot: TradeSnapshot) => {
+      activeTradeSnapshot = snapshot;
+      renderTradeWindow();
+    });
+    room.onMessage("trade_complete", () => closeTradeWindow());
+    room.onMessage("trade_cancelled", () => closeTradeWindow());
+
     dungeonStatusPanel.hidden = !isDungeon;
     if (isDungeon) {
       const updateDungeonStatusPanel = () => {
@@ -1220,6 +1476,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         renderPartyPanel();
         renderDungeonFinderPanel();
         renderPartyInvitePrompt(player);
+        renderTradeInvitePrompt(player);
 
         // Mutating a nested MapSchema (questProgress/questCompleted/ailments) does not
         // reliably trigger the parent Player's own onChange callback below unless a sibling
@@ -1270,6 +1527,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
           renderNpcDialogue();
           renderQuestLog();
           renderPartyInvitePrompt(player);
+          renderTradeInvitePrompt(player);
 
           if (player.castSpellId !== localCastSpellId) {
             localCastSpellId = player.castSpellId;
@@ -1302,7 +1560,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     });
 
     $(room.state).enemies.onAdd((enemy, enemyId) => {
-      const avatar = new EnemyAvatar(enemy.kind as EnemyKind);
+      const avatar = new EnemyAvatar(enemy.behavior as EnemyBehavior);
       avatar.group.userData.enemyId = enemyId;
       avatar.setTarget(enemy.x, enemy.z);
       avatar.snapToTarget();
@@ -1314,7 +1572,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       $(enemy).onChange(() => {
         avatar.setTarget(enemy.x, enemy.z);
         avatar.setHp(enemy.hp, enemy.maxHp);
-        if (enemy.kind === "boss") avatar.setBossPhase(enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION);
+        if (enemy.behavior === "boss") avatar.setBossPhase(enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION);
 
         if (enemyId === currentTargetId) {
           updateHpBar(targetHpFill, targetHpLabel, enemy.hp, enemy.maxHp);
@@ -1451,15 +1709,18 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     if (targetCastActive) {
       const targetEnemySchema = currentTargetId ? enemySchemaById.get(currentTargetId) : undefined;
+      const targetEnemyType = targetEnemySchema ? ENEMY_TYPES[targetEnemySchema.enemyTypeId] : undefined;
       const castDurationMs =
-        targetEnemySchema?.kind === "boss" ? ENEMY_STATS.boss.aoeCastTimeMs : ENEMY_STATS.caster.castTimeMs;
+        targetEnemySchema?.behavior === "boss"
+          ? ((targetEnemyType?.stats as BossStats | undefined)?.aoeCastTimeMs ?? 0)
+          : ((targetEnemyType?.stats as CasterStats | undefined)?.castTimeMs ?? 0);
       const fraction = Math.max(0, Math.min(1, (performance.now() - targetCastStartRef) / castDurationMs));
       targetCastFill.style.width = `${fraction * 100}%`;
     }
 
     if (currentTargetId) {
       const targetEnemySchema = enemySchemaById.get(currentTargetId);
-      if (targetEnemySchema?.kind === "boss" && targetEnemySchema.enragesAt > 0) {
+      if (targetEnemySchema?.behavior === "boss" && targetEnemySchema.enragesAt > 0) {
         const remainingMs = targetEnemySchema.enragesAt - Date.now();
         targetEnrageEl.hidden = false;
         targetEnrageEl.textContent = remainingMs > 0 ? `Enrages in ${Math.ceil(remainingMs / 1000)}s` : "Enraged";
@@ -1577,6 +1838,12 @@ function showCharacterCreate() {
     card.classList.remove("selected");
   }
 }
+
+// Content (classes/spells/items/talents/quests/NPCs/enemy types/maps/dungeons) is now
+// database-backed and admin-editable - fetched once here, before any of the code below
+// (starting with the class-select cards, immediately next) that reads it. See
+// loadGameContent's contract in shared/src/types.ts for why this is a single population pass.
+loadGameContent(await api.getContent());
 
 for (const [classId, def] of Object.entries(CLASSES) as [ClassId, (typeof CLASSES)[ClassId]][]) {
   const card = document.createElement("button");

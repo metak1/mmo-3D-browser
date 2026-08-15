@@ -9,6 +9,11 @@ import { WorldRoom } from "./rooms/WorldRoom.js";
 import { DungeonRoom } from "./rooms/DungeonRoom.js";
 import { authRouter } from "./routes/auth.js";
 import { charactersRouter } from "./routes/characters.js";
+import { contentRouter } from "./routes/content.js";
+import { adminRouter } from "./routes/admin/index.js";
+import { requireAuth } from "./http/authMiddleware.js";
+import { requireAdmin } from "./http/adminMiddleware.js";
+import { reloadGameContent } from "./db/content.js";
 
 const app = express();
 app.use(cors());
@@ -16,6 +21,8 @@ app.use(express.json());
 
 app.use("/auth", authRouter);
 app.use("/characters", charactersRouter);
+app.use("/content", contentRouter);
+app.use("/admin", requireAuth, requireAdmin, adminRouter);
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error(err);
@@ -33,11 +40,15 @@ gameServer.define(DUNGEON_ROOM_NAME, DungeonRoom);
 
 const port = Number(process.env.PORT ?? 2567);
 
-gameServer
-  .listen(port)
-  .then(() => {
-    console.log(`Colyseus server listening on ws://localhost:${port}`);
-  })
+// Game content (classes/spells/items/.../maps/dungeons) is DB-backed and must be loaded into
+// shared/src/types.ts's mutable tables before any room can serve a player - see
+// loadGameContent's contract there for why this has to complete before gameServer.listen().
+reloadGameContent()
+  .then(() =>
+    gameServer.listen(port).then(() => {
+      console.log(`Colyseus server listening on ws://localhost:${port}`);
+    }),
+  )
   .catch((err) => {
     console.error("Failed to start server:", err);
     process.exit(1);

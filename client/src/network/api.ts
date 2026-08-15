@@ -1,4 +1,4 @@
-import { ClassId } from "@mmo/shared";
+import { ClassId, ContentSnapshot } from "@mmo/shared";
 
 const API_URL = import.meta.env.VITE_SERVER_HTTP_URL ?? "http://localhost:2567";
 
@@ -6,6 +6,7 @@ export interface PublicUser {
   id: number;
   username: string;
   email: string;
+  role: string;
 }
 
 export interface AuthResponse {
@@ -45,6 +46,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   return body as T;
+}
+
+// No auth required - the client needs this before login even happens (the class-select
+// screen renders from it). Populate shared/src/types.ts's tables via loadGameContent(...)
+// with the result before any other code that reads them runs.
+export function getContent(): Promise<ContentSnapshot> {
+  return request<ContentSnapshot>("/content");
 }
 
 export function register(username: string, email: string, password: string): Promise<AuthResponse> {

@@ -1,10 +1,10 @@
 import * as THREE from "three";
-import { EnemyKind } from "@mmo/shared";
+import { EnemyBehavior } from "@mmo/shared";
 import { HealthBar } from "./HealthBar";
 
 const INTERPOLATION_LERP = 0.25;
 
-const KIND_COLOR: Record<EnemyKind, number> = {
+const KIND_COLOR: Record<EnemyBehavior, number> = {
   melee: 0xb3423a,
   caster: 0x8a4fd1,
   boss: 0x6b1a1a,
@@ -23,7 +23,7 @@ export class EnemyAvatar {
   private readonly isBoss: boolean;
   private targetPosition = new THREE.Vector3();
 
-  constructor(kind: EnemyKind) {
+  constructor(kind: EnemyBehavior) {
     this.isBoss = kind === "boss";
     this.healthBar = new HealthBar(this.isBoss ? BOSS_HEALTH_BAR_Y_OFFSET : undefined);
 
