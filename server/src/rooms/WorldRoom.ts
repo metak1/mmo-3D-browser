@@ -79,6 +79,7 @@ export class WorldRoom extends Room<WorldState> {
       onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
         this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
       onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
+      collidableStructures: true,
     });
     this.trade = new TradeManager(this);
 

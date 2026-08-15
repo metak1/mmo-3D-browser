@@ -42,6 +42,7 @@ import {
   QuestDef,
   RARITY_COLOR,
   RARITY_MULTIPLIER,
+  resolveStructureCollisions,
   SPELLS,
   SellItemMessage,
   SpellId,
@@ -65,6 +66,7 @@ import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
 import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
 import { StructureAvatar } from "./game/Structure";
+import { Minimap } from "./game/Minimap";
 import { PortalAvatar } from "./game/Portal";
 import { ProjectileAvatar } from "./game/Projectile";
 import { LootBagAvatar } from "./game/LootBagAvatar";
@@ -87,6 +89,7 @@ const AILMENT_LABELS: Record<string, string> = { weaken: "Weakened" };
 
 const hud = document.getElementById("hud")!;
 const container = document.getElementById("app")!;
+const minimap = new Minimap(document.getElementById("minimap") as HTMLCanvasElement);
 
 const playerHpFill = document.querySelector<HTMLElement>("[data-player-hp-fill]")!;
 const playerHpLabel = document.querySelector<HTMLElement>("[data-player-hp-label]")!;
@@ -297,6 +300,7 @@ function bindPersistentItemTooltip(el: HTMLElement) {
   el.addEventListener("mouseleave", hideItemTooltip);
 }
 
+makeDraggable(document.getElementById("minimap-panel")!, "minimap");
 makeDraggable(document.getElementById("player-panel")!, "player");
 makeDraggable(document.getElementById("target-panel")!, "target");
 makeDraggable(document.getElementById("spell-panel")!, "spells");
@@ -510,9 +514,13 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   }
 
   // Structures are static shared data too (no state, never move) - spawned once at boot the
-  // same way as NPCs.
+  // same way as NPCs. Kept in an array (unlike npcs' Map) since nothing ever looks one up by id
+  // client-side - they only need per-frame update() calls for the house/shop walk-in fade.
+  const structures: StructureAvatar[] = [];
   for (const def of STRUCTURES) {
-    new StructureAvatar(def).addTo(gameScene.scene);
+    const avatar = new StructureAvatar(def);
+    avatar.addTo(gameScene.scene);
+    structures.push(avatar);
   }
 
   // The portal only exists in the overworld - it's how a dungeon instance is entered in
@@ -1669,8 +1677,18 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     if (localSessionId) {
       const { moveX, moveZ } = input.getMovement();
       if (moveX !== 0 || moveZ !== 0) {
-        localPredicted.x = clamp(localPredicted.x + moveX * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
-        localPredicted.z = clamp(localPredicted.z + moveZ * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        let nextX = clamp(localPredicted.x + moveX * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        let nextZ = clamp(localPredicted.z + moveZ * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        // Mirrors CombatEngine.tickPlayerMovement's server-authoritative collision exactly (same
+        // shared function/data) so prediction never drifts from the server and rubber-bands at
+        // walls - STRUCTURES is skipped in a dungeon since it always holds the overworld's rows.
+        if (!isDungeon) {
+          const resolved = resolveStructureCollisions(nextX, nextZ, STRUCTURES);
+          nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+          nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        }
+        localPredicted.x = nextX;
+        localPredicted.z = nextZ;
         localRotationY = Math.atan2(moveX, moveZ);
       }
 
@@ -1690,6 +1708,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       }
 
       gameScene.followTarget(localPredicted);
+      for (const avatar of structures) avatar.update(localPredicted.x, localPredicted.z);
     }
 
     for (const [sessionId, avatar] of avatars) {
@@ -1700,6 +1719,18 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     for (const avatar of enemies.values()) avatar.update();
     for (const avatar of projectiles.values()) avatar.update();
     portal?.update(dt);
+
+    if (localSessionId) {
+      const others = [...avatars.entries()]
+        .filter(([sessionId]) => sessionId !== localSessionId)
+        .map(([, avatar]) => ({ x: avatar.group.position.x, z: avatar.group.position.z }));
+      const enemyDots = [...enemies.entries()].map(([enemyId, avatar]) => ({
+        x: avatar.group.position.x,
+        z: avatar.group.position.z,
+        isBoss: enemySchemaById.get(enemyId)?.behavior === "boss",
+      }));
+      minimap.update({ x: localPredicted.x, z: localPredicted.z, rotationY: localRotationY }, others, enemyDots, !isDungeon);
+    }
 
     if (localCastActive && localCastSpellId !== "") {
       const durationMs = SPELLS[localCastSpellId].castTimeMs;

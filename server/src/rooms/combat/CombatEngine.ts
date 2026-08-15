@@ -22,9 +22,11 @@ import {
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
   PlayerStats,
+  resolveStructureCollisions,
   SPELLS,
   SpellDef,
   SpellId,
+  STRUCTURES,
   TALENT_POINTS_PER_LEVEL,
   TalentBonus,
   VITALITY_PER_LEVEL,
@@ -82,6 +84,10 @@ export interface CombatEngineConfig {
   // Called after a dead player's hp/ailments/cast have already been reset - the room decides
   // where they land (the overworld's fixed (0,0,0), or a dungeon's own entry point).
   onPlayerRespawn: (sessionId: string, player: Player) => void;
+  // Only the overworld has STRUCTURES (dungeon coordinates are unrelated small numbers that
+  // could otherwise collide with unrelated overworld buildings) - WorldRoom passes true,
+  // DungeonRoom leaves this unset.
+  collidableStructures?: boolean;
 }
 
 // One generic radius-scan reused by every AoE spell (enemies-near-point for damage,
@@ -467,8 +473,17 @@ export class CombatEngine {
       const normalizedX = input.moveX / length;
       const normalizedZ = input.moveZ / length;
 
-      player.x = clamp(player.x + normalizedX * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
-      player.z = clamp(player.z + normalizedZ * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      let nextX = clamp(player.x + normalizedX * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      let nextZ = clamp(player.z + normalizedZ * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+
+      if (this.config.collidableStructures) {
+        const resolved = resolveStructureCollisions(nextX, nextZ, STRUCTURES);
+        nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      }
+
+      player.x = nextX;
+      player.z = nextZ;
       player.rotationY = Math.atan2(normalizedX, normalizedZ);
     }
   }

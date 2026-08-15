@@ -161,6 +161,30 @@
         border-radius: 6px;
         pointer-events: none;
       }
+      #minimap-panel {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        width: 240px;
+        height: 240px;
+        cursor: grab;
+        user-select: none;
+      }
+      #minimap-panel.locked {
+        cursor: default;
+      }
+      #minimap-panel.dragging {
+        cursor: grabbing;
+        opacity: 0.92;
+      }
+      #minimap {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        border: 2px solid #4a5578;
+        background: rgba(20, 22, 32, 0.85);
+        display: block;
+      }
       .unit-panel {
         position: fixed;
         left: 12px;
@@ -432,7 +456,7 @@
       #loot-window {
         left: auto;
         right: 12px;
-        top: 48px;
+        top: 270px;
         width: 240px;
       }
       #loot-window[hidden] {
@@ -852,6 +876,10 @@
     </div>
 
     <div id="hud">Connecting…</div>
+    <div id="minimap-panel">
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <canvas id="minimap" width="300" height="300"></canvas>
+    </div>
 
     <div id="player-panel" class="unit-panel">
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>

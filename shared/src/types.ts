@@ -471,9 +471,10 @@ export interface EnemySpawnDef {
 
 export let SPAWN_POINTS: EnemySpawnDef[] = [];
 
-// Purely decorative/non-collidable geometry - see Player/Npc/Enemy movement, none of which
-// checks structures. kind is a closed union selecting a hardcoded procedural shape builder
-// client-side (client/src/game/Structure.ts); everything else is open admin content.
+// kind is a closed union selecting a hardcoded procedural shape builder client-side
+// (client/src/game/Structure.ts); everything else is open admin content. Walls/pillars are
+// solid (see getStructureColliders below) - only players collide with them, blocking movement
+// server-side; doorway/gate gaps stay open on both the visual and the collision side.
 export type StructureKind = "house" | "shop" | "wall" | "tower" | "gate";
 
 export interface StructureDef {
@@ -491,6 +492,103 @@ export interface StructureDef {
 }
 
 export let STRUCTURES: StructureDef[] = [];
+
+// These shape a structure's solid geometry - shared between the client's wall/door/pillar
+// meshes (client/src/game/Structure.ts) and the server's collision resolution below, so what
+// you see solid and what actually blocks you can never drift apart.
+export const STRUCTURE_WALL_THICKNESS = 0.15;
+export const STRUCTURE_DOOR_WIDTH_FRACTION = 0.35;
+export const STRUCTURE_MAX_DOOR_WIDTH = 1.6; // wide enough for a player even on a tiny house
+export const STRUCTURE_GATE_PILLAR_FRACTION = 0.25;
+
+export const PLAYER_COLLISION_RADIUS = 0.4; // matches PlayerAvatar's capsule radius
+
+export interface StructureCollider {
+  // Local space (pre-rotation), relative to the structure's own x/z origin.
+  localX: number;
+  localZ: number;
+  halfWidth: number;
+  halfDepth: number;
+}
+
+// Solid rectangles for a structure, in local (unrotated) space - one entry per wall/pillar
+// segment, mirroring exactly what buildHouse/buildWall/buildTower/buildGate render as solid.
+export function getStructureColliders(def: StructureDef): StructureCollider[] {
+  switch (def.kind) {
+    case "house":
+    case "shop": {
+      const doorWidth = Math.min(def.width * STRUCTURE_DOOR_WIDTH_FRACTION, STRUCTURE_MAX_DOOR_WIDTH);
+      const frontSegmentWidth = (def.width - doorWidth) / 2;
+      const colliders: StructureCollider[] = [];
+      if (frontSegmentWidth > 0.05) {
+        for (const sign of [-1, 1]) {
+          colliders.push({
+            localX: sign * (doorWidth / 2 + frontSegmentWidth / 2),
+            localZ: -def.depth / 2,
+            halfWidth: frontSegmentWidth / 2,
+            halfDepth: STRUCTURE_WALL_THICKNESS / 2,
+          });
+        }
+      }
+      colliders.push({ localX: 0, localZ: def.depth / 2, halfWidth: def.width / 2, halfDepth: STRUCTURE_WALL_THICKNESS / 2 });
+      for (const sign of [-1, 1]) {
+        colliders.push({
+          localX: (sign * def.width) / 2,
+          localZ: 0,
+          halfWidth: STRUCTURE_WALL_THICKNESS / 2,
+          halfDepth: def.depth / 2,
+        });
+      }
+      return colliders;
+    }
+    case "wall":
+    case "tower":
+      return [{ localX: 0, localZ: 0, halfWidth: def.width / 2, halfDepth: def.depth / 2 }];
+    case "gate": {
+      const pillarWidth = def.width * STRUCTURE_GATE_PILLAR_FRACTION;
+      const pillarOffset = def.width / 2 - pillarWidth / 2;
+      return [-1, 1].map((sign) => ({
+        localX: sign * pillarOffset,
+        localZ: 0,
+        halfWidth: pillarWidth / 2,
+        halfDepth: def.depth / 2,
+      }));
+    }
+  }
+}
+
+// Pushes (x, z) out of any structure it currently overlaps, treating the mover as a circle of
+// PLAYER_COLLISION_RADIUS. Server-authoritative (see CombatEngine.tickPlayerMovement) - purely
+// decorative structure kinds never reach here since getStructureColliders always returns at
+// least one solid rectangle per kind.
+export function resolveStructureCollisions(x: number, z: number, structures: StructureDef[]): { x: number; z: number } {
+  for (const def of structures) {
+    const cosT = Math.cos(def.rotationY);
+    const sinT = Math.sin(def.rotationY);
+    const dx = x - def.x;
+    const dz = z - def.z;
+    let localX = dx * cosT - dz * sinT;
+    let localZ = dx * sinT + dz * cosT;
+
+    for (const collider of getStructureColliders(def)) {
+      const closestX = Math.max(collider.localX - collider.halfWidth, Math.min(localX, collider.localX + collider.halfWidth));
+      const closestZ = Math.max(collider.localZ - collider.halfDepth, Math.min(localZ, collider.localZ + collider.halfDepth));
+      const diffX = localX - closestX;
+      const diffZ = localZ - closestZ;
+      const distSq = diffX * diffX + diffZ * diffZ;
+      if (distSq === 0 || distSq >= PLAYER_COLLISION_RADIUS * PLAYER_COLLISION_RADIUS) continue;
+
+      const dist = Math.sqrt(distSq);
+      const push = PLAYER_COLLISION_RADIUS - dist;
+      localX += (diffX / dist) * push;
+      localZ += (diffZ / dist) * push;
+    }
+
+    x = def.x + localX * cosT + localZ * sinT;
+    z = def.z - localX * sinT + localZ * cosT;
+  }
+  return { x, z };
+}
 
 export type MapKind = "overworld" | "dungeon";
 
