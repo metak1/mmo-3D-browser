@@ -1,5 +1,7 @@
 import * as THREE from "three";
-import { BOSS_ARENA_CENTER, BOSS_ARENA_RADIUS, DUNGEON_HALF_EXTENT, MAP_HALF_EXTENT } from "@mmo/shared";
+import { BOSS_ARENA_CENTER, BOSS_ARENA_RADIUS, DUNGEON_HALF_EXTENT, getTerrainHeight, MAP_HALF_EXTENT } from "@mmo/shared";
+import { groundTexture, stoneTexture } from "./textures";
+import { softTint } from "./textureTint";
 
 const CAMERA_OFFSET = new THREE.Vector3(0, 21, 13.5);
 const CAMERA_LERP = 0.08;
@@ -71,16 +73,40 @@ export class GameScene {
     const gridColor = this.isDungeon ? 0x5a3a6e : 0x4a5578;
     const gridColorDark = this.isDungeon ? 0x432c52 : 0x3a4260;
 
-    const groundGeometry = new THREE.PlaneGeometry(size, size);
-    const groundMaterial = new THREE.MeshStandardMaterial({ color: groundColor });
+    // Dungeons stay a flat quad (small, enclosed instances - elevation adds nothing there).
+    // The overworld gets real segments so terrain height can displace it into rolling hills.
+    const segments = this.isDungeon ? 1 : Math.min(150, Math.round(size / 4));
+    const groundGeometry = new THREE.PlaneGeometry(size, size, segments, segments);
+    if (!this.isDungeon) {
+      const pos = groundGeometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        // Pre-rotation local space: local X maps straight to world X, local Y maps to -worldZ
+        // (rotation.x = -PI/2 below), so local Z (currently 0, "height" before rotation) is set
+        // from world coordinates derived the same way.
+        const localX = pos.getX(i);
+        const localY = pos.getY(i);
+        pos.setZ(i, getTerrainHeight(localX, -localY));
+      }
+      pos.needsUpdate = true;
+      groundGeometry.computeVertexNormals();
+    }
+    // Dungeon floors read better as stone than grass - the same real-texture set from
+    // textures.ts, no separate asset needed.
+    const groundMaterial = new THREE.MeshStandardMaterial({
+      color: softTint(groundColor),
+      map: this.isDungeon ? stoneTexture(size, size) : groundTexture(size),
+    });
     const ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
     this.scene.add(ground);
 
-    const grid = new THREE.GridHelper(size, size / 2, gridColor, gridColorDark);
-    this.scene.add(grid);
-
-    if (this.isDungeon) return; // no boss arena patch inside the instance - that's overworld-only
+    if (this.isDungeon) {
+      // A flat reference grid only makes sense over flat ground - the overworld's undulating
+      // terrain drops it entirely rather than draping a grid that would read as a bug.
+      const grid = new THREE.GridHelper(size, size / 2, gridColor, gridColorDark);
+      this.scene.add(grid);
+      return; // no boss arena patch inside the instance - that's overworld-only
+    }
 
     // Purely decorative marker for the boss arena - no collision, just tells the player
     // "you've entered a different area" before the boss itself comes into view.
@@ -88,7 +114,7 @@ export class GameScene {
     const arenaMaterial = new THREE.MeshStandardMaterial({ color: 0x3a1f24 });
     const arena = new THREE.Mesh(arenaGeometry, arenaMaterial);
     arena.rotation.x = -Math.PI / 2;
-    arena.position.set(BOSS_ARENA_CENTER.x, 0.01, BOSS_ARENA_CENTER.z);
+    arena.position.set(BOSS_ARENA_CENTER.x, getTerrainHeight(BOSS_ARENA_CENTER.x, BOSS_ARENA_CENTER.z) + 0.01, BOSS_ARENA_CENTER.z);
     this.scene.add(arena);
   }
 

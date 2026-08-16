@@ -73,13 +73,7 @@ export const ENTITIES: EntitySchema[] = [
       { key: "name", label: "Name", type: "text" },
       { key: "description", label: "Description", type: "textarea" },
       { key: "max_rank", label: "Max Rank", type: "number" },
-      {
-        key: "effect_key",
-        label: "Effect",
-        type: "select",
-        options: ["damagePercent", "critChanceBonus", "cooldownPercent", "armorBonus", "maxHpPercent"],
-      },
-      { key: "per_rank", label: "Per Rank", type: "number" },
+      { key: "effect", label: "Effect", type: "json" },
     ],
   },
   {
@@ -117,6 +111,7 @@ export const ENTITIES: EntitySchema[] = [
       { key: "name", label: "Name", type: "text" },
       { key: "x", label: "X", type: "number" },
       { key: "z", label: "Z", type: "number" },
+      { key: "y_offset", label: "Y Offset", type: "number", optional: true },
       { key: "map_id", label: "Map", type: "reference", referenceEntity: "maps" },
       {
         key: "vendor_item_ids",
@@ -175,6 +170,7 @@ export const ENTITIES: EntitySchema[] = [
       { key: "depth", label: "Depth", type: "number" },
       { key: "height", label: "Height", type: "number" },
       { key: "color", label: "Color (hex)", type: "text" },
+      { key: "y_offset", label: "Y Offset", type: "number", optional: true },
     ],
   },
   {

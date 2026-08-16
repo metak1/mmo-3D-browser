@@ -14,6 +14,7 @@ const structureSchema = z.object({
   depth: z.number().positive(),
   height: z.number().positive(),
   color: z.string().min(1).max(16),
+  y_offset: z.number().default(0),
 });
 const updateSchema = structureSchema.omit({ id: true }).partial();
 

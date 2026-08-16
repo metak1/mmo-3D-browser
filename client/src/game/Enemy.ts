@@ -1,13 +1,37 @@
 import * as THREE from "three";
-import { EnemyBehavior } from "@mmo/shared";
+import { EnemyBehavior, getTerrainHeight } from "@mmo/shared";
 import { HealthBar } from "./HealthBar";
+import { fitHeight, ModelAnimator, spawnModel, tintModel } from "./models";
+import { identityTint } from "./textureTint";
 
 const INTERPOLATION_LERP = 0.25;
+const MOVING_THRESHOLD = 0.02;
 
 const KIND_COLOR: Record<EnemyBehavior, number> = {
   melee: 0xb3423a,
   caster: 0x8a4fd1,
   boss: 0x6b1a1a,
+};
+
+// A single CC0 Quaternius "Goblin" model (goblin.glb) shared across all three enemy kinds,
+// distinguished by tint/scale instead of separate meshes - mirrors how man.glb is already
+// shared between Player and Npc. The original per-kind monster pack (orc/wizard/yeti.glb) turned
+// out to be a broken export: even rendered raw with zero processing, those files collapse into a
+// blob instead of a standing creature, confirmed via isolated testing outside this game entirely
+// (man.glb, from a different pack, renders perfectly through the identical code path). goblin.glb
+// was sourced and verified separately as a working replacement.
+const MODEL_PATH = "/models/goblin.glb";
+const MODEL_CLIPS = {
+  idle: "EnemyArmature|EnemyArmature|EnemyArmature|Idle",
+  walk: "EnemyArmature|EnemyArmature|EnemyArmature|Walk",
+};
+
+// Target world-space heights (roughly matching the old box/octahedron/icosahedron primitives'
+// footprint) that fitHeight scales each model to, regardless of its native export scale.
+const KIND_HEIGHT: Record<EnemyBehavior, number> = {
+  melee: 1.8,
+  caster: 1.6,
+  boss: 3,
 };
 
 const BOSS_PHASE_2_COLOR = 0xe0503c;
@@ -19,31 +43,24 @@ export class EnemyAvatar {
   readonly group = new THREE.Group();
   readonly healthBar: HealthBar;
   private readonly selectionRing: THREE.Mesh;
-  private readonly bodyMaterial: THREE.MeshStandardMaterial;
   private readonly isBoss: boolean;
+  private readonly kind: EnemyBehavior;
+  private modelObject?: THREE.Object3D;
+  private animator?: ModelAnimator;
   private targetPosition = new THREE.Vector3();
 
   constructor(kind: EnemyBehavior) {
+    this.kind = kind;
     this.isBoss = kind === "boss";
     this.healthBar = new HealthBar(this.isBoss ? BOSS_HEALTH_BAR_Y_OFFSET : undefined);
 
-    const color = KIND_COLOR[kind];
-    let bodyGeometry: THREE.BufferGeometry;
-    let bodyY: number;
-    if (kind === "melee") {
-      bodyGeometry = new THREE.BoxGeometry(0.8, 1.1, 0.8);
-      bodyY = 0.55;
-    } else if (kind === "caster") {
-      bodyGeometry = new THREE.OctahedronGeometry(0.6, 0);
-      bodyY = 0.7;
-    } else {
-      bodyGeometry = new THREE.IcosahedronGeometry(1.1, 0);
-      bodyY = 1.1;
-    }
-    this.bodyMaterial = new THREE.MeshStandardMaterial({ color });
-    const body = new THREE.Mesh(bodyGeometry, this.bodyMaterial);
-    body.position.y = bodyY;
-    this.group.add(body);
+    spawnModel(MODEL_PATH, MODEL_CLIPS).then(({ object, animator }) => {
+      fitHeight(object, KIND_HEIGHT[kind]);
+      tintModel(object, identityTint(KIND_COLOR[kind]));
+      this.group.add(object);
+      this.modelObject = object;
+      this.animator = animator;
+    });
 
     this.selectionRing = new THREE.Mesh(
       new THREE.RingGeometry(this.isBoss ? 1.3 : 0.7, this.isBoss ? 1.5 : 0.85, 24),
@@ -62,12 +79,12 @@ export class EnemyAvatar {
   // No-op for non-boss kinds - safe to call unconditionally from the generic per-enemy
   // onChange handler. Phase is derived client-side from hp/maxHp, not a synced flag.
   setBossPhase(isPhase2: boolean) {
-    if (!this.isBoss) return;
-    this.bodyMaterial.color.setHex(isPhase2 ? BOSS_PHASE_2_COLOR : KIND_COLOR.boss);
+    if (!this.isBoss || !this.modelObject) return;
+    tintModel(this.modelObject, identityTint(isPhase2 ? BOSS_PHASE_2_COLOR : KIND_COLOR.boss));
   }
 
   setTarget(x: number, z: number) {
-    this.targetPosition.set(x, 0, z);
+    this.targetPosition.set(x, getTerrainHeight(x, z), z);
   }
 
   setHp(hp: number, maxHp: number) {
@@ -90,9 +107,12 @@ export class EnemyAvatar {
     this.syncHealthBarPosition();
   }
 
-  update() {
+  update(dt: number) {
+    const distance = this.group.position.distanceTo(this.targetPosition);
     this.group.position.lerp(this.targetPosition, INTERPOLATION_LERP);
     this.syncHealthBarPosition();
+    this.animator?.setMoving(distance > MOVING_THRESHOLD);
+    this.animator?.update(dt);
   }
 
   private syncHealthBarPosition() {

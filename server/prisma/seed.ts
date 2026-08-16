@@ -313,101 +313,209 @@ async function main() {
     await prisma.item.upsert({ where: { id: i.id }, create: i, update: i });
   }
 
-  // --- Talents (5 per class, all maxRank 12) ---
+  // --- Talents (5 per class: 3 flat statBonus at maxRank 12, plus one extraCharges and one
+  // onCastBuff talent at maxRank 1 - those two kinds are on/off, not stackable like the flat
+  // bonuses, so a lower max makes more sense than uniformly applying TALENT_MAX_RANK everywhere
+  // like the old flat-only model did). See shared/src/types.ts's TalentEffect for the shape.
   const TALENT_MAX_RANK = 12;
-  const talentDefs: Array<[string, string, string, string, string, number]> = [
-    ["warrior", "iron_skin", "Iron Skin", "Years of taking hits taught your body to shrug them off.", "armorBonus", 1],
-    ["warrior", "crushing_blows", "Crushing Blows", "Every swing carries a little more weight.", "damagePercent", 1.5],
+  type TalentEffectSeed =
+    | { kind: "statBonus"; stat: string; perRank: number }
+    | { kind: "extraCharges"; spellId: string; perRank: number }
+    | { kind: "onCastBuff"; spellId: string; buffId: string };
+  const statBonus = (stat: string, perRank: number): TalentEffectSeed => ({ kind: "statBonus", stat, perRank });
+  const extraCharges = (spellId: string, perRank = 1): TalentEffectSeed => ({ kind: "extraCharges", spellId, perRank });
+  const onCastBuff = (spellId: string, buffId: string): TalentEffectSeed => ({ kind: "onCastBuff", spellId, buffId });
+
+  const talentDefs: Array<[string, string, string, string, number, TalentEffectSeed]> = [
+    [
+      "warrior",
+      "iron_skin",
+      "Iron Skin",
+      "Years of taking hits taught your body to shrug them off.",
+      TALENT_MAX_RANK,
+      statBonus("armorBonus", 1),
+    ],
+    [
+      "warrior",
+      "crushing_blows",
+      "Crushing Blows",
+      "Every swing carries a little more weight.",
+      TALENT_MAX_RANK,
+      statBonus("damagePercent", 1.5),
+    ],
     [
       "warrior",
       "stalwart_heart",
       "Stalwart Heart",
       "Your resolve keeps you standing after lesser warriors would fall.",
-      "maxHpPercent",
-      1.25,
+      TALENT_MAX_RANK,
+      statBonus("maxHpPercent", 1.25),
     ],
-    ["warrior", "battle_fury", "Battle Fury", "Momentum builds with every clash.", "cooldownPercent", 0.8],
     [
       "warrior",
-      "killer_instinct",
-      "Killer Instinct",
-      "You've learned exactly where the armor gives.",
-      "critChanceBonus",
-      0.6,
+      "battle_fury",
+      "Battle Fury",
+      "A well-placed Shield Bash leaves you charged with momentum.",
+      1,
+      onCastBuff("warrior_shield_bash", "battleFury"),
     ],
-    ["rogue", "cutthroat", "Cutthroat", "You don't need much of an opening.", "critChanceBonus", 0.6],
+    [
+      "warrior",
+      "momentum",
+      "Momentum",
+      "The first swing of Whirlwind is never the last you have in you.",
+      1,
+      extraCharges("warrior_whirlwind"),
+    ],
+    ["rogue", "cutthroat", "Cutthroat", "You don't need much of an opening.", TALENT_MAX_RANK, statBonus("critChanceBonus", 0.6)],
+    [
+      "rogue",
+      "vicious_strikes",
+      "Vicious Strikes",
+      "Precision over brute force.",
+      TALENT_MAX_RANK,
+      statBonus("damagePercent", 1.5),
+    ],
+    [
+      "rogue",
+      "grim_endurance",
+      "Grim Endurance",
+      "A life of close calls builds a thick skin.",
+      TALENT_MAX_RANK,
+      statBonus("maxHpPercent", 1.25),
+    ],
     [
       "rogue",
       "fleet_footed",
       "Fleet Footed",
-      "Never in one place long enough to be predictable.",
-      "cooldownPercent",
-      0.8,
+      "Garrote a target and you're already three steps from where they think you are.",
+      1,
+      onCastBuff("rogue_garrote", "shadowStep"),
     ],
-    ["rogue", "vicious_strikes", "Vicious Strikes", "Precision over brute force.", "damagePercent", 1.5],
     [
       "rogue",
-      "hardened_reflexes",
-      "Hardened Reflexes",
-      "If you can't dodge it, you'd better be able to take it.",
-      "armorBonus",
+      "opportunist",
+      "Opportunist",
+      "One blade finds the opening; the second is already moving.",
       1,
+      extraCharges("rogue_backstab"),
     ],
-    ["rogue", "grim_endurance", "Grim Endurance", "A life of close calls builds a thick skin.", "maxHpPercent", 1.25],
     [
       "ranger",
       "marksmans_eye",
       "Marksman's Eye",
       "You aim for the gaps others don't even see.",
-      "critChanceBonus",
-      0.6,
+      TALENT_MAX_RANK,
+      statBonus("critChanceBonus", 0.6),
     ],
-    [
-      "ranger",
-      "quickdraw",
-      "Quickdraw",
-      "Nocked, drawn, loosed — before they've registered the threat.",
-      "cooldownPercent",
-      0.8,
-    ],
-    ["ranger", "hunters_focus", "Hunter's Focus", "Every shot is a lesson from the last.", "damagePercent", 1.5],
-    ["ranger", "camouflage", "Camouflage", "Half-seen is half-hit.", "armorBonus", 1],
+    ["ranger", "camouflage", "Camouflage", "Half-seen is half-hit.", TALENT_MAX_RANK, statBonus("armorBonus", 1)],
     [
       "ranger",
       "wilderness_vigor",
       "Wilderness Vigor",
       "Years in the field harden more than just your aim.",
-      "maxHpPercent",
-      1.25,
+      TALENT_MAX_RANK,
+      statBonus("maxHpPercent", 1.25),
     ],
-    ["oracle", "focused_mind", "Focused Mind", "Clarity finds the weak point in anything.", "critChanceBonus", 0.6],
-    ["oracle", "swift_rites", "Swift Rites", "The words come easier with practice.", "cooldownPercent", 0.8],
-    ["oracle", "arcane_insight", "Arcane Insight", "Understanding is its own weapon.", "damagePercent", 1.5],
-    ["oracle", "warding_sigil", "Warding Sigil", "A shimmer of protection, always half-drawn.", "armorBonus", 1],
+    [
+      "ranger",
+      "quickdraw",
+      "Quickdraw",
+      "Nocked, drawn, loosed — before they've registered the threat. An Aimed Shot always has one more arrow behind it.",
+      1,
+      extraCharges("ranger_aimed_shot"),
+    ],
+    [
+      "ranger",
+      "hunters_focus",
+      "Hunter's Focus",
+      "The trap springs, and everything after it feels slower.",
+      1,
+      onCastBuff("ranger_explosive_trap", "huntersFocus"),
+    ],
+    [
+      "oracle",
+      "focused_mind",
+      "Focused Mind",
+      "Clarity finds the weak point in anything.",
+      TALENT_MAX_RANK,
+      statBonus("critChanceBonus", 0.6),
+    ],
+    [
+      "oracle",
+      "arcane_insight",
+      "Arcane Insight",
+      "Understanding is its own weapon.",
+      TALENT_MAX_RANK,
+      statBonus("damagePercent", 1.5),
+    ],
     [
       "oracle",
       "vital_current",
       "Vital Current",
       "Life force ebbs and flows — you've learned to hold onto more of it.",
-      "maxHpPercent",
-      1.25,
+      TALENT_MAX_RANK,
+      statBonus("maxHpPercent", 1.25),
     ],
-    ["mage", "piercing_cold", "Piercing Cold", "Ice finds every crack.", "critChanceBonus", 0.6],
-    ["mage", "overchannel", "Overchannel", "You've stopped waiting for the mana to settle.", "cooldownPercent", 0.8],
-    ["mage", "arcane_power", "Arcane Power", "Raw force, barely contained.", "damagePercent", 1.5],
-    ["mage", "mana_shield", "Mana Shield", "A thin barrier is still a barrier.", "armorBonus", 1],
-    ["mage", "deep_reserves", "Deep Reserves", "More to draw on means more to survive.", "maxHpPercent", 1.25],
+    [
+      "oracle",
+      "swift_rites",
+      "Swift Rites",
+      "The words come easier with practice — Renew is never fully spent.",
+      1,
+      extraCharges("oracle_renew"),
+    ],
+    [
+      "oracle",
+      "warding_sigil",
+      "Warding Sigil",
+      "Smite carves an opening, and a shimmer of protection follows you through it.",
+      1,
+      onCastBuff("oracle_smite", "divineFavor"),
+    ],
+    [
+      "mage",
+      "piercing_cold",
+      "Piercing Cold",
+      "Ice finds every crack.",
+      TALENT_MAX_RANK,
+      statBonus("critChanceBonus", 0.6),
+    ],
+    [
+      "mage",
+      "arcane_power",
+      "Arcane Power",
+      "Raw force, barely contained.",
+      TALENT_MAX_RANK,
+      statBonus("damagePercent", 1.5),
+    ],
+    ["mage", "mana_shield", "Mana Shield", "A thin barrier is still a barrier.", TALENT_MAX_RANK, statBonus("armorBonus", 1)],
+    [
+      "mage",
+      "overchannel",
+      "Overchannel",
+      "You've stopped waiting for the mana to settle — Frostbolt can be loosed twice before it does.",
+      1,
+      extraCharges("mage_frostbolt"),
+    ],
+    [
+      "mage",
+      "deep_reserves",
+      "Deep Reserves",
+      "Blizzard draws from a well deeper than you let on.",
+      1,
+      onCastBuff("mage_blizzard", "arcaneSurge"),
+    ],
   ];
-  for (const [classId, slug, name, description, effectKey, perRank] of talentDefs) {
+  for (const [classId, slug, name, description, maxRank, effect] of talentDefs) {
     const id = `${classId}_${slug}`;
     const row = {
       id,
       class_id: classId,
       name,
       description,
-      max_rank: TALENT_MAX_RANK,
-      effect_key: effectKey,
-      per_rank: perRank,
+      max_rank: maxRank,
+      effect,
     };
     await prisma.talent.upsert({ where: { id }, create: row, update: row });
   }
@@ -559,14 +667,16 @@ async function main() {
   }
 
   // --- Structures (a small starter town near the quest_giver/merchant cluster - one of each
-  // kind, meant as a copyable example for building out bigger cities via the admin panel) ---
+  // kind, meant as a copyable example for building out bigger cities via the admin panel).
+  // Sized/spaced to clear the fixed enemy spawns at (+-8, +-8) with margin to spare - nothing
+  // about structure size is capped anywhere in the code, these are just bigger example values. ---
   const structures = [
-    { id: "house_1", name: "Quartermaster's House", map_id: "overworld", kind: "house", x: 4, z: -8, rotation_y: 0, width: 4, depth: 4, height: 3, color: "#8a6d4b" },
-    { id: "house_2", name: "Traveler's Cottage", map_id: "overworld", kind: "house", x: -10, z: -8, rotation_y: 0.3, width: 4, depth: 4, height: 3, color: "#9c7a52" },
-    { id: "merchant_shop", name: "Traveling Merchant's Shop", map_id: "overworld", kind: "shop", x: -9, z: -2, rotation_y: -0.4, width: 5, depth: 4, height: 3.5, color: "#5c7a99" },
-    { id: "town_wall", name: "Town Wall", map_id: "overworld", kind: "wall", x: -3, z: -12, rotation_y: 0, width: 12, depth: 1, height: 2.5, color: "#7d7d7d" },
-    { id: "town_gate", name: "Town Gate", map_id: "overworld", kind: "gate", x: -3, z: -6, rotation_y: 0, width: 4, depth: 1, height: 3.5, color: "#6b6b6b" },
-    { id: "watch_tower", name: "Sentinel's Watchtower", map_id: "overworld", kind: "tower", x: 3, z: 18, rotation_y: 0, width: 2.5, depth: 2.5, height: 7, color: "#6e6a63" },
+    { id: "house_1", name: "Quartermaster's House", map_id: "overworld", kind: "house", x: 3, z: -13, rotation_y: 0, width: 6, depth: 6, height: 4.5, color: "#8a6d4b" },
+    { id: "house_2", name: "Traveler's Cottage", map_id: "overworld", kind: "house", x: -15, z: -13, rotation_y: 0.3, width: 6, depth: 6, height: 4.5, color: "#9c7a52" },
+    { id: "merchant_shop", name: "Traveling Merchant's Shop", map_id: "overworld", kind: "shop", x: -14, z: 1, rotation_y: -0.4, width: 8, depth: 6, height: 5, color: "#5c7a99" },
+    { id: "town_wall", name: "Town Wall", map_id: "overworld", kind: "wall", x: -3, z: -19, rotation_y: 0, width: 22, depth: 1.2, height: 4, color: "#7d7d7d" },
+    { id: "town_gate", name: "Town Gate", map_id: "overworld", kind: "gate", x: -3, z: -9, rotation_y: 0, width: 6, depth: 1.2, height: 5.5, color: "#6b6b6b" },
+    { id: "watch_tower", name: "Sentinel's Watchtower", map_id: "overworld", kind: "tower", x: 6, z: 22, rotation_y: 0, width: 4, depth: 4, height: 12, color: "#6e6a63" },
   ];
   for (const s of structures) {
     await prisma.structure.upsert({ where: { id: s.id }, create: s, update: s });

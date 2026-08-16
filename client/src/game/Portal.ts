@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { getTerrainHeight } from "@mmo/shared";
 
 const PORTAL_COLOR = 0x4ac0e8;
 const PORTAL_EMISSIVE = 0x1a6a8a;
@@ -28,7 +29,7 @@ export class PortalAvatar {
   }
 
   setPosition(x: number, z: number) {
-    this.group.position.set(x, 0, z);
+    this.group.position.set(x, getTerrainHeight(x, z), z);
   }
 
   update(dt: number) {

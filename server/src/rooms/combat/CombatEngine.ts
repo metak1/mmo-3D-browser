@@ -21,6 +21,7 @@ import {
   PLAYER_SPEED,
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
+  hasLineOfSight,
   PlayerStats,
   resolveStructureCollisions,
   SPELLS,
@@ -31,8 +32,13 @@ import {
   TalentBonus,
   VITALITY_PER_LEVEL,
   VITALITY_TO_HP,
+  BUFFS,
+  BuffKind,
   critChanceFromLuck,
+  getActiveBuffBonus,
   getEffectiveStats,
+  getOnCastBuffs,
+  getSpellCharges,
   getTalentBonus,
   resolveClassId,
   xpForNextLevel,
@@ -84,9 +90,10 @@ export interface CombatEngineConfig {
   // Called after a dead player's hp/ailments/cast have already been reset - the room decides
   // where they land (the overworld's fixed (0,0,0), or a dungeon's own entry point).
   onPlayerRespawn: (sessionId: string, player: Player) => void;
-  // Only the overworld has STRUCTURES (dungeon coordinates are unrelated small numbers that
-  // could otherwise collide with unrelated overworld buildings) - WorldRoom passes true,
-  // DungeonRoom leaves this unset.
+  // Gates both movement collision and line-of-sight checks (player casts and enemy casts) against
+  // STRUCTURES. Only the overworld has any (dungeon coordinates are unrelated small numbers that
+  // could otherwise collide with/be blocked by unrelated overworld buildings) - WorldRoom passes
+  // true, DungeonRoom leaves this unset.
   collidableStructures?: boolean;
 }
 
@@ -117,7 +124,11 @@ function clamp(value: number, min: number, max: number) {
 // plug in onEnemyKilled/onPlayerRespawn for the parts that actually differ between them.
 export class CombatEngine {
   private lastInput = new Map<string, PlayerInput>();
-  private lastCastAt = new Map<string, number>(); // key: `${sessionId}:${spellId}`
+  // key: `${sessionId}:${spellId}`, value: cast timestamps still within their cooldown window,
+  // oldest-first, capped at the spell's current max charge count (1 + any extraCharges talents).
+  // A spell with no extraCharges talent behaves exactly like the old single-timestamp gate: the
+  // array never holds more than one entry.
+  private lastCastAt = new Map<string, number[]>();
   private lastMeleeAttackAt = new Map<string, number>(); // key: enemyId
   private lastCasterAttackAt = new Map<string, number>(); // key: enemyId
   private pendingPlayerCast = new Map<string, PendingPlayerCast>(); // key: sessionId
@@ -156,10 +167,11 @@ export class CombatEngine {
 
     const cooldownKey = `${client.sessionId}:${message.spellId}`;
     const now = Date.now();
-    const lastCast = this.lastCastAt.get(cooldownKey) ?? 0;
-    const cooldownPercent = this.getTalentBonusFor(player).cooldownPercent;
+    const cooldownPercent = this.getCombinedBonusFor(player, message.spellId).cooldownPercent;
     const effectiveCooldownMs = Math.max(100, spell.cooldownMs * (1 - cooldownPercent / 100));
-    if (now - lastCast < effectiveCooldownMs) return;
+    const maxCharges = 1 + getSpellCharges(resolveClassId(player.classId), message.spellId, player.talentRanks);
+    const activeCasts = (this.lastCastAt.get(cooldownKey) ?? []).filter((t) => now - t < effectiveCooldownMs);
+    if (activeCasts.length >= maxCharges) return;
 
     const target = this.resolveCastTarget(player, client.sessionId, spell, message);
     if (!target) return;
@@ -170,7 +182,10 @@ export class CombatEngine {
     const dist = Math.hypot(player.x - impact.x, player.z - impact.z);
     if (dist > spell.range + RANGE_BUFFER) return;
 
-    this.lastCastAt.set(cooldownKey, now);
+    if (this.config.collidableStructures && !hasLineOfSight(player.x, player.z, impact.x, impact.z, STRUCTURES)) return;
+
+    activeCasts.push(now);
+    this.lastCastAt.set(cooldownKey, activeCasts);
 
     if (spell.castTimeMs > 0) {
       player.castSpellId = message.spellId;
@@ -208,8 +223,26 @@ export class CombatEngine {
     );
   }
 
-  getTalentBonusFor(player: Player): TalentBonus {
-    return getTalentBonus(resolveClassId(player.classId), player.talentRanks);
+  // `spellId` scopes in spellStatBonus talents matching that spell, on top of the always-on
+  // statBonus ones - see shared/src/types.ts's getTalentBonus.
+  getTalentBonusFor(player: Player, spellId?: SpellId): TalentBonus {
+    return getTalentBonus(resolveClassId(player.classId), player.talentRanks, spellId);
+  }
+
+  // Talent bonus plus whatever the player's currently active buffs (see BuffKind/BUFFS) add on
+  // top - the two are separate sources (spent talent points vs. a timed proc) but combine additively
+  // into the same five-key shape, so every caller that used to just read getTalentBonusFor can
+  // switch to this without otherwise changing how it uses the result.
+  getCombinedBonusFor(player: Player, spellId?: SpellId): TalentBonus {
+    const talentBonus = this.getTalentBonusFor(player, spellId);
+    const buffBonus = getActiveBuffBonus(player.buffs, Date.now());
+    return {
+      damagePercent: talentBonus.damagePercent + (buffBonus.damagePercent ?? 0),
+      critChanceBonus: talentBonus.critChanceBonus + (buffBonus.critChanceBonus ?? 0),
+      cooldownPercent: talentBonus.cooldownPercent + (buffBonus.cooldownPercent ?? 0),
+      armorBonus: talentBonus.armorBonus + (buffBonus.armorBonus ?? 0),
+      maxHpPercent: talentBonus.maxHpPercent,
+    };
   }
 
   recomputeMaxHp(player: Player) {
@@ -233,13 +266,13 @@ export class CombatEngine {
     }
   }
 
-  computePlayerDamage(player: Player, baseDamage: number): number {
+  computePlayerDamage(player: Player, baseDamage: number, spellId?: SpellId): number {
     const effective = this.getEffectiveStatsFor(player);
-    const talentBonus = this.getTalentBonusFor(player);
+    const bonus = this.getCombinedBonusFor(player, spellId);
     const ailmentMultiplier = this.getAilmentDamageMultiplier(player);
     const statBonus = Math.floor(effective.mainStat * DAMAGE_STAT_FACTOR);
-    let damage = (baseDamage + statBonus) * (1 + talentBonus.damagePercent / 100) * ailmentMultiplier;
-    const critChance = Math.min(1, critChanceFromLuck(effective.luck) + talentBonus.critChanceBonus / 100);
+    let damage = (baseDamage + statBonus) * (1 + bonus.damagePercent / 100) * ailmentMultiplier;
+    const critChance = Math.min(1, critChanceFromLuck(effective.luck) + bonus.critChanceBonus / 100);
     if (Math.random() < critChance) {
       damage = damage * CRIT_MULTIPLIER;
     }
@@ -249,21 +282,25 @@ export class CombatEngine {
   // Healing reuses the talent system's damagePercent bucket as a general "spell power"
   // multiplier rather than introducing a separate heal-only talent effect, since no talent
   // in the current roster distinguishes the two - simplest thing that could work.
-  computePlayerHeal(player: Player, baseAmount: number): number {
+  computePlayerHeal(player: Player, baseAmount: number, spellId?: SpellId): number {
     const effective = this.getEffectiveStatsFor(player);
-    const talentBonus = this.getTalentBonusFor(player);
+    const bonus = this.getCombinedBonusFor(player, spellId);
     const statBonus = Math.floor(effective.mainStat * DAMAGE_STAT_FACTOR);
-    const heal = (baseAmount + statBonus) * (1 + talentBonus.damagePercent / 100);
+    const heal = (baseAmount + statBonus) * (1 + bonus.damagePercent / 100);
     return Math.round(heal);
   }
 
-  healPlayer(caster: Player, target: Player, baseAmount: number) {
-    const heal = this.computePlayerHeal(caster, baseAmount);
+  healPlayer(caster: Player, target: Player, baseAmount: number, spellId?: SpellId) {
+    const heal = this.computePlayerHeal(caster, baseAmount, spellId);
     target.hp = Math.min(target.maxHp, target.hp + heal);
   }
 
   applyAilment(player: Player, kind: AilmentKind, durationMs: number) {
     player.ailments.set(kind, Date.now() + durationMs);
+  }
+
+  applyBuff(player: Player, kind: BuffKind) {
+    player.buffs.set(kind, Date.now() + BUFFS[kind].durationMs);
   }
 
   private getAilmentDamageMultiplier(player: Player): number {
@@ -279,13 +316,14 @@ export class CombatEngine {
 
   damagePlayer(sessionId: string, player: Player, amount: number) {
     const effective = this.getEffectiveStatsFor(player);
-    const armorBonus = this.getTalentBonusFor(player).armorBonus;
+    const armorBonus = this.getCombinedBonusFor(player).armorBonus;
     const mitigated = Math.max(1, amount - (effective.armor + armorBonus));
     player.hp = Math.max(0, player.hp - mitigated);
     if (player.hp === 0) {
       this.cancelPlayerCast(sessionId);
       player.hp = player.maxHp;
       player.ailments.clear();
+      player.buffs.clear();
       this.config.onPlayerRespawn(sessionId, player);
     }
   }
@@ -367,6 +405,10 @@ export class CombatEngine {
   }
 
   private resolveSpellEffect(caster: Player, casterSessionId: string, spell: SpellDef, target: ResolvedTarget) {
+    for (const buffId of getOnCastBuffs(resolveClassId(caster.classId), spell.id, caster.talentRanks)) {
+      this.applyBuff(caster, buffId);
+    }
+
     if (spell.interruptsCast || spell.effectType === "interrupt") {
       this.tryInterrupt(target);
     }
@@ -376,13 +418,13 @@ export class CombatEngine {
         const impact = this.resolveImpactPoint(caster, target);
         if (!impact) return;
         forEachAlive(this.state.enemies, impact.x, impact.z, spell.aoeRadius, (enemy, enemyId) => {
-          const damage = this.computePlayerDamage(caster, spell.amount ?? 0);
+          const damage = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
           this.applySpellDamage(enemy, damage, enemyId, casterSessionId);
         });
       } else if (target.kind === "enemy") {
         const enemy = this.state.enemies.get(target.id);
         if (enemy && enemy.hp > 0) {
-          const damage = this.computePlayerDamage(caster, spell.amount ?? 0);
+          const damage = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
           this.applySpellDamage(enemy, damage, target.id, casterSessionId);
         }
       }
@@ -391,11 +433,11 @@ export class CombatEngine {
         const impact = this.resolveImpactPoint(caster, target);
         if (!impact) return;
         forEachAlive(this.state.players, impact.x, impact.z, spell.aoeRadius, (ally) => {
-          this.healPlayer(caster, ally, spell.amount ?? 0);
+          this.healPlayer(caster, ally, spell.amount ?? 0, spell.id);
         });
       } else {
         const ally = this.resolveAllyUnit(caster, target);
-        if (ally) this.healPlayer(caster, ally, spell.amount ?? 0);
+        if (ally) this.healPlayer(caster, ally, spell.amount ?? 0, spell.id);
       }
     } else if (spell.effectType === "dispel") {
       const ally = this.resolveAllyUnit(caster, target);
@@ -507,6 +549,10 @@ export class CombatEngine {
       const impact = this.resolveImpactPoint(player, pending.target);
       if (!impact) continue; // target gone, cast fizzles
 
+      // Also re-check line of sight - the target (or the caster, via knockback/etc.) may have
+      // moved behind a wall during the windup, same as the immediate check in handleCast.
+      if (this.config.collidableStructures && !hasLineOfSight(player.x, player.z, impact.x, impact.z, STRUCTURES)) continue;
+
       if (spell.projectileSpeed && pending.target.kind === "enemy") {
         const damage = this.computePlayerDamage(player, spell.amount ?? 0);
         this.spawnProjectile(player.x, player.z, "player", pending.target.id, damage, spell.projectileSpeed, sessionId);
@@ -568,12 +614,13 @@ export class CombatEngine {
         for (const [sessionId, player] of this.state.players) {
           if (player.hp <= 0) continue;
           const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
-          if (dist <= range) {
-            enemy.isCasting = true;
-            this.pendingEnemyCast.set(enemyId, { targetSessionId: sessionId, fireAt: now + castTimeMs });
-            this.lastCasterAttackAt.set(enemyId, now);
-            break;
-          }
+          if (dist > range) continue;
+          if (this.config.collidableStructures && !hasLineOfSight(enemy.x, enemy.z, player.x, player.z, STRUCTURES)) continue;
+
+          enemy.isCasting = true;
+          this.pendingEnemyCast.set(enemyId, { targetSessionId: sessionId, fireAt: now + castTimeMs });
+          this.lastCasterAttackAt.set(enemyId, now);
+          break;
         }
       }
     }
@@ -595,6 +642,10 @@ export class CombatEngine {
 
       const enemyType = ENEMY_TYPES[enemy.enemyTypeId];
       if (!enemyType) continue; // content deleted mid-windup - cast fizzles
+
+      // Also re-check line of sight - the player may have broken it (or the enemy may have
+      // been knocked/moved) during the windup, same as the player-cast fire-time re-check.
+      if (this.config.collidableStructures && !hasLineOfSight(enemy.x, enemy.z, player.x, player.z, STRUCTURES)) continue;
 
       const isBoss = enemy.behavior === "boss";
       const enrageMultiplier = this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1;

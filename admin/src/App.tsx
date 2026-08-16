@@ -3,10 +3,13 @@ import { getToken, me, PublicUser, setToken } from "./api";
 import { Login } from "./Login";
 import { ENTITIES } from "./entities";
 import { EntityTable } from "./EntityTable";
+import { MapEditor } from "./mapEditor/MapEditor";
+
+const MAP_EDITOR_KEY = "__map_editor__";
 
 export function App() {
   const [user, setUser] = useState<PublicUser | null | undefined>(undefined); // undefined = still checking stored token
-  const [activeEntity, setActiveEntity] = useState(ENTITIES[0].key);
+  const [activeEntity, setActiveEntity] = useState<string>(MAP_EDITOR_KEY);
 
   useEffect(() => {
     if (!getToken()) {
@@ -37,12 +40,18 @@ export function App() {
     );
   }
 
-  const schema = ENTITIES.find((e) => e.key === activeEntity)!;
+  const schema = activeEntity === MAP_EDITOR_KEY ? undefined : ENTITIES.find((e) => e.key === activeEntity)!;
 
   return (
     <div className="admin-layout">
       <nav className="sidebar">
         <div className="sidebar-header">MMO Admin</div>
+        <button
+          className={activeEntity === MAP_EDITOR_KEY ? "nav-item active" : "nav-item"}
+          onClick={() => setActiveEntity(MAP_EDITOR_KEY)}
+        >
+          Map Editor
+        </button>
         {ENTITIES.map((e) => (
           <button
             key={e.key}
@@ -56,8 +65,8 @@ export function App() {
           Log out ({user.username})
         </button>
       </nav>
-      <main className="content">
-        <EntityTable key={schema.key} schema={schema} />
+      <main className={schema ? "content" : "content content-full"}>
+        {schema ? <EntityTable key={schema.key} schema={schema} /> : <MapEditor />}
       </main>
     </div>
   );

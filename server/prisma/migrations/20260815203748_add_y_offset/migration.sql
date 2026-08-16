@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "npcs" ADD COLUMN     "y_offset" DOUBLE PRECISION NOT NULL DEFAULT 0;
+
+-- AlterTable
+ALTER TABLE "structures" ADD COLUMN     "y_offset" DOUBLE PRECISION NOT NULL DEFAULT 0;

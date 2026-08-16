@@ -110,8 +110,7 @@ model Talent {
   name        String    @db.VarChar(64)
   description String    @db.VarChar(255)
   max_rank    Int
-  effect_key  String    @db.VarChar(32)
-  per_rank    Float
+  effect      Json // TalentEffect union - see shared/src/types.ts
   game_class  GameClass @relation(fields: [class_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@map("talents")
@@ -163,8 +162,11 @@ model EnemySpawn {
   @@map("enemy_spawns")
 }
 
-// Purely decorative geometry (no collision anywhere in this game) - kind selects which
-// procedural shape the client builds, see shared StructureKind/client/src/game/Structure.ts.
+// kind selects which procedural shape the client builds, see shared StructureKind/
+// client/src/game/Structure.ts. Walls/pillars are solid and block players server-side (see
+// shared's getStructureColliders/resolveStructureCollisions) even though nothing else in this
+// game has collision. y_offset is purely visual - added on top of the auto-computed terrain
+// height (see shared's getTerrainHeight), lets an admin raise/sink a structure off the ground.
 model Structure {
   id         String  @id @db.VarChar(32)
   name       String  @db.VarChar(64)
@@ -177,20 +179,22 @@ model Structure {
   depth      Float
   height     Float
   color      String  @db.VarChar(16) // hex, e.g. "#8a6d4b"
+  y_offset   Float   @default(0) // added on top of the auto-computed terrain height
   game_map   GameMap @relation(fields: [map_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@map("structures")
 }
 
 model Npc {
-  id      String          @id @db.VarChar(32)
-  name    String          @db.VarChar(64)
-  x       Float
-  z       Float
-  map_id  String          @db.VarChar(32)
-  game_map GameMap        @relation(fields: [map_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  quests  Quest[]
-  vendors NpcVendorItem[]
+  id       String          @id @db.VarChar(32)
+  name     String          @db.VarChar(64)
+  x        Float
+  z        Float
+  y_offset Float           @default(0) // added on top of the auto-computed terrain height
+  map_id   String          @db.VarChar(32)
+  game_map GameMap         @relation(fields: [map_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  quests   Quest[]
+  vendors  NpcVendorItem[]
 
   @@map("npcs")
 }

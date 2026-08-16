@@ -4,6 +4,8 @@ import {
   AcceptQuestMessage,
   BOSS_PHASE_2_HP_FRACTION,
   BossStats,
+  BUFFS,
+  BuffKind,
   BuyItemMessage,
   CastMessage,
   CasterStats,
@@ -59,6 +61,8 @@ import {
   decodeItemToken,
   encodeItemToken,
   getEffectiveStats,
+  getSpellCharges,
+  getTerrainHeight,
   xpForNextLevel,
 } from "@mmo/shared";
 import { GameScene } from "./game/Scene";
@@ -75,8 +79,6 @@ import { connectToWorld, consumeDungeonReservation } from "./network/connection"
 import * as api from "./network/api";
 import { makeDraggable } from "./ui/DraggablePanel";
 
-const REMOTE_COLOR = 0xe8734a;
-const LOCAL_COLOR = 0x4ac0e8;
 const PLAYER_PROJECTILE_COLOR = 0xff9a3c;
 const PLAYER_PROJECTILE_EMISSIVE = 0xb35a12;
 const ENEMY_PROJECTILE_COLOR = 0xd15fe0;
@@ -507,7 +509,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   for (const def of Object.values(NPCS)) {
     const avatar = new NpcAvatar();
     avatar.group.userData.npcId = def.id;
-    avatar.setPosition(def.x, def.z);
+    avatar.setPosition(def.x, def.z, def.yOffset);
     avatar.setVendorIndicator(!!def.vendorItemIds);
     avatar.addTo(gameScene.scene);
     npcs.set(def.id, avatar);
@@ -552,6 +554,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
   const localPredicted = new THREE.Vector3(0, 0, 0);
   const localServerPosition = new THREE.Vector3(0, 0, 0);
+  const followTargetScratch = new THREE.Vector3(0, 0, 0); // localPredicted.y stays gameplay-0 always; this carries terrain height for the camera only
   let localRotationY = 0;
   let seq = 0;
 
@@ -1461,10 +1464,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
 
     $(room.state).players.onAdd((player, sessionId) => {
-      const avatar = new PlayerAvatar(sessionId === localSessionId ? LOCAL_COLOR : REMOTE_COLOR);
+      const avatar = new PlayerAvatar(player.classId);
       avatar.group.userData.sessionId = sessionId;
-      avatar.setTarget(player.x, player.y, player.z, player.rotationY);
-      avatar.snapToTarget();
+      avatar.setTarget(player.x, getTerrainHeight(player.x, player.z), player.z, player.rotationY);
+      avatar.snapToTarget(0, false);
       avatar.setHp(player.hp, player.maxHp);
       avatar.addTo(gameScene.scene);
       avatars.set(sessionId, avatar);
@@ -1551,7 +1554,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
           }
           return;
         }
-        avatar.setTarget(player.x, player.y, player.z, player.rotationY);
+        avatar.setTarget(player.x, getTerrainHeight(player.x, player.z), player.z, player.rotationY);
       });
     });
 
@@ -1701,22 +1704,26 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         localPredicted.lerp(localServerPosition, SERVER_RECONCILE_LERP);
       }
 
+      const groundY = getTerrainHeight(localPredicted.x, localPredicted.z);
+
       const localAvatar = avatars.get(localSessionId);
       if (localAvatar) {
-        localAvatar.setTarget(localPredicted.x, localPredicted.y, localPredicted.z, localRotationY);
-        localAvatar.snapToTarget();
+        localAvatar.setTarget(localPredicted.x, groundY, localPredicted.z, localRotationY);
+        localAvatar.snapToTarget(dt, moveX !== 0 || moveZ !== 0);
       }
 
-      gameScene.followTarget(localPredicted);
+      followTargetScratch.set(localPredicted.x, groundY, localPredicted.z);
+      gameScene.followTarget(followTargetScratch);
       for (const avatar of structures) avatar.update(localPredicted.x, localPredicted.z);
     }
 
     for (const [sessionId, avatar] of avatars) {
       if (sessionId === localSessionId) continue;
-      avatar.update();
+      avatar.update(dt);
     }
 
-    for (const avatar of enemies.values()) avatar.update();
+    for (const avatar of enemies.values()) avatar.update(dt);
+    for (const avatar of npcs.values()) avatar.update(dt);
     for (const avatar of projectiles.values()) avatar.update();
     portal?.update(dt);
 

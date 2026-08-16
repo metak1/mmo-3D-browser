@@ -181,6 +181,45 @@ export const AILMENTS: Record<AilmentKind, { damagePercent: number; durationMs: 
   weaken: { damagePercent: 20, durationMs: 8000 },
 };
 
+// Player-beneficial timed effects - the mirror image of AilmentKind/AILMENTS above (which are
+// always enemy-inflicted debuffs). Granted by "onCastBuff" talents (see TalentEffect below), and
+// tracked the same way ailments are: Player.buffs is a MapSchema<number> of kind -> expiresAt.
+export type BuffKind = "battleFury" | "shadowStep" | "huntersFocus" | "divineFavor" | "arcaneSurge";
+
+export interface BuffDef {
+  name: string;
+  durationMs: number;
+  damagePercent?: number;
+  critChanceBonus?: number;
+  cooldownPercent?: number;
+  armorBonus?: number;
+}
+
+export const BUFFS: Record<BuffKind, BuffDef> = {
+  battleFury: { name: "Battle Fury", durationMs: 5000, damagePercent: 20 },
+  shadowStep: { name: "Shadow Step", durationMs: 4000, cooldownPercent: 25 },
+  huntersFocus: { name: "Hunter's Focus", durationMs: 5000, critChanceBonus: 15 },
+  divineFavor: { name: "Divine Favor", durationMs: 6000, armorBonus: 5 },
+  arcaneSurge: { name: "Arcane Surge", durationMs: 5000, damagePercent: 25 },
+};
+
+// Lazily evaluated the same way getAilmentDamageMultiplier is (expiresAt <= now skips it) -
+// nothing actively sweeps/removes expired buffs, the map entry just stops contributing until
+// something (a fresh applyBuff) overwrites it.
+export function getActiveBuffBonus(buffs: Iterable<[string, number]>, now: number): Partial<TalentBonus> {
+  const bonus: Partial<TalentBonus> = {};
+  for (const [kind, expiresAt] of buffs) {
+    if (expiresAt <= now) continue;
+    const def = BUFFS[kind as BuffKind];
+    if (!def) continue;
+    if (def.damagePercent) bonus.damagePercent = (bonus.damagePercent ?? 0) + def.damagePercent;
+    if (def.critChanceBonus) bonus.critChanceBonus = (bonus.critChanceBonus ?? 0) + def.critChanceBonus;
+    if (def.cooldownPercent) bonus.cooldownPercent = (bonus.cooldownPercent ?? 0) + def.cooldownPercent;
+    if (def.armorBonus) bonus.armorBonus = (bonus.armorBonus ?? 0) + def.armorBonus;
+  }
+  return bonus;
+}
+
 export const INTERRUPT_LOCKOUT_MS = 3000;
 
 export interface CastMessage {
@@ -276,7 +315,21 @@ export interface UnequipMessage {
   slot: EquipSlot;
 }
 
-export type TalentEffectKey = "damagePercent" | "critChanceBonus" | "cooldownPercent" | "armorBonus" | "maxHpPercent";
+export type TalentStatKey = "damagePercent" | "critChanceBonus" | "cooldownPercent" | "armorBonus" | "maxHpPercent";
+
+// A talent's effect is one of four kinds instead of always being a flat class-wide stat bonus:
+//  - statBonus: today's original behavior, applies regardless of which spell (if any) is in play.
+//  - spellStatBonus: same stat bonus shape, but only counts while resolving a cast of `spellId`.
+//  - extraCharges: `spellId` can be cast `perRank * rank` extra times before fully going on
+//    cooldown (see getSpellCharges/CombatEngine's charge-array cooldown gate).
+//  - onCastBuff: successfully casting `spellId` grants the caster the `buffId` buff (see
+//    BuffKind/BUFFS above) for that buff's own durationMs. Purely on/off (any rank > 0 triggers
+//    it) - the buff's own definition carries the magnitude, not the talent rank.
+export type TalentEffect =
+  | { kind: "statBonus"; stat: TalentStatKey; perRank: number }
+  | { kind: "spellStatBonus"; spellId: SpellId; stat: TalentStatKey; perRank: number }
+  | { kind: "extraCharges"; spellId: SpellId; perRank: number }
+  | { kind: "onCastBuff"; spellId: SpellId; buffId: BuffKind };
 
 export interface TalentDef {
   id: string;
@@ -284,8 +337,7 @@ export interface TalentDef {
   name: string;
   description: string;
   maxRank: number;
-  effectKey: TalentEffectKey;
-  perRank: number;
+  effect: TalentEffect;
 }
 
 export const TALENT_POINTS_PER_LEVEL = 1;
@@ -300,15 +352,54 @@ export interface TalentBonus {
   maxHpPercent: number;
 }
 
-export function getTalentBonus(classId: ClassId, talentRanks: Iterable<[string, number]>): TalentBonus {
+// `spellId` scopes in any spellStatBonus talents targeting that spell alongside the always-on
+// statBonus ones - omit it (e.g. recomputeMaxHp, armor mitigation) to get class-wide-only bonuses,
+// the same behavior this function had before spell-scoped talents existed.
+export function getTalentBonus(
+  classId: ClassId,
+  talentRanks: Iterable<[string, number]>,
+  spellId?: SpellId,
+): TalentBonus {
   const ranks = new Map(talentRanks);
   const bonus: TalentBonus = { damagePercent: 0, critChanceBonus: 0, cooldownPercent: 0, armorBonus: 0, maxHpPercent: 0 };
   for (const def of Object.values(TALENTS)) {
     if (def.classId !== classId) continue;
     const rank = ranks.get(def.id) ?? 0;
-    if (rank > 0) bonus[def.effectKey] += def.perRank * rank;
+    if (rank <= 0) continue;
+    const effect = def.effect;
+    if (effect.kind === "statBonus") {
+      bonus[effect.stat] += effect.perRank * rank;
+    } else if (effect.kind === "spellStatBonus" && effect.spellId === spellId) {
+      bonus[effect.stat] += effect.perRank * rank;
+    }
   }
   return bonus;
+}
+
+// Bonus stored-casts of `spellId` from any spent extraCharges talents - the spell's own base
+// charge count is always 1, callers add this on top (see CombatEngine's charge-array gate and
+// main.ts's identical client-side prediction of it).
+export function getSpellCharges(classId: ClassId, spellId: SpellId, talentRanks: Iterable<[string, number]>): number {
+  const ranks = new Map(talentRanks);
+  let bonus = 0;
+  for (const def of Object.values(TALENTS)) {
+    if (def.classId !== classId || def.effect.kind !== "extraCharges" || def.effect.spellId !== spellId) continue;
+    const rank = ranks.get(def.id) ?? 0;
+    if (rank > 0) bonus += def.effect.perRank * rank;
+  }
+  return bonus;
+}
+
+// Every buff a spent onCastBuff talent grants for casting `spellId` - almost always zero or one,
+// but a class could plausibly spend two different talents both keyed to the same spell.
+export function getOnCastBuffs(classId: ClassId, spellId: SpellId, talentRanks: Iterable<[string, number]>): BuffKind[] {
+  const ranks = new Map(talentRanks);
+  const buffs: BuffKind[] = [];
+  for (const def of Object.values(TALENTS)) {
+    if (def.classId !== classId || def.effect.kind !== "onCastBuff" || def.effect.spellId !== spellId) continue;
+    if ((ranks.get(def.id) ?? 0) > 0) buffs.push(def.effect.buffId);
+  }
+  return buffs;
 }
 
 export interface SpendTalentMessage {
@@ -322,6 +413,7 @@ export interface NpcDef {
   name: string;
   x: number;
   z: number;
+  yOffset: number; // added on top of the auto-computed terrain height - see getTerrainHeight
   mapId: MapId;
   vendorItemIds?: string[]; // presence marks this NPC as a vendor - see VENDOR_SELL_FRACTION
 }
@@ -489,6 +581,7 @@ export interface StructureDef {
   depth: number;
   height: number;
   color: string; // hex, e.g. "#8a6d4b"
+  yOffset: number; // added on top of the auto-computed terrain height - see getTerrainHeight
 }
 
 export let STRUCTURES: StructureDef[] = [];
@@ -588,6 +681,140 @@ export function resolveStructureCollisions(x: number, z: number, structures: Str
     z = def.z - localX * sinT + localZ * cosT;
   }
   return { x, z };
+}
+
+// Standard slab method: clips the segment's parametric range [0,1] against each axis of the
+// AABB, in the same local (pre-rotation) space getStructureColliders already works in.
+function segmentIntersectsAabb(
+  x1: number,
+  z1: number,
+  x2: number,
+  z2: number,
+  minX: number,
+  maxX: number,
+  minZ: number,
+  maxZ: number,
+): boolean {
+  let tMin = 0;
+  let tMax = 1;
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+
+  if (dx === 0) {
+    if (x1 < minX || x1 > maxX) return false;
+  } else {
+    let t1 = (minX - x1) / dx;
+    let t2 = (maxX - x1) / dx;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tMin = Math.max(tMin, t1);
+    tMax = Math.min(tMax, t2);
+    if (tMin > tMax) return false;
+  }
+
+  if (dz === 0) {
+    if (z1 < minZ || z1 > maxZ) return false;
+  } else {
+    let t1 = (minZ - z1) / dz;
+    let t2 = (maxZ - z1) / dz;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tMin = Math.max(tMin, t1);
+    tMax = Math.min(tMax, t2);
+    if (tMin > tMax) return false;
+  }
+
+  return true;
+}
+
+// Whether a spell can travel from (x1,z1) to (x2,z2) unobstructed by any structure's solid
+// geometry - the exact same colliders that block player movement, so a spell can always reach
+// anywhere you could physically walk to (through a doorway/gate gap) and never through a wall.
+export function hasLineOfSight(x1: number, z1: number, x2: number, z2: number, structures: StructureDef[]): boolean {
+  for (const def of structures) {
+    const cosT = Math.cos(def.rotationY);
+    const sinT = Math.sin(def.rotationY);
+    const dx1 = x1 - def.x;
+    const dz1 = z1 - def.z;
+    const dx2 = x2 - def.x;
+    const dz2 = z2 - def.z;
+    const localX1 = dx1 * cosT - dz1 * sinT;
+    const localZ1 = dx1 * sinT + dz1 * cosT;
+    const localX2 = dx2 * cosT - dz2 * sinT;
+    const localZ2 = dx2 * sinT + dz2 * cosT;
+
+    for (const collider of getStructureColliders(def)) {
+      const minX = collider.localX - collider.halfWidth;
+      const maxX = collider.localX + collider.halfWidth;
+      const minZ = collider.localZ - collider.halfDepth;
+      const maxZ = collider.localZ + collider.halfDepth;
+      if (segmentIntersectsAabb(localX1, localZ1, localX2, localZ2, minX, maxX, minZ, maxZ)) return false;
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Terrain elevation - purely a rendering concern (see client/src/game/Scene.ts and the admin
+// map editor). Every distance/collision/line-of-sight calculation in this file works in the x/z
+// plane only and stays that way; nothing here is authoritative game state. A deterministic
+// height function (not authored data) keeps the client's game view and the admin editor's view
+// in perfect agreement with zero content to maintain.
+// ---------------------------------------------------------------------------------------------
+
+const TERRAIN_BASE_WAVELENGTH = 60;
+const TERRAIN_BASE_AMPLITUDE = 3.5;
+const TERRAIN_DETAIL_WAVELENGTH = 18;
+const TERRAIN_DETAIL_AMPLITUDE = 1;
+const TERRAIN_FLATTEN_RADIUS = 6; // world units of smooth falloff beyond a structure's own footprint
+
+// Deterministic pseudo-random value in [0,1) for an integer grid coordinate - no seed/RNG state,
+// so the exact same terrain is produced every time this is called, in every process.
+function terrainHash(ix: number, iz: number): number {
+  const s = Math.sin(ix * 127.1 + iz * 311.7) * 43758.5453123;
+  return s - Math.floor(s);
+}
+
+function smoothstep(t: number): number {
+  return t * t * (3 - 2 * t);
+}
+
+// Bilinear-interpolated value noise at one frequency, in [0,1).
+function valueNoise2D(x: number, z: number): number {
+  const x0 = Math.floor(x);
+  const z0 = Math.floor(z);
+  const sx = smoothstep(x - x0);
+  const sz = smoothstep(z - z0);
+  const n00 = terrainHash(x0, z0);
+  const n10 = terrainHash(x0 + 1, z0);
+  const n01 = terrainHash(x0, z0 + 1);
+  const n11 = terrainHash(x0 + 1, z0 + 1);
+  const nx0 = n00 + (n10 - n00) * sx;
+  const nx1 = n01 + (n11 - n01) * sx;
+  return nx0 + (nx1 - nx0) * sz;
+}
+
+// Two octaves of rolling hills, pulled flat under and just beyond every structure's footprint
+// so buildings (rigid boxes) always sit on a level pad instead of a slope. `structures` defaults
+// to the live STRUCTURES binding (populated by loadGameContent) - every client call site can
+// omit it and get correct flattening automatically. The admin map editor never calls
+// loadGameContent (it reads content straight from the REST API, not the live-game snapshot
+// pipeline), so it passes its own fetched structures list explicitly instead of silently getting
+// unflattened terrain under every building.
+export function getTerrainHeight(x: number, z: number, structures: StructureDef[] = STRUCTURES): number {
+  const base = (valueNoise2D(x / TERRAIN_BASE_WAVELENGTH, z / TERRAIN_BASE_WAVELENGTH) - 0.5) * 2 * TERRAIN_BASE_AMPLITUDE;
+  const detail =
+    (valueNoise2D(x / TERRAIN_DETAIL_WAVELENGTH + 91.3, z / TERRAIN_DETAIL_WAVELENGTH + 91.3) - 0.5) * 2 * TERRAIN_DETAIL_AMPLITUDE;
+  let height = base + detail;
+
+  for (const s of structures) {
+    const footprint = Math.max(s.width, s.depth) / 2;
+    const flattenEnd = footprint + TERRAIN_FLATTEN_RADIUS;
+    const dist = Math.hypot(x - s.x, z - s.z);
+    if (dist >= flattenEnd) continue;
+    const t = dist <= footprint ? 0 : (dist - footprint) / (flattenEnd - footprint);
+    height *= smoothstep(t);
+  }
+
+  return height;
 }
 
 export type MapKind = "overworld" | "dungeon";

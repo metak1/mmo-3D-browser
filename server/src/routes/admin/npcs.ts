@@ -12,6 +12,7 @@ const npcFields = {
   name: z.string().min(1).max(64),
   x: z.number(),
   z: z.number(),
+  y_offset: z.number().default(0),
   map_id: z.string().min(1).max(32),
   vendor_item_ids: z.array(z.string()).optional(),
 };

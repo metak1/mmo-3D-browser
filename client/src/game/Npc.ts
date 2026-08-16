@@ -1,7 +1,17 @@
 import * as THREE from "three";
+import { getTerrainHeight } from "@mmo/shared";
 import { CAMERA_PITCH } from "./Scene";
+import { fitHeight, ModelAnimator, spawnModel, tintModel } from "./models";
+import { identityTint } from "./textureTint";
 
 const NPC_COLOR = 0xf5d76e;
+const MODEL_PATH = "/models/man.glb";
+const MODEL_CLIPS = { idle: "HumanArmature|Man_Idle", walk: "HumanArmature|Man_Walk" };
+// Matches the original CapsuleGeometry(0.4, 0.9) avatar this whole model system replaced
+// (0.9 + 2*0.4 = 1.7) - man.glb's own native height (~4.8) was never scaled down to this until
+// now, which is why NPCs (and, until the class-model change, players) rendered nearly as tall as
+// the map's houses.
+const MODEL_HEIGHT = 1.7;
 
 const INDICATOR_SIZE = 0.9;
 const INDICATOR_Y_OFFSET = 2.25;
@@ -44,14 +54,18 @@ export class NpcAvatar {
   private readonly indicator: THREE.Mesh;
   private readonly indicatorMaterial: THREE.MeshBasicMaterial;
   private readonly vendorIndicator: THREE.Mesh;
+  private animator?: ModelAnimator;
 
   constructor() {
-    const body = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.4, 0.9, 4, 8),
-      new THREE.MeshStandardMaterial({ color: NPC_COLOR }),
-    );
-    body.position.y = 0.85;
-    this.group.add(body);
+    // Async-loaded (see models.ts) - same shared model as PlayerAvatar, just never told to
+    // walk (NPCs are static, spawned once from NPCS and never repositioned), so it stays on
+    // its Idle clip forever.
+    spawnModel(MODEL_PATH, MODEL_CLIPS).then(({ object, animator }) => {
+      fitHeight(object, MODEL_HEIGHT);
+      tintModel(object, identityTint(NPC_COLOR));
+      this.group.add(object);
+      this.animator = animator;
+    });
 
     // A static tilted plane (matching HealthBar's approach) rather than a THREE.Sprite,
     // since the camera's pitch never changes - no per-frame billboarding needed.
@@ -104,8 +118,13 @@ export class NpcAvatar {
     this.vendorIndicator.visible = isVendor;
   }
 
-  setPosition(x: number, z: number) {
-    this.group.position.set(x, 0, z);
+  setPosition(x: number, z: number, yOffset = 0) {
+    this.group.position.set(x, getTerrainHeight(x, z) + yOffset, z);
+  }
+
+  // NPCs never move, so this exists purely to keep the Idle clip's mixer advancing.
+  update(dt: number) {
+    this.animator?.update(dt);
   }
 
   addTo(scene: THREE.Scene) {

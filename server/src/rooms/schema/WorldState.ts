@@ -31,6 +31,7 @@ export class Player extends Schema {
   @type({ map: "number" }) talentRanks = new MapSchema<number>();
 
   @type({ map: "number" }) ailments = new MapSchema<number>(); // ailment kind -> expiresAt (epoch ms)
+  @type({ map: "number" }) buffs = new MapSchema<number>(); // buff kind -> expiresAt (epoch ms) - mirrors ailments, but caster-beneficial (see BuffKind)
 
   @type({ map: "number" }) questProgress = new MapSchema<number>(); // questId -> kill count
   @type({ map: "number" }) questCompleted = new MapSchema<number>(); // questId -> completedAt (epoch ms)

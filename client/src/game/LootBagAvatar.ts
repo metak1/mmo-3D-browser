@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { getTerrainHeight } from "@mmo/shared";
 
 const BAG_COLOR = 0x8b6b3d;
 
@@ -23,7 +24,7 @@ export class LootBagAvatar {
   }
 
   setPosition(x: number, z: number) {
-    this.group.position.set(x, 0, z);
+    this.group.position.set(x, getTerrainHeight(x, z), z);
   }
 
   addTo(scene: THREE.Scene) {

@@ -98,8 +98,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     name: t.name,
     description: t.description,
     maxRank: t.max_rank,
-    effectKey: t.effect_key as TalentDef["effectKey"],
-    perRank: t.per_rank,
+    effect: t.effect as TalentDef["effect"],
   }));
 
   const enemyTypes: EnemyTypeDef[] = enemyTypeRows.map((e) => ({
@@ -116,6 +115,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     name: n.name,
     x: n.x,
     z: n.z,
+    yOffset: n.y_offset,
     mapId: n.map_id,
     vendorItemIds: vendorItemIdsByNpc.get(n.id),
   }));
@@ -175,6 +175,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     depth: s.depth,
     height: s.height,
     color: s.color,
+    yOffset: s.y_offset,
   }));
 
   return { classes, spells, items, talents, enemyTypes, npcs, quests, maps, dungeons, spawns, structures };

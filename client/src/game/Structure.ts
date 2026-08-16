@@ -1,11 +1,14 @@
 import * as THREE from "three";
 import {
+  getTerrainHeight,
   STRUCTURE_DOOR_WIDTH_FRACTION,
   STRUCTURE_GATE_PILLAR_FRACTION,
   STRUCTURE_MAX_DOOR_WIDTH,
   STRUCTURE_WALL_THICKNESS,
   StructureDef,
 } from "@mmo/shared";
+import { stoneTexture, woodTexture } from "./textures";
+import { softTint } from "./textureTint";
 
 // Fixed regardless of an individual structure's wall color, so roofs/caps always read clearly
 // against whatever color an admin picks for the walls.
@@ -60,7 +63,10 @@ interface BuiltStructure {
 function buildHouse(def: StructureDef): BuiltStructure {
   const group = new THREE.Group();
   const wallHeight = def.height * 0.7;
-  const wallMaterial = new THREE.MeshStandardMaterial({ color: def.color });
+  const wallMaterial = new THREE.MeshStandardMaterial({
+    color: softTint(def.color),
+    map: woodTexture(Math.max(def.width, def.depth), wallHeight),
+  });
 
   const doorWidth = Math.min(def.width * STRUCTURE_DOOR_WIDTH_FRACTION, STRUCTURE_MAX_DOOR_WIDTH);
   const frontSegmentWidth = (def.width - doorWidth) / 2;
@@ -94,7 +100,7 @@ function buildHouse(def: StructureDef): BuiltStructure {
 function buildWall(def: StructureDef): BuiltStructure {
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(def.width, def.height, def.depth),
-    new THREE.MeshStandardMaterial({ color: def.color }),
+    new THREE.MeshStandardMaterial({ color: softTint(def.color), map: stoneTexture(def.width, def.height) }),
   );
   mesh.position.y = def.height / 2;
   return { object: mesh, fadeMaterials: [] };
@@ -105,7 +111,7 @@ function buildTower(def: StructureDef): BuiltStructure {
   const bodyHeight = def.height * 0.85;
   const body = new THREE.Mesh(
     new THREE.BoxGeometry(def.width, bodyHeight, def.depth),
-    new THREE.MeshStandardMaterial({ color: def.color }),
+    new THREE.MeshStandardMaterial({ color: softTint(def.color), map: stoneTexture(def.width, bodyHeight) }),
   );
   body.position.y = bodyHeight / 2;
   group.add(body);
@@ -118,7 +124,7 @@ function buildTower(def: StructureDef): BuiltStructure {
 
 function buildGate(def: StructureDef): BuiltStructure {
   const group = new THREE.Group();
-  const material = new THREE.MeshStandardMaterial({ color: def.color });
+  const material = new THREE.MeshStandardMaterial({ color: softTint(def.color), map: stoneTexture(def.width, def.height) });
   const pillarWidth = def.width * STRUCTURE_GATE_PILLAR_FRACTION;
   const pillarOffset = def.width / 2 - pillarWidth / 2;
 
@@ -165,7 +171,11 @@ export class StructureAvatar {
         break;
     }
     this.group.add(built.object);
-    this.group.position.set(def.x, 0, def.z);
+    // getTerrainHeight flattens the ground under every structure's own footprint (see
+    // shared/src/types.ts), so this always lands the structure on level ground by default -
+    // yOffset lets an admin deliberately raise/sink it from there (e.g. a platform, a sunken
+    // ruin) via the map editor's Y-axis gizmo.
+    this.group.position.set(def.x, getTerrainHeight(def.x, def.z) + def.yOffset, def.z);
     this.group.rotation.y = def.rotationY;
 
     this.fadeMaterials = built.fadeMaterials;
