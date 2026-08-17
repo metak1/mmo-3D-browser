@@ -747,6 +747,18 @@
         font-size: 10px;
         text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
       }
+      .spell-slot .charges {
+        position: absolute;
+        top: 3px;
+        right: 5px;
+        font-weight: 600;
+        font-size: 11px;
+        color: #f5d76e;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      }
+      .spell-slot .charges[hidden] {
+        display: none;
+      }
       .spell-slot .cooldown {
         position: absolute;
         left: 0;
@@ -768,6 +780,15 @@
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.03em;
+      }
+      .buff-tag {
+        margin-top: 4px;
+        font-size: 10px;
+        color: #4fd166;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      }
+      .buff-tag[hidden] {
+        display: none;
       }
       #app.ground-target-pending canvas {
         cursor: crosshair;
@@ -889,6 +910,7 @@
         <span class="bar-label" data-player-hp-label></span>
       </div>
       <div class="ailment-tag" data-player-ailments hidden></div>
+      <div class="buff-tag" data-player-buffs hidden></div>
       <div class="bar cast-bar" data-player-cast-bar hidden>
         <div class="bar-fill" data-player-cast-fill></div>
         <span class="bar-label" data-player-cast-label></span>
@@ -1082,16 +1104,19 @@
       <div id="hotbar">
         <div class="spell-slot" data-slot="0">
           <span class="key">1</span>
+          <span class="charges" data-charges="0" hidden></span>
           <div class="cooldown" data-cooldown="0"></div>
           <span class="name" data-name="0"></span>
         </div>
         <div class="spell-slot" data-slot="1">
           <span class="key">2</span>
+          <span class="charges" data-charges="1" hidden></span>
           <div class="cooldown" data-cooldown="1"></div>
           <span class="name" data-name="1"></span>
         </div>
         <div class="spell-slot" data-slot="2">
           <span class="key">3</span>
+          <span class="charges" data-charges="2" hidden></span>
           <div class="cooldown" data-cooldown="2"></div>
           <span class="name" data-name="2"></span>
         </div>

@@ -52,6 +52,7 @@ export class Enemy extends Schema {
   @type("number") maxHp = 0;
   @type("boolean") isCasting = false;
   @type("number") enragesAt = 0; // epoch ms; 0 = boss not yet engaged, set on first damage taken
+  @type("string") aggroTargetId = ""; // sessionId of whoever this enemy is currently attacking, "" if not engaged yet
 }
 
 export class Projectile extends Schema {

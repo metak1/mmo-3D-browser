@@ -9,6 +9,12 @@ const COLOR_HIGH = 0x4fd166;
 const COLOR_MID = 0xe0b23c;
 const COLOR_LOW = 0xe0503c;
 
+// Reused by setAggroColor - enemy bars trade the usual HP-fraction gradient for an aggro cue
+// instead (see EnemyAvatar.setAggro), reusing the same red/yellow already meaningful elsewhere
+// (low HP / mid HP) so the palette stays consistent even though the meaning shifts for enemies.
+const COLOR_AGGRO_ON_ME = COLOR_LOW;
+const COLOR_AGGRO_ELSEWHERE = COLOR_MID;
+
 // Not parented to the character mesh on purpose: the character group yaws to face
 // its movement direction, and a child would inherit that yaw, rotating the bar out
 // of alignment with the camera. Kept as a sibling in the scene and repositioned
@@ -41,10 +47,19 @@ export class HealthBar {
     this.group.position.set(x, y + this.yOffset, z);
   }
 
-  setFraction(fraction: number) {
+  // `colorByFraction` lets enemy avatars skip the HP-fraction gradient and drive the fill color
+  // via setAggroColor instead (still calling this every HP change, for the width) - see
+  // EnemyAvatar.setAggro.
+  setFraction(fraction: number, colorByFraction = true) {
     const clamped = Math.max(0, Math.min(1, fraction));
     this.fill.scale.x = clamped || 0.0001;
     this.fill.position.x = -(WIDTH * (1 - clamped)) / 2;
-    this.fillMaterial.color.setHex(clamped > 0.5 ? COLOR_HIGH : clamped > 0.25 ? COLOR_MID : COLOR_LOW);
+    if (colorByFraction) {
+      this.fillMaterial.color.setHex(clamped > 0.5 ? COLOR_HIGH : clamped > 0.25 ? COLOR_MID : COLOR_LOW);
+    }
+  }
+
+  setAggroColor(hasAggro: boolean) {
+    this.fillMaterial.color.setHex(hasAggro ? COLOR_AGGRO_ON_ME : COLOR_AGGRO_ELSEWHERE);
   }
 }

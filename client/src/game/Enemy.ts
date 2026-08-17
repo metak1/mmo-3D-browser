@@ -88,7 +88,14 @@ export class EnemyAvatar {
   }
 
   setHp(hp: number, maxHp: number) {
-    this.healthBar.setFraction(maxHp > 0 ? hp / maxHp : 0);
+    this.healthBar.setFraction(maxHp > 0 ? hp / maxHp : 0, false);
+  }
+
+  // Enemy bars trade the usual HP-fraction color gradient for an aggro cue instead (see
+  // HealthBar.setAggroColor) - red if aggro is on the local player (or not engaged yet), yellow
+  // if it's on someone else. Called alongside setHp whenever aggroTargetId changes.
+  setAggro(hasAggro: boolean) {
+    this.healthBar.setAggroColor(hasAggro);
   }
 
   addTo(scene: THREE.Scene) {

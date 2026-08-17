@@ -96,6 +96,7 @@ const minimap = new Minimap(document.getElementById("minimap") as HTMLCanvasElem
 const playerHpFill = document.querySelector<HTMLElement>("[data-player-hp-fill]")!;
 const playerHpLabel = document.querySelector<HTMLElement>("[data-player-hp-label]")!;
 const playerAilmentsEl = document.querySelector<HTMLElement>("[data-player-ailments]")!;
+const playerBuffsEl = document.querySelector<HTMLElement>("[data-player-buffs]")!;
 const playerCastBarEl = document.querySelector<HTMLElement>("[data-player-cast-bar]")!;
 const playerCastFill = document.querySelector<HTMLElement>("[data-player-cast-fill]")!;
 const playerCastLabel = document.querySelector<HTMLElement>("[data-player-cast-label]")!;
@@ -463,10 +464,16 @@ function hpColor(fraction: number): string {
   return fraction > 0.5 ? "#4fd166" : fraction > 0.25 ? "#e0b23c" : "#e0503c";
 }
 
-function updateHpBar(fillEl: HTMLElement, labelEl: HTMLElement, hp: number, maxHp: number) {
+// Same red/yellow already meaningful elsewhere (low HP / mid HP) - reused so enemy target-panel
+// bars match the in-world HealthBar's aggro cue (see HealthBar.setAggroColor).
+function aggroColor(hasAggro: boolean): string {
+  return hasAggro ? "#e0503c" : "#e0b23c";
+}
+
+function updateHpBar(fillEl: HTMLElement, labelEl: HTMLElement, hp: number, maxHp: number, colorOverride?: string) {
   const fraction = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 0;
   fillEl.style.width = `${fraction * 100}%`;
-  fillEl.style.background = hpColor(fraction);
+  fillEl.style.background = colorOverride ?? hpColor(fraction);
   labelEl.textContent = `${Math.ceil(hp)}/${Math.ceil(maxHp)}`;
 }
 
@@ -481,7 +488,15 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const enemies = new Map<string, EnemyAvatar>();
   const enemySchemaById = new Map<
     string,
-    { enemyTypeId: string; behavior: string; hp: number; maxHp: number; isCasting: boolean; enragesAt: number }
+    {
+      enemyTypeId: string;
+      behavior: string;
+      hp: number;
+      maxHp: number;
+      isCasting: boolean;
+      enragesAt: number;
+      aggroTargetId: string;
+    }
   >();
   const playerSchemaById = new Map<
     string,
@@ -558,7 +573,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   let localRotationY = 0;
   let seq = 0;
 
-  const lastClientCastAt = new Map<SpellId, number>();
+  // Per spell, cast timestamps still within their cooldown window - purely a client-side
+  // prediction for the hotbar's cooldown sweep/charge badge, same as before charges existed;
+  // the server (CombatEngine's own identically-shaped lastCastAt) is still the sole authority
+  // and silently ignores casts that violate its own gate.
+  const lastClientCastAt = new Map<SpellId, number[]>();
 
   // Hotbar slots are keyed by position (0/1/2), not spell identity - the same DOM node
   // holds a different spell per class. slotSpellIds is populated once the local player's
@@ -566,10 +585,12 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const spellSlotEls: HTMLElement[] = [];
   const cooldownEls: HTMLElement[] = [];
   const nameEls: HTMLElement[] = [];
+  const chargesEls: HTMLElement[] = [];
   for (let i = 0; i < HOTBAR_SLOT_COUNT; i++) {
     spellSlotEls.push(document.querySelector(`[data-slot="${i}"]`)!);
     cooldownEls.push(document.querySelector(`[data-cooldown="${i}"]`)!);
     nameEls.push(document.querySelector(`[data-name="${i}"]`)!);
+    chargesEls.push(document.querySelector(`[data-charges="${i}"]`)!);
   }
   let slotSpellIds: SpellId[] = [];
 
@@ -596,6 +617,18 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
     playerAilmentsEl.textContent = active.join(", ");
     playerAilmentsEl.hidden = active.length === 0;
+  }
+
+  // Mirrors updateAilmentIndicator - same lazy expiresAt>now filter, same textContent-join
+  // rendering - just for caster-beneficial buffs (see BuffKind/BUFFS) instead of enemy debuffs.
+  function updateBuffIndicator(player: { buffs: Iterable<[string, number]> }) {
+    const now = Date.now();
+    const active: string[] = [];
+    for (const [kind, expiresAt] of player.buffs) {
+      if (expiresAt > now) active.push(BUFFS[kind as BuffKind]?.name ?? kind);
+    }
+    playerBuffsEl.textContent = active.join(", ");
+    playerBuffsEl.hidden = active.length === 0;
   }
 
   function renderPartyPanel() {
@@ -810,7 +843,13 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       enemies.get(id)?.setSelected(true);
       targetPanel.hidden = false;
       targetNameEl.textContent = ENEMY_TYPES[enemySchema.enemyTypeId]?.name ?? enemySchema.enemyTypeId;
-      updateHpBar(targetHpFill, targetHpLabel, enemySchema.hp, enemySchema.maxHp);
+      updateHpBar(
+        targetHpFill,
+        targetHpLabel,
+        enemySchema.hp,
+        enemySchema.maxHp,
+        aggroColor(enemySchema.aggroTargetId === "" || enemySchema.aggroTargetId === localSessionId),
+      );
       if (enemySchema.isCasting) {
         targetCastActive = true;
         targetCastStartRef = performance.now();
@@ -837,8 +876,23 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     targetPanel.hidden = true;
   }
 
+  // 1 base charge plus any spent extraCharges talents - identical shared helper to what
+  // CombatEngine uses server-side, so this prediction stays in lockstep with the real gate.
+  function maxChargesFor(spellId: SpellId): number {
+    if (!localClassId || !localPlayerSchema) return 1;
+    return 1 + getSpellCharges(localClassId, spellId, localPlayerSchema.talentRanks);
+  }
+
+  function activeCastsFor(spellId: SpellId, now: number): number[] {
+    const cooldownMs = SPELLS[spellId].cooldownMs;
+    return (lastClientCastAt.get(spellId) ?? []).filter((t) => now - t < cooldownMs);
+  }
+
   function sendCast(spellId: SpellId, message: CastMessage) {
-    lastClientCastAt.set(spellId, performance.now());
+    const now = performance.now();
+    const active = activeCastsFor(spellId, now);
+    active.push(now);
+    lastClientCastAt.set(spellId, active);
     room?.send("cast", message);
   }
 
@@ -849,8 +903,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     const spell = SPELLS[spellId];
     const now = performance.now();
-    const last = lastClientCastAt.get(spellId) ?? -Infinity;
-    if (now - last < spell.cooldownMs) return;
+    if (activeCastsFor(spellId, now).length >= maxChargesFor(spellId)) return;
 
     if (spell.targetType === "ground") {
       pendingGroundTargetSpellId = spellId;
@@ -1482,6 +1535,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
         updateCharacterPanel(player);
         updateAilmentIndicator(player);
+        updateBuffIndicator(player);
         setupHotbarForClass(player.classId);
         updateNpcQuestIndicators();
         renderPartyPanel();
@@ -1506,6 +1560,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         $(player.questCompleted).onAdd(rerenderQuestUi);
         $(player.ailments).onAdd(() => updateAilmentIndicator(player));
         $(player.ailments).onRemove(() => updateAilmentIndicator(player));
+        $(player.buffs).onAdd(() => updateBuffIndicator(player));
+        $(player.buffs).onRemove(() => updateBuffIndicator(player));
       }
 
       $(player).onChange(() => {
@@ -1535,6 +1591,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
           updateHpBar(playerHpFill, playerHpLabel, localHp, localMaxHp);
           updateCharacterPanel(player);
           updateAilmentIndicator(player);
+          updateBuffIndicator(player);
           renderNpcDialogue();
           renderQuestLog();
           renderPartyInvitePrompt(player);
@@ -1576,6 +1633,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       avatar.setTarget(enemy.x, enemy.z);
       avatar.snapToTarget();
       avatar.setHp(enemy.hp, enemy.maxHp);
+      avatar.setAggro(enemy.aggroTargetId === "" || enemy.aggroTargetId === localSessionId);
       avatar.addTo(gameScene.scene);
       enemies.set(enemyId, avatar);
       enemySchemaById.set(enemyId, enemy);
@@ -1583,10 +1641,17 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       $(enemy).onChange(() => {
         avatar.setTarget(enemy.x, enemy.z);
         avatar.setHp(enemy.hp, enemy.maxHp);
+        avatar.setAggro(enemy.aggroTargetId === "" || enemy.aggroTargetId === localSessionId);
         if (enemy.behavior === "boss") avatar.setBossPhase(enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION);
 
         if (enemyId === currentTargetId) {
-          updateHpBar(targetHpFill, targetHpLabel, enemy.hp, enemy.maxHp);
+          updateHpBar(
+            targetHpFill,
+            targetHpLabel,
+            enemy.hp,
+            enemy.maxHp,
+            aggroColor(enemy.aggroTargetId === "" || enemy.aggroTargetId === localSessionId),
+          );
 
           if (enemy.isCasting && !targetCastActive) {
             targetCastActive = true;
@@ -1772,12 +1837,26 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     for (let i = 0; i < slotSpellIds.length; i++) {
       const spellId = slotSpellIds[i];
-      const el = cooldownEls[i];
-      if (!el || !spellId) continue;
-      const last = lastClientCastAt.get(spellId) ?? -Infinity;
-      const elapsed = performance.now() - last;
-      const remaining = Math.max(0, 1 - elapsed / SPELLS[spellId].cooldownMs);
-      el.style.height = `${remaining * 100}%`;
+      const cooldownEl = cooldownEls[i];
+      const chargesEl = chargesEls[i];
+      if (!cooldownEl || !spellId) continue;
+
+      const now = performance.now();
+      const active = activeCastsFor(spellId, now);
+      const max = maxChargesFor(spellId);
+      const available = max - active.length;
+
+      // With charges available the slot reads fully "ready" (no sweep) even if the most
+      // recent cast hasn't fully cooled down yet - only once every charge is spent does the
+      // sweep reflect time remaining until the next one regenerates (active[0], the oldest
+      // still-cooling cast, is the next to free up).
+      const remaining = available > 0 ? 0 : Math.max(0, 1 - (now - active[0]) / SPELLS[spellId].cooldownMs);
+      cooldownEl.style.height = `${remaining * 100}%`;
+
+      if (chargesEl) {
+        chargesEl.hidden = max <= 1;
+        if (max > 1) chargesEl.textContent = `${available}/${max}`;
+      }
     }
 
     gameScene.render();

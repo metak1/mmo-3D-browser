@@ -6,10 +6,12 @@ import {
   BOSS_ENRAGE_DAMAGE_MULTIPLIER,
   BOSS_PHASE_2_HP_FRACTION,
   BossStats,
+  CLASSES,
   CRIT_MULTIPLIER,
   CasterStats,
   CastMessage,
   ClassId,
+  ClassRole,
   DAMAGE_STAT_FACTOR,
   ENEMY_TYPES,
   INTERRUPT_LOCKOUT_MS,
@@ -47,6 +49,15 @@ import { Enemy, Player, Projectile } from "../schema/WorldState.js";
 
 const RANGE_BUFFER = 1; // small allowance for latency between client input and server check
 const BOSS_ENRAGE_MS = 90_000; // time since first damage taken before the boss enrages
+
+// A tank generates threat faster per point of damage than anyone else, which is what makes them
+// naturally hold aggro without needing a special-cased "always target the tank" rule - it falls
+// out of the same threat-comparison logic every other role uses.
+const ROLE_THREAT_MULTIPLIER: Record<ClassRole, number> = { tank: 2, healer: 1, dps: 1 };
+const THREAT_PER_HEAL = 0.5; // healing generates threat at half the rate damage does
+// Enemies already in combat with someone within this radius of a healer count as "engaged with
+// this fight" for heal-threat purposes - a simple proximity stand-in for party membership.
+const HEAL_THREAT_RADIUS = 20;
 
 interface PlayerInput {
   moveX: number;
@@ -136,6 +147,9 @@ export class CombatEngine {
   private interruptLockoutUntil = new Map<string, number>(); // key: sessionId or enemyId
   private projectileAge = new Map<string, number>(); // key: projectileId, value: ms alive
   private projectileSeq = 0;
+  // key: enemyId -> (sessionId -> accumulated threat). Server-internal, not synced - only
+  // Enemy.aggroTargetId (who currently has the highest threat) is exposed to clients.
+  private threatTables = new Map<string, Map<string, number>>();
 
   constructor(private config: CombatEngineConfig) {}
 
@@ -290,9 +304,24 @@ export class CombatEngine {
     return Math.round(heal);
   }
 
-  healPlayer(caster: Player, target: Player, baseAmount: number, spellId?: SpellId) {
+  healPlayer(caster: Player, casterSessionId: string, target: Player, baseAmount: number, spellId?: SpellId) {
     const heal = this.computePlayerHeal(caster, baseAmount, spellId);
     target.hp = Math.min(target.maxHp, target.hp + heal);
+    this.addHealThreat(caster, casterSessionId, heal);
+  }
+
+  // Healing has no direct "which enemy" to attribute threat to (unlike damage, which always
+  // targets one), so instead it's spread across every enemy already fighting *someone* within
+  // range of the healer - see HEAL_THREAT_RADIUS.
+  private addHealThreat(healer: Player, healerSessionId: string, healAmount: number) {
+    if (healAmount <= 0) return;
+    for (const [enemyId, table] of this.threatTables) {
+      if (table.size === 0) continue;
+      const enemy = this.state.enemies.get(enemyId);
+      if (!enemy) continue;
+      const dist = Math.hypot(healer.x - enemy.x, healer.z - enemy.z);
+      if (dist <= HEAL_THREAT_RADIUS) this.addThreat(enemyId, healerSessionId, healAmount * THREAT_PER_HEAL);
+    }
   }
 
   applyAilment(player: Player, kind: AilmentKind, durationMs: number) {
@@ -433,11 +462,11 @@ export class CombatEngine {
         const impact = this.resolveImpactPoint(caster, target);
         if (!impact) return;
         forEachAlive(this.state.players, impact.x, impact.z, spell.aoeRadius, (ally) => {
-          this.healPlayer(caster, ally, spell.amount ?? 0, spell.id);
+          this.healPlayer(caster, casterSessionId, ally, spell.amount ?? 0, spell.id);
         });
       } else {
         const ally = this.resolveAllyUnit(caster, target);
-        if (ally) this.healPlayer(caster, ally, spell.amount ?? 0, spell.id);
+        if (ally) this.healPlayer(caster, casterSessionId, ally, spell.amount ?? 0, spell.id);
       }
     } else if (spell.effectType === "dispel") {
       const ally = this.resolveAllyUnit(caster, target);
@@ -459,12 +488,51 @@ export class CombatEngine {
     if (enemy) enemy.isCasting = false;
   }
 
+  // --- Threat/aggro ---
+
+  private addThreat(enemyId: string, sessionId: string, amount: number) {
+    if (amount <= 0) return;
+    let table = this.threatTables.get(enemyId);
+    if (!table) {
+      table = new Map();
+      this.threatTables.set(enemyId, table);
+    }
+    table.set(sessionId, (table.get(sessionId) ?? 0) + amount);
+  }
+
+  private threatRoleMultiplierFor(sessionId: string): number {
+    const player = this.state.players.get(sessionId);
+    const role = player && CLASSES[resolveClassId(player.classId)]?.role;
+    return role ? ROLE_THREAT_MULTIPLIER[role] : 1;
+  }
+
+  // Highest-threat candidate wins; on a tie, keeps the enemy's current target instead of
+  // arbitrarily picking whichever candidate happened to iterate first, so two players sitting at
+  // equal threat don't cause the enemy to flicker between them every tick.
+  private pickThreatTarget(enemyId: string, candidateSessionIds: string[]): string | undefined {
+    if (candidateSessionIds.length === 0) return undefined;
+    const table = this.threatTables.get(enemyId);
+    const currentTarget = this.state.enemies.get(enemyId)?.aggroTargetId;
+    let best: string | undefined;
+    let bestThreat = -1;
+    for (const sessionId of candidateSessionIds) {
+      const threat = table?.get(sessionId) ?? 0;
+      if (threat > bestThreat || (threat === bestThreat && sessionId === currentTarget)) {
+        best = sessionId;
+        bestThreat = threat;
+      }
+    }
+    return best;
+  }
+
   // --- Enemy damage / kill ---
 
   applySpellDamage(target: Enemy, damage: number, targetId: string, killerSessionId: string) {
     // Starts the enrage clock on the boss's first hit taken, never reset until it dies
     // (each room creates a fresh Enemy() per spawn, so a respawned/re-spawned boss starts clean).
     if (target.behavior === "boss" && target.enragesAt === 0) target.enragesAt = Date.now() + BOSS_ENRAGE_MS;
+
+    this.addThreat(targetId, killerSessionId, damage * this.threatRoleMultiplierFor(killerSessionId));
 
     target.hp = Math.max(0, target.hp - damage);
     if (target.hp === 0) {
@@ -481,6 +549,7 @@ export class CombatEngine {
     this.lastCasterAttackAt.delete(enemyId);
     this.pendingEnemyCast.delete(enemyId);
     this.interruptLockoutUntil.delete(enemyId);
+    this.threatTables.delete(enemyId);
   }
 
   // --- Boss phase/enrage (derived from already-synced fields, not a separate synced flag -
@@ -583,14 +652,17 @@ export class CombatEngine {
 
         const lastAttack = this.lastMeleeAttackAt.get(enemyId) ?? 0;
         if (now - lastAttack >= interval) {
+          const candidates: string[] = [];
           for (const [sessionId, player] of this.state.players) {
             if (player.hp <= 0) continue;
             const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
-            if (dist <= range) {
-              this.damagePlayer(sessionId, player, damage * enrageMultiplier);
-              this.lastMeleeAttackAt.set(enemyId, now);
-              break;
-            }
+            if (dist <= range) candidates.push(sessionId);
+          }
+          const targetId = this.pickThreatTarget(enemyId, candidates);
+          if (targetId) {
+            this.damagePlayer(targetId, this.state.players.get(targetId)!, damage * enrageMultiplier);
+            this.lastMeleeAttackAt.set(enemyId, now);
+            enemy.aggroTargetId = targetId;
           }
         }
       }
@@ -611,16 +683,20 @@ export class CombatEngine {
         const lastAttack = this.lastCasterAttackAt.get(enemyId) ?? 0;
         if (now - lastAttack < cooldownMs) continue;
 
+        const candidates: string[] = [];
         for (const [sessionId, player] of this.state.players) {
           if (player.hp <= 0) continue;
           const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
           if (dist > range) continue;
           if (this.config.collidableStructures && !hasLineOfSight(enemy.x, enemy.z, player.x, player.z, STRUCTURES)) continue;
-
+          candidates.push(sessionId);
+        }
+        const targetId = this.pickThreatTarget(enemyId, candidates);
+        if (targetId) {
           enemy.isCasting = true;
-          this.pendingEnemyCast.set(enemyId, { targetSessionId: sessionId, fireAt: now + castTimeMs });
+          this.pendingEnemyCast.set(enemyId, { targetSessionId: targetId, fireAt: now + castTimeMs });
           this.lastCasterAttackAt.set(enemyId, now);
-          break;
+          enemy.aggroTargetId = targetId;
         }
       }
     }
