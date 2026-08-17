@@ -143,7 +143,21 @@ export interface BossStats {
   aoeCooldownMs: number;
   aoeCastTimeMs: number;
   aoeProjectileSpeed: number;
+  // Optional reinforcement-wave mechanic - a boss with none of these set never summons adds.
+  addEnemyTypeId?: EnemyTypeId;
+  addIntervalMs?: number;
+  addCount?: number;
+  maxConcurrentAdds?: number;
+  // Optional special-spell rotation - a boss with neither of these set never casts one.
+  specialAbilities?: BossAbilityDef[];
+  specialCooldownMs?: number;
 }
+
+// A boss's special-spell rotation: cycled through in array order on BossStats.specialCooldownMs.
+// Modeled on TalentEffect's discriminated-union pattern - easy to extend with more kinds later.
+export type BossAbilityDef =
+  | { id: string; name: string; kind: "raidNova"; damage: number; radius: number; castTimeMs: number }
+  | { id: string; name: string; kind: "singleTargetBurst"; damage: number; castTimeMs: number };
 
 export type EnemyStats = MeleeStats | CasterStats | BossStats;
 
@@ -338,11 +352,35 @@ export interface TalentDef {
   description: string;
   maxRank: number;
   effect: TalentEffect;
+  tier: number; // 1-based row in the class's talent tree
+  column: number; // 0-based column within that row, for grid layout
+  prerequisiteTalentId?: string; // must have >=1 rank invested before this node can be spent
 }
 
 export const TALENT_POINTS_PER_LEVEL = 1;
 
 export let TALENTS: Record<string, TalentDef> = {};
+
+// A node is spendable once its prerequisite (if any) has at least 1 point invested - mirrors
+// modern WoW's talent tree gating (a single prerequisite connection per node, not cumulative
+// points-per-row). Used both server-side (to reject spend_talent) and client-side (to render
+// locked nodes and grey out their connector).
+export function isTalentUnlocked(talentId: string, talentRanks: Iterable<[string, number]>): boolean {
+  const def = TALENTS[talentId];
+  if (!def?.prerequisiteTalentId) return true;
+  const ranks = new Map(talentRanks);
+  return (ranks.get(def.prerequisiteTalentId) ?? 0) > 0;
+}
+
+// True if some other spent talent (rank > 0) has `talentId` as its prerequisite - refunding
+// talentId's last point would strand that dependent in an invalid state (unlocked node with a
+// point in it, but its prerequisite no longer met), so callers should block the refund instead.
+export function hasRankedDependents(talentId: string, talentRanks: Iterable<[string, number]>): boolean {
+  const ranks = new Map(talentRanks);
+  return Object.values(TALENTS).some(
+    (def) => def.prerequisiteTalentId === talentId && (ranks.get(def.id) ?? 0) > 0,
+  );
+}
 
 export interface TalentBonus {
   damagePercent: number;
@@ -403,6 +441,10 @@ export function getOnCastBuffs(classId: ClassId, spellId: SpellId, talentRanks: 
 }
 
 export interface SpendTalentMessage {
+  talentId: string;
+}
+
+export interface RefundTalentMessage {
   talentId: string;
 }
 

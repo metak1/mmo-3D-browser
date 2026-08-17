@@ -313,10 +313,12 @@ async function main() {
     await prisma.item.upsert({ where: { id: i.id }, create: i, update: i });
   }
 
-  // --- Talents (5 per class: 3 flat statBonus at maxRank 12, plus one extraCharges and one
-  // onCastBuff talent at maxRank 1 - those two kinds are on/off, not stackable like the flat
-  // bonuses, so a lower max makes more sense than uniformly applying TALENT_MAX_RANK everywhere
-  // like the old flat-only model did). See shared/src/types.ts's TalentEffect for the shape.
+  // --- Talents: a real tree per class, 2 tiers deep. Tier 1 is 3 side-by-side flat statBonus
+  // nodes (maxRank 12, no prerequisite - always spendable). Tier 2 holds the two "signature"
+  // mechanics (extraCharges, onCastBuff) at maxRank 1 - each sits directly under, and requires
+  // >=1 point in, a specific tier-1 node (see prerequisiteSlug), mirroring modern WoW's
+  // single-prerequisite-connection talent trees rather than classic's cumulative-points-per-row
+  // gating. isTalentUnlocked (shared/src/types.ts) is what actually enforces the connection.
   const TALENT_MAX_RANK = 12;
   type TalentEffectSeed =
     | { kind: "statBonus"; stat: string; perRank: number }
@@ -326,196 +328,296 @@ async function main() {
   const extraCharges = (spellId: string, perRank = 1): TalentEffectSeed => ({ kind: "extraCharges", spellId, perRank });
   const onCastBuff = (spellId: string, buffId: string): TalentEffectSeed => ({ kind: "onCastBuff", spellId, buffId });
 
-  const talentDefs: Array<[string, string, string, string, number, TalentEffectSeed]> = [
-    [
-      "warrior",
-      "iron_skin",
-      "Iron Skin",
-      "Years of taking hits taught your body to shrug them off.",
-      TALENT_MAX_RANK,
-      statBonus("armorBonus", 1),
-    ],
-    [
-      "warrior",
-      "crushing_blows",
-      "Crushing Blows",
-      "Every swing carries a little more weight.",
-      TALENT_MAX_RANK,
-      statBonus("damagePercent", 1.5),
-    ],
-    [
-      "warrior",
-      "stalwart_heart",
-      "Stalwart Heart",
-      "Your resolve keeps you standing after lesser warriors would fall.",
-      TALENT_MAX_RANK,
-      statBonus("maxHpPercent", 1.25),
-    ],
-    [
-      "warrior",
-      "battle_fury",
-      "Battle Fury",
-      "A well-placed Shield Bash leaves you charged with momentum.",
-      1,
-      onCastBuff("warrior_shield_bash", "battleFury"),
-    ],
-    [
-      "warrior",
-      "momentum",
-      "Momentum",
-      "The first swing of Whirlwind is never the last you have in you.",
-      1,
-      extraCharges("warrior_whirlwind"),
-    ],
-    ["rogue", "cutthroat", "Cutthroat", "You don't need much of an opening.", TALENT_MAX_RANK, statBonus("critChanceBonus", 0.6)],
-    [
-      "rogue",
-      "vicious_strikes",
-      "Vicious Strikes",
-      "Precision over brute force.",
-      TALENT_MAX_RANK,
-      statBonus("damagePercent", 1.5),
-    ],
-    [
-      "rogue",
-      "grim_endurance",
-      "Grim Endurance",
-      "A life of close calls builds a thick skin.",
-      TALENT_MAX_RANK,
-      statBonus("maxHpPercent", 1.25),
-    ],
-    [
-      "rogue",
-      "fleet_footed",
-      "Fleet Footed",
-      "Garrote a target and you're already three steps from where they think you are.",
-      1,
-      onCastBuff("rogue_garrote", "shadowStep"),
-    ],
-    [
-      "rogue",
-      "opportunist",
-      "Opportunist",
-      "One blade finds the opening; the second is already moving.",
-      1,
-      extraCharges("rogue_backstab"),
-    ],
-    [
-      "ranger",
-      "marksmans_eye",
-      "Marksman's Eye",
-      "You aim for the gaps others don't even see.",
-      TALENT_MAX_RANK,
-      statBonus("critChanceBonus", 0.6),
-    ],
-    ["ranger", "camouflage", "Camouflage", "Half-seen is half-hit.", TALENT_MAX_RANK, statBonus("armorBonus", 1)],
-    [
-      "ranger",
-      "wilderness_vigor",
-      "Wilderness Vigor",
-      "Years in the field harden more than just your aim.",
-      TALENT_MAX_RANK,
-      statBonus("maxHpPercent", 1.25),
-    ],
-    [
-      "ranger",
-      "quickdraw",
-      "Quickdraw",
-      "Nocked, drawn, loosed — before they've registered the threat. An Aimed Shot always has one more arrow behind it.",
-      1,
-      extraCharges("ranger_aimed_shot"),
-    ],
-    [
-      "ranger",
-      "hunters_focus",
-      "Hunter's Focus",
-      "The trap springs, and everything after it feels slower.",
-      1,
-      onCastBuff("ranger_explosive_trap", "huntersFocus"),
-    ],
-    [
-      "oracle",
-      "focused_mind",
-      "Focused Mind",
-      "Clarity finds the weak point in anything.",
-      TALENT_MAX_RANK,
-      statBonus("critChanceBonus", 0.6),
-    ],
-    [
-      "oracle",
-      "arcane_insight",
-      "Arcane Insight",
-      "Understanding is its own weapon.",
-      TALENT_MAX_RANK,
-      statBonus("damagePercent", 1.5),
-    ],
-    [
-      "oracle",
-      "vital_current",
-      "Vital Current",
-      "Life force ebbs and flows — you've learned to hold onto more of it.",
-      TALENT_MAX_RANK,
-      statBonus("maxHpPercent", 1.25),
-    ],
-    [
-      "oracle",
-      "swift_rites",
-      "Swift Rites",
-      "The words come easier with practice — Renew is never fully spent.",
-      1,
-      extraCharges("oracle_renew"),
-    ],
-    [
-      "oracle",
-      "warding_sigil",
-      "Warding Sigil",
-      "Smite carves an opening, and a shimmer of protection follows you through it.",
-      1,
-      onCastBuff("oracle_smite", "divineFavor"),
-    ],
-    [
-      "mage",
-      "piercing_cold",
-      "Piercing Cold",
-      "Ice finds every crack.",
-      TALENT_MAX_RANK,
-      statBonus("critChanceBonus", 0.6),
-    ],
-    [
-      "mage",
-      "arcane_power",
-      "Arcane Power",
-      "Raw force, barely contained.",
-      TALENT_MAX_RANK,
-      statBonus("damagePercent", 1.5),
-    ],
-    ["mage", "mana_shield", "Mana Shield", "A thin barrier is still a barrier.", TALENT_MAX_RANK, statBonus("armorBonus", 1)],
-    [
-      "mage",
-      "overchannel",
-      "Overchannel",
-      "You've stopped waiting for the mana to settle — Frostbolt can be loosed twice before it does.",
-      1,
-      extraCharges("mage_frostbolt"),
-    ],
-    [
-      "mage",
-      "deep_reserves",
-      "Deep Reserves",
-      "Blizzard draws from a well deeper than you let on.",
-      1,
-      onCastBuff("mage_blizzard", "arcaneSurge"),
-    ],
+  interface TalentDefSeed {
+    classId: string;
+    slug: string;
+    name: string;
+    description: string;
+    maxRank: number;
+    effect: TalentEffectSeed;
+    tier: number;
+    column: number;
+    prerequisiteSlug?: string;
+  }
+  const talentDefs: TalentDefSeed[] = [
+    // --- Warrior ---
+    {
+      classId: "warrior",
+      slug: "iron_skin",
+      name: "Iron Skin",
+      description: "Years of taking hits taught your body to shrug them off.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("armorBonus", 1),
+      tier: 1,
+      column: 0,
+    },
+    {
+      classId: "warrior",
+      slug: "crushing_blows",
+      name: "Crushing Blows",
+      description: "Every swing carries a little more weight.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("damagePercent", 1.5),
+      tier: 1,
+      column: 1,
+    },
+    {
+      classId: "warrior",
+      slug: "stalwart_heart",
+      name: "Stalwart Heart",
+      description: "Your resolve keeps you standing after lesser warriors would fall.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("maxHpPercent", 1.25),
+      tier: 1,
+      column: 2,
+    },
+    {
+      classId: "warrior",
+      slug: "momentum",
+      name: "Momentum",
+      description: "The first swing of Whirlwind is never the last you have in you.",
+      maxRank: 1,
+      effect: extraCharges("warrior_whirlwind"),
+      tier: 2,
+      column: 1,
+      prerequisiteSlug: "crushing_blows",
+    },
+    {
+      classId: "warrior",
+      slug: "battle_fury",
+      name: "Battle Fury",
+      description: "A well-placed Shield Bash leaves you charged with momentum.",
+      maxRank: 1,
+      effect: onCastBuff("warrior_shield_bash", "battleFury"),
+      tier: 2,
+      column: 2,
+      prerequisiteSlug: "stalwart_heart",
+    },
+    // --- Rogue ---
+    {
+      classId: "rogue",
+      slug: "cutthroat",
+      name: "Cutthroat",
+      description: "You don't need much of an opening.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("critChanceBonus", 0.6),
+      tier: 1,
+      column: 0,
+    },
+    {
+      classId: "rogue",
+      slug: "vicious_strikes",
+      name: "Vicious Strikes",
+      description: "Precision over brute force.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("damagePercent", 1.5),
+      tier: 1,
+      column: 1,
+    },
+    {
+      classId: "rogue",
+      slug: "grim_endurance",
+      name: "Grim Endurance",
+      description: "A life of close calls builds a thick skin.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("maxHpPercent", 1.25),
+      tier: 1,
+      column: 2,
+    },
+    {
+      classId: "rogue",
+      slug: "opportunist",
+      name: "Opportunist",
+      description: "One blade finds the opening; the second is already moving.",
+      maxRank: 1,
+      effect: extraCharges("rogue_backstab"),
+      tier: 2,
+      column: 1,
+      prerequisiteSlug: "vicious_strikes",
+    },
+    {
+      classId: "rogue",
+      slug: "fleet_footed",
+      name: "Fleet Footed",
+      description: "Garrote a target and you're already three steps from where they think you are.",
+      maxRank: 1,
+      effect: onCastBuff("rogue_garrote", "shadowStep"),
+      tier: 2,
+      column: 2,
+      prerequisiteSlug: "grim_endurance",
+    },
+    // --- Ranger ---
+    {
+      classId: "ranger",
+      slug: "marksmans_eye",
+      name: "Marksman's Eye",
+      description: "You aim for the gaps others don't even see.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("critChanceBonus", 0.6),
+      tier: 1,
+      column: 0,
+    },
+    {
+      classId: "ranger",
+      slug: "camouflage",
+      name: "Camouflage",
+      description: "Half-seen is half-hit.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("armorBonus", 1),
+      tier: 1,
+      column: 1,
+    },
+    {
+      classId: "ranger",
+      slug: "wilderness_vigor",
+      name: "Wilderness Vigor",
+      description: "Years in the field harden more than just your aim.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("maxHpPercent", 1.25),
+      tier: 1,
+      column: 2,
+    },
+    {
+      classId: "ranger",
+      slug: "quickdraw",
+      name: "Quickdraw",
+      description: "Nocked, drawn, loosed — before they've registered the threat. An Aimed Shot always has one more arrow behind it.",
+      maxRank: 1,
+      effect: extraCharges("ranger_aimed_shot"),
+      tier: 2,
+      column: 1,
+      prerequisiteSlug: "camouflage",
+    },
+    {
+      classId: "ranger",
+      slug: "hunters_focus",
+      name: "Hunter's Focus",
+      description: "The trap springs, and everything after it feels slower.",
+      maxRank: 1,
+      effect: onCastBuff("ranger_explosive_trap", "huntersFocus"),
+      tier: 2,
+      column: 2,
+      prerequisiteSlug: "wilderness_vigor",
+    },
+    // --- Oracle ---
+    {
+      classId: "oracle",
+      slug: "focused_mind",
+      name: "Focused Mind",
+      description: "Clarity finds the weak point in anything.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("critChanceBonus", 0.6),
+      tier: 1,
+      column: 0,
+    },
+    {
+      classId: "oracle",
+      slug: "arcane_insight",
+      name: "Arcane Insight",
+      description: "Understanding is its own weapon.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("damagePercent", 1.5),
+      tier: 1,
+      column: 1,
+    },
+    {
+      classId: "oracle",
+      slug: "vital_current",
+      name: "Vital Current",
+      description: "Life force ebbs and flows — you've learned to hold onto more of it.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("maxHpPercent", 1.25),
+      tier: 1,
+      column: 2,
+    },
+    {
+      classId: "oracle",
+      slug: "swift_rites",
+      name: "Swift Rites",
+      description: "The words come easier with practice — Renew is never fully spent.",
+      maxRank: 1,
+      effect: extraCharges("oracle_renew"),
+      tier: 2,
+      column: 1,
+      prerequisiteSlug: "arcane_insight",
+    },
+    {
+      classId: "oracle",
+      slug: "warding_sigil",
+      name: "Warding Sigil",
+      description: "Smite carves an opening, and a shimmer of protection follows you through it.",
+      maxRank: 1,
+      effect: onCastBuff("oracle_smite", "divineFavor"),
+      tier: 2,
+      column: 2,
+      prerequisiteSlug: "vital_current",
+    },
+    // --- Mage ---
+    {
+      classId: "mage",
+      slug: "piercing_cold",
+      name: "Piercing Cold",
+      description: "Ice finds every crack.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("critChanceBonus", 0.6),
+      tier: 1,
+      column: 0,
+    },
+    {
+      classId: "mage",
+      slug: "arcane_power",
+      name: "Arcane Power",
+      description: "Raw force, barely contained.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("damagePercent", 1.5),
+      tier: 1,
+      column: 1,
+    },
+    {
+      classId: "mage",
+      slug: "mana_shield",
+      name: "Mana Shield",
+      description: "A thin barrier is still a barrier.",
+      maxRank: TALENT_MAX_RANK,
+      effect: statBonus("armorBonus", 1),
+      tier: 1,
+      column: 2,
+    },
+    {
+      classId: "mage",
+      slug: "overchannel",
+      name: "Overchannel",
+      description: "You've stopped waiting for the mana to settle — Frostbolt can be loosed twice before it does.",
+      maxRank: 1,
+      effect: extraCharges("mage_frostbolt"),
+      tier: 2,
+      column: 1,
+      prerequisiteSlug: "arcane_power",
+    },
+    {
+      classId: "mage",
+      slug: "deep_reserves",
+      name: "Deep Reserves",
+      description: "Blizzard draws from a well deeper than you let on.",
+      maxRank: 1,
+      effect: onCastBuff("mage_blizzard", "arcaneSurge"),
+      tier: 2,
+      column: 2,
+      prerequisiteSlug: "mana_shield",
+    },
   ];
-  for (const [classId, slug, name, description, maxRank, effect] of talentDefs) {
-    const id = `${classId}_${slug}`;
+  for (const def of talentDefs) {
+    const id = `${def.classId}_${def.slug}`;
     const row = {
       id,
-      class_id: classId,
-      name,
-      description,
-      max_rank: maxRank,
-      effect,
+      class_id: def.classId,
+      name: def.name,
+      description: def.description,
+      max_rank: def.maxRank,
+      effect: def.effect,
+      tier: def.tier,
+      column_index: def.column,
+      prerequisite_talent_id: def.prerequisiteSlug ? `${def.classId}_${def.prerequisiteSlug}` : null,
     };
     await prisma.talent.upsert({ where: { id }, create: row, update: row });
   }
@@ -523,6 +625,14 @@ async function main() {
   // --- Enemy types ---
   // "boss" is the overworld world-boss; "dungeon_boss" is the dungeon's own mini-boss - same
   // attack patterns, lower HP (was a separately-hardcoded BOSS_MAX_HP=350 before this migration).
+  // Both share the same special-spell rotation (see BossAbilityDef in shared/src/types.ts) -
+  // cycled in order every specialCooldownMs, independent of the phase-2 aoe/enrage/add-spawn
+  // mechanics already on BossStats.
+  const bossSpecialAbilities = [
+    { id: "ashen_nova", name: "Ashen Nova", kind: "raidNova", damage: 14, radius: 6, castTimeMs: 1500 },
+    { id: "wardens_judgment", name: "Warden's Judgment", kind: "singleTargetBurst", damage: 40, castTimeMs: 1800 },
+  ];
+
   const enemyTypes = [
     {
       id: "melee",
@@ -557,6 +667,12 @@ async function main() {
         aoeCooldownMs: 6000,
         aoeCastTimeMs: 1200,
         aoeProjectileSpeed: 8,
+        addEnemyTypeId: "melee",
+        addIntervalMs: 25_000,
+        addCount: 2,
+        maxConcurrentAdds: 4,
+        specialAbilities: bossSpecialAbilities,
+        specialCooldownMs: 20_000,
       },
     },
     {
@@ -576,6 +692,12 @@ async function main() {
         aoeCooldownMs: 6000,
         aoeCastTimeMs: 1200,
         aoeProjectileSpeed: 8,
+        addEnemyTypeId: "melee",
+        addIntervalMs: 25_000,
+        addCount: 2,
+        maxConcurrentAdds: 4,
+        specialAbilities: bossSpecialAbilities,
+        specialCooldownMs: 20_000,
       },
     },
   ];

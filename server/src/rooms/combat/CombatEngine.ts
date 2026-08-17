@@ -5,6 +5,7 @@ import {
   AilmentKind,
   BOSS_ENRAGE_DAMAGE_MULTIPLIER,
   BOSS_PHASE_2_HP_FRACTION,
+  BossAbilityDef,
   BossStats,
   CLASSES,
   CRIT_MULTIPLIER,
@@ -83,6 +84,9 @@ interface PendingPlayerCast {
 interface PendingEnemyCast {
   targetSessionId: string;
   fireAt: number;
+  // Set only for a BossAbilityDef windup (see tickBossSpecialAbilities) - unset means this is
+  // the boss's existing unnamed phase-2 ranged attack, resolved by spawning a projectile as before.
+  abilityId?: string;
 }
 
 export interface CombatState {
@@ -150,6 +154,11 @@ export class CombatEngine {
   // key: enemyId -> (sessionId -> accumulated threat). Server-internal, not synced - only
   // Enemy.aggroTargetId (who currently has the highest threat) is exposed to clients.
   private threatTables = new Map<string, Map<string, number>>();
+  private lastAddSpawnAt = new Map<string, number>(); // key: boss enemyId
+  private activeAddIds = new Map<string, Set<string>>(); // key: boss enemyId -> ids of adds it has spawned
+  private addSeq = 0;
+  private lastSpecialCastAt = new Map<string, number>(); // key: boss enemyId
+  private specialRotationIndex = new Map<string, number>(); // key: boss enemyId -> next index into specialAbilities
 
   constructor(private config: CombatEngineConfig) {}
 
@@ -550,6 +559,10 @@ export class CombatEngine {
     this.pendingEnemyCast.delete(enemyId);
     this.interruptLockoutUntil.delete(enemyId);
     this.threatTables.delete(enemyId);
+    this.lastAddSpawnAt.delete(enemyId);
+    this.activeAddIds.delete(enemyId);
+    this.lastSpecialCastAt.delete(enemyId);
+    this.specialRotationIndex.delete(enemyId);
   }
 
   // --- Boss phase/enrage (derived from already-synced fields, not a separate synced flag -
@@ -570,6 +583,8 @@ export class CombatEngine {
     this.tickPlayerCasts();
     this.tickEnemyAttacks();
     this.tickPendingEnemyCasts();
+    this.tickBossAddSpawns();
+    this.tickBossSpecialAbilities();
     this.tickProjectiles(dt);
   }
 
@@ -710,8 +725,16 @@ export class CombatEngine {
       this.pendingEnemyCast.delete(enemyId);
 
       const enemy = this.state.enemies.get(enemyId);
-      if (enemy) enemy.isCasting = false;
+      if (enemy) {
+        enemy.isCasting = false;
+        enemy.castAbilityName = "";
+      }
       if (!enemy || enemy.hp <= 0) continue;
+
+      if (pending.abilityId) {
+        this.resolveBossAbility(enemy, pending);
+        continue;
+      }
 
       const player = this.state.players.get(pending.targetSessionId);
       if (!player || player.hp <= 0) continue; // target gone, cast fizzles
@@ -742,6 +765,122 @@ export class CombatEngine {
         projectileSpeed,
         enemyId,
       );
+    }
+  }
+
+  // Periodic reinforcement waves - purely opt-in via BossStats.addEnemyTypeId, so a boss with
+  // none of those fields set (every non-boss enemy, and any boss content authored before this
+  // existed) never spawns anything here. Spawned adds are ordinary Enemy entries with no owner
+  // link back to the boss beyond activeAddIds (used only to cap concurrency) - they get threat,
+  // AI, rewards, and rendering entirely for free through the normal enemy code paths.
+  private tickBossAddSpawns() {
+    const now = Date.now();
+
+    for (const [bossId, boss] of this.state.enemies) {
+      if (boss.behavior !== "boss" || boss.hp <= 0) continue;
+      // Only summon while actually in a fight - aggroTargetId is only ever set once the boss
+      // has picked a target (see tickEnemyAttacks), so an untouched boss never stacks up
+      // reinforcements nobody is there to fight.
+      if (boss.aggroTargetId === "") continue;
+      const stats = ENEMY_TYPES[boss.enemyTypeId]?.stats as BossStats | undefined;
+      if (!stats?.addEnemyTypeId || !stats.addIntervalMs || !stats.addCount || !stats.maxConcurrentAdds) continue;
+
+      let liveAdds = this.activeAddIds.get(bossId);
+      if (liveAdds) {
+        for (const addId of liveAdds) {
+          if (!this.state.enemies.has(addId)) liveAdds.delete(addId);
+        }
+      } else {
+        liveAdds = new Set();
+        this.activeAddIds.set(bossId, liveAdds);
+      }
+
+      if (liveAdds.size >= stats.maxConcurrentAdds) continue;
+      const lastSpawn = this.lastAddSpawnAt.get(bossId);
+      if (lastSpawn === undefined) {
+        // First tick this boss has been seen engaged - defer the first wave a full interval
+        // out from the pull instead of dumping adds in immediately.
+        this.lastAddSpawnAt.set(bossId, now);
+        continue;
+      }
+      if (now - lastSpawn < stats.addIntervalMs) continue;
+
+      const addType = ENEMY_TYPES[stats.addEnemyTypeId];
+      if (!addType) continue; // content deleted after this boss was authored
+
+      for (let i = 0; i < stats.addCount && liveAdds.size < stats.maxConcurrentAdds; i++) {
+        const add = new Enemy();
+        add.enemyTypeId = stats.addEnemyTypeId;
+        add.behavior = addType.behavior;
+        add.x = boss.x + (Math.random() * 4 - 2);
+        add.z = boss.z + (Math.random() * 4 - 2);
+        add.hp = addType.stats.maxHp;
+        add.maxHp = addType.stats.maxHp;
+
+        const addId = `add-${bossId}-${this.addSeq++}`;
+        this.state.enemies.set(addId, add);
+        liveAdds.add(addId);
+      }
+      this.lastAddSpawnAt.set(bossId, now);
+    }
+  }
+
+  // Special-spell rotation - purely opt-in via BossStats.specialAbilities/specialCooldownMs, so
+  // a boss without both set never uses this. Shares the same pendingEnemyCast/isCasting windup
+  // slot as the existing phase-2 attack (a boss only ever winds up one thing at a time - whichever
+  // cooldown comes due first claims the slot, the other just fires as soon as it's free next
+  // tick), which also means the existing interrupt mechanic (tryInterrupt) works on these for
+  // free with no extra code.
+  private tickBossSpecialAbilities() {
+    const now = Date.now();
+
+    for (const [bossId, boss] of this.state.enemies) {
+      if (boss.behavior !== "boss" || boss.hp <= 0) continue;
+      if (boss.aggroTargetId === "") continue; // not engaged yet - see tickBossAddSpawns for the same reasoning
+      if (this.pendingEnemyCast.has(bossId)) continue; // already winding something up
+      if ((this.interruptLockoutUntil.get(bossId) ?? 0) > now) continue;
+
+      const stats = ENEMY_TYPES[boss.enemyTypeId]?.stats as BossStats | undefined;
+      if (!stats?.specialAbilities?.length || !stats.specialCooldownMs) continue;
+
+      const lastCast = this.lastSpecialCastAt.get(bossId);
+      if (lastCast === undefined) {
+        // First tick this boss has been seen engaged - defer the first cast a full cooldown out
+        // from the pull instead of firing immediately (mirrors tickBossAddSpawns).
+        this.lastSpecialCastAt.set(bossId, now);
+        continue;
+      }
+      if (now - lastCast < stats.specialCooldownMs) continue;
+
+      const index = this.specialRotationIndex.get(bossId) ?? 0;
+      const ability = stats.specialAbilities[index % stats.specialAbilities.length];
+      this.specialRotationIndex.set(bossId, index + 1);
+      this.lastSpecialCastAt.set(bossId, now);
+
+      boss.isCasting = true;
+      boss.castAbilityName = ability.name;
+      this.pendingEnemyCast.set(bossId, {
+        targetSessionId: boss.aggroTargetId,
+        fireAt: now + ability.castTimeMs,
+        abilityId: ability.id,
+      });
+    }
+  }
+
+  private resolveBossAbility(enemy: Enemy, pending: PendingEnemyCast) {
+    const stats = ENEMY_TYPES[enemy.enemyTypeId]?.stats as BossStats | undefined;
+    const ability = stats?.specialAbilities?.find((a) => a.id === pending.abilityId);
+    if (!ability) return; // content deleted mid-windup - cast fizzles
+
+    const enrageMultiplier = this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1;
+
+    if (ability.kind === "raidNova") {
+      forEachAlive(this.state.players, enemy.x, enemy.z, ability.radius, (player, sessionId) => {
+        this.damagePlayer(sessionId, player, ability.damage * enrageMultiplier);
+      });
+    } else if (ability.kind === "singleTargetBurst") {
+      const player = this.state.players.get(pending.targetSessionId);
+      if (player && player.hp > 0) this.damagePlayer(pending.targetSessionId, player, ability.damage * enrageMultiplier);
     }
   }
 

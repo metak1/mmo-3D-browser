@@ -226,6 +226,93 @@ td {
   font-size: 12px;
 }
 
+.talent-tree-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.admin-talent-tree {
+  position: relative;
+  display: grid;
+  gap: 24px 16px;
+  padding: 8px 4px 24px;
+}
+.admin-talent-tree-empty {
+  grid-column: 1 / -1;
+  color: #a7b0c8;
+}
+.admin-talent-tree-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+.admin-talent-tree-lines line {
+  stroke: #7d89ad;
+  stroke-width: 2;
+}
+.admin-talent-node {
+  position: relative;
+  z-index: 1;
+}
+.admin-talent-node-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  height: 100%;
+  padding: 6px 8px;
+  border-radius: 10px;
+  text-align: center;
+  overflow: hidden;
+}
+.admin-talent-node-body:hover {
+  border-color: #c9a63c;
+  background: rgba(40, 36, 20, 0.5);
+}
+.admin-talent-node-name {
+  font-weight: 600;
+  font-size: 12px;
+}
+.admin-talent-node-id {
+  font-size: 10px;
+  color: #a7b0c8;
+}
+.admin-talent-node-add,
+.admin-talent-node-delete {
+  position: absolute;
+  top: -8px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+}
+.admin-talent-node-add {
+  right: -8px;
+}
+.admin-talent-node-delete {
+  left: -8px;
+  color: #e0503c;
+  border-color: #e0503c;
+}
+.admin-talent-node-delete:hover {
+  background: rgba(224, 80, 60, 0.2);
+}
+.admin-talent-tree-add-root {
+  margin-top: 4px;
+}
+
 .multiselect {
   display: flex;
   flex-direction: column;

@@ -21,6 +21,9 @@ const talentSchema = z.object({
   description: z.string().min(1).max(255),
   max_rank: z.number().int().positive(),
   effect: talentEffectSchema,
+  tier: z.number().int().positive(),
+  column_index: z.number().int().nonnegative(),
+  prerequisite_talent_id: z.string().min(1).max(64).nullable().optional(),
 });
 const updateSchema = talentSchema.omit({ id: true }).partial();
 

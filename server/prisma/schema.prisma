@@ -105,13 +105,18 @@ model Item {
 }
 
 model Talent {
-  id          String    @id @db.VarChar(64)
-  class_id    String    @db.VarChar(32)
-  name        String    @db.VarChar(64)
-  description String    @db.VarChar(255)
-  max_rank    Int
-  effect      Json // TalentEffect union - see shared/src/types.ts
-  game_class  GameClass @relation(fields: [class_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id                      String    @id @db.VarChar(64)
+  class_id                String    @db.VarChar(32)
+  name                    String    @db.VarChar(64)
+  description             String    @db.VarChar(255)
+  max_rank                Int
+  effect                  Json // TalentEffect union - see shared/src/types.ts
+  tier                    Int       @default(1) // 1-based row in the tree
+  column_index            Int       @default(0) // 0-based column within that row
+  prerequisite_talent_id  String?   @db.VarChar(64)
+  game_class              GameClass @relation(fields: [class_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  prerequisite            Talent?   @relation("TalentPrerequisite", fields: [prerequisite_talent_id], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  unlocks                 Talent[]  @relation("TalentPrerequisite")
 
   @@map("talents")
 }

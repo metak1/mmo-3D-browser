@@ -7,14 +7,15 @@ type RowData = Record<string, unknown>;
 interface Props {
   schema: EntitySchema;
   initial?: RowData; // undefined = creating new
+  defaultValues?: RowData; // create-mode only: seeds field values (e.g. from a "+" in a tree view) without switching to edit mode
   onSubmit: (data: RowData) => void | Promise<void>;
   onCancel: () => void;
   submitting: boolean;
   error: string | null;
 }
 
-export function EntityForm({ schema, initial, onSubmit, onCancel, submitting, error }: Props) {
-  const [values, setValues] = useState<RowData>(() => initial ?? {});
+export function EntityForm({ schema, initial, defaultValues, onSubmit, onCancel, submitting, error }: Props) {
+  const [values, setValues] = useState<RowData>(() => initial ?? defaultValues ?? {});
   const [referenceOptions, setReferenceOptions] = useState<Record<string, RowData[]>>({});
   const [jsonErrors, setJsonErrors] = useState<Record<string, string>>({});
   const isEditing = initial !== undefined;

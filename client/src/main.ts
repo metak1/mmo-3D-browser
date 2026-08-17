@@ -44,6 +44,7 @@ import {
   QuestDef,
   RARITY_COLOR,
   RARITY_MULTIPLIER,
+  RefundTalentMessage,
   resolveStructureCollisions,
   SPELLS,
   SellItemMessage,
@@ -51,6 +52,7 @@ import {
   SpendTalentMessage,
   STRUCTURES,
   TALENTS,
+  TalentDef,
   TradeOfferMessage,
   TradeRequestMessage,
   TradeRespondMessage,
@@ -63,9 +65,11 @@ import {
   getEffectiveStats,
   getSpellCharges,
   getTerrainHeight,
+  isTalentUnlocked,
   xpForNextLevel,
 } from "@mmo/shared";
 import { GameScene } from "./game/Scene";
+import { AoeCircle } from "./game/AoeCircle";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
 import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
@@ -107,6 +111,7 @@ const targetHpFill = document.querySelector<HTMLElement>("[data-target-hp-fill]"
 const targetHpLabel = document.querySelector<HTMLElement>("[data-target-hp-label]")!;
 const targetCastBarEl = document.querySelector<HTMLElement>("[data-target-cast-bar]")!;
 const targetCastFill = document.querySelector<HTMLElement>("[data-target-cast-fill]")!;
+const targetCastNameEl = document.querySelector<HTMLElement>("[data-target-cast-name]")!;
 const targetEnrageEl = document.querySelector<HTMLElement>("[data-target-enrage]")!;
 
 const partyPanel = document.getElementById("party-panel")!;
@@ -187,6 +192,13 @@ const itemTooltipNameEl = document.querySelector<HTMLElement>("[data-tooltip-nam
 const itemTooltipSlotEl = document.querySelector<HTMLElement>("[data-tooltip-slot]")!;
 const itemTooltipStatsEl = document.querySelector<HTMLElement>("[data-tooltip-stats]")!;
 const itemTooltipDescEl = document.querySelector<HTMLElement>("[data-tooltip-desc]")!;
+
+const talentTooltipEl = document.getElementById("talent-tooltip")!;
+const talentTooltipNameEl = document.querySelector<HTMLElement>("[data-talent-tooltip-name]")!;
+const talentTooltipRankEl = document.querySelector<HTMLElement>("[data-talent-tooltip-rank]")!;
+const talentTooltipDescEl = document.querySelector<HTMLElement>("[data-talent-tooltip-desc]")!;
+const talentTooltipLockEl = document.querySelector<HTMLElement>("[data-talent-tooltip-lock]")!;
+const talentTooltipHintEl = document.querySelector<HTMLElement>("[data-talent-tooltip-hint]")!;
 
 const contextMenuEl = document.getElementById("context-menu")!;
 const contextMenuListEl = document.getElementById("context-menu-list")!;
@@ -281,6 +293,30 @@ function showItemTooltip(token: string, event: MouseEvent) {
 
 function hideItemTooltip() {
   itemTooltipEl.hidden = true;
+}
+
+function positionTalentTooltip(event: MouseEvent) {
+  const offset = 16;
+  const maxLeft = window.innerWidth - talentTooltipEl.offsetWidth - 8;
+  const maxTop = window.innerHeight - talentTooltipEl.offsetHeight - 8;
+  talentTooltipEl.style.left = `${Math.min(event.clientX + offset, Math.max(8, maxLeft))}px`;
+  talentTooltipEl.style.top = `${Math.min(event.clientY + offset, Math.max(8, maxTop))}px`;
+}
+
+function showTalentTooltip(def: TalentDef, rank: number, locked: boolean, event: MouseEvent) {
+  talentTooltipNameEl.textContent = def.name;
+  talentTooltipRankEl.textContent = `Rank ${rank} / ${def.maxRank}`;
+  talentTooltipDescEl.textContent = def.description;
+  const prereq = def.prerequisiteTalentId ? TALENTS[def.prerequisiteTalentId] : undefined;
+  talentTooltipLockEl.textContent = locked && prereq ? `Requires 1 point in ${prereq.name}` : "";
+  talentTooltipHintEl.textContent = rank > 0 ? "Right-click to remove a point" : "";
+
+  talentTooltipEl.hidden = false;
+  positionTalentTooltip(event);
+}
+
+function hideTalentTooltip() {
+  talentTooltipEl.hidden = true;
 }
 
 // Inventory slots are rebuilt on every render, so a plain listener bound at creation
@@ -396,33 +432,78 @@ function renderInventory(player: PlayerStatsSnapshot) {
   }
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// A real prerequisite tree (see shared/src/types.ts's isTalentUnlocked): nodes are grid-positioned
+// by tier/column, locked ones are greyed out and unclickable until their prerequisite has a point
+// in it, and an SVG overlay draws a connector from every node to its prerequisite. The overlay is
+// rebuilt from scratch alongside the nodes every render, then measured against their actual laid-
+// out positions (getBoundingClientRect, relative to talentListEl's own box) once they're in the
+// DOM - simpler than hand-computing tier/column pixel math, and stays correct if the grid's sizing
+// ever changes.
 function renderTalents(player: PlayerStatsSnapshot) {
   talentPointsEl.textContent = `${player.talentPoints} point${player.talentPoints === 1 ? "" : "s"}`;
 
   const ranks = new Map(player.talentRanks);
-  talentListEl.innerHTML = "";
-  for (const def of Object.values(TALENTS)) {
-    if (def.classId !== player.classId) continue;
+  const defs = Object.values(TALENTS).filter((def) => def.classId === player.classId);
 
+  talentListEl.innerHTML = "";
+  const linesEl = document.createElementNS(SVG_NS, "svg");
+  linesEl.setAttribute("class", "talent-tree-lines");
+  talentListEl.appendChild(linesEl);
+
+  for (const def of defs) {
     const rank = ranks.get(def.id) ?? 0;
     const maxed = rank >= def.maxRank;
+    const unlocked = isTalentUnlocked(def.id, player.talentRanks);
+    const locked = !unlocked && rank <= 0;
 
-    const card = document.createElement("button");
-    card.className = maxed ? "talent-card maxed" : "talent-card";
-    card.innerHTML = `
-      <div class="talent-card-top">
-        <span>${def.name}</span>
-        <span class="talent-rank">${rank} / ${def.maxRank}</span>
-      </div>
-      <span class="talent-desc">${def.description}</span>
+    const node = document.createElement("button");
+    node.dataset.talentId = def.id;
+    node.style.gridRow = String(def.tier);
+    node.style.gridColumn = String(def.column + 1);
+    node.className = "talent-node" + (locked ? " locked" : maxed ? " maxed" : rank > 0 ? " ranked" : "");
+    node.innerHTML = `
+      <span class="talent-node-name">${def.name}</span>
+      <span class="talent-node-rank">${rank} / ${def.maxRank}</span>
     `;
-    if (!maxed) {
-      card.addEventListener("click", () => {
+    if (!locked && !maxed) {
+      node.addEventListener("click", () => {
         const message: SpendTalentMessage = { talentId: def.id };
         activeRoom?.send("spend_talent", message);
       });
     }
-    talentListEl.appendChild(card);
+    if (rank > 0) {
+      node.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        const message: RefundTalentMessage = { talentId: def.id };
+        activeRoom?.send("refund_talent", message);
+      });
+    }
+    node.addEventListener("mouseenter", (event) => showTalentTooltip(def, rank, locked, event as MouseEvent));
+    node.addEventListener("mousemove", (event) => positionTalentTooltip(event as MouseEvent));
+    node.addEventListener("mouseleave", hideTalentTooltip);
+    talentListEl.appendChild(node);
+  }
+
+  const containerRect = talentListEl.getBoundingClientRect();
+  linesEl.setAttribute("width", String(containerRect.width));
+  linesEl.setAttribute("height", String(containerRect.height));
+  for (const def of defs) {
+    if (!def.prerequisiteTalentId) continue;
+    const parentEl = talentListEl.querySelector<HTMLElement>(`[data-talent-id="${def.prerequisiteTalentId}"]`);
+    const childEl = talentListEl.querySelector<HTMLElement>(`[data-talent-id="${def.id}"]`);
+    if (!parentEl || !childEl) continue;
+
+    const p = parentEl.getBoundingClientRect();
+    const c = childEl.getBoundingClientRect();
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", String(p.left + p.width / 2 - containerRect.left));
+    line.setAttribute("y1", String(p.bottom - containerRect.top));
+    line.setAttribute("x2", String(c.left + c.width / 2 - containerRect.left));
+    line.setAttribute("y2", String(c.top - containerRect.top));
+    line.setAttribute("class", (ranks.get(def.prerequisiteTalentId) ?? 0) > 0 ? "talent-tree-line unlocked" : "talent-tree-line");
+    linesEl.appendChild(line);
   }
 }
 
@@ -496,6 +577,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       isCasting: boolean;
       enragesAt: number;
       aggroTargetId: string;
+      castAbilityName: string;
     }
   >();
   const playerSchemaById = new Map<
@@ -549,6 +631,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     portal.setPosition(PORTAL_POSITION.x, PORTAL_POSITION.z);
     portal.addTo(gameScene.scene);
   }
+
+  // Follows the cursor while a ground-targeted spell (Explosive Trap, Blizzard) is pending
+  // placement - see the "click" listener below for how pendingGroundTargetSpellId drives it.
+  const groundTargetPreview = new AoeCircle();
+  gameScene.scene.add(groundTargetPreview.mesh);
 
   let room: Room | undefined;
   let localSessionId: string | null = null;
@@ -854,6 +941,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         targetCastActive = true;
         targetCastStartRef = performance.now();
         targetCastBarEl.hidden = false;
+        targetCastNameEl.textContent = enemySchema.castAbilityName || "Casting…";
       }
       return;
     }
@@ -869,6 +957,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         targetCastActive = true;
         targetCastStartRef = performance.now();
         targetCastBarEl.hidden = false;
+        targetCastNameEl.textContent = "Casting…";
       }
       return;
     }
@@ -908,6 +997,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     if (spell.targetType === "ground") {
       pendingGroundTargetSpellId = spellId;
       container.classList.add("ground-target-pending");
+      groundTargetPreview.setRadius(spell.aoeRadius ?? 0);
+      groundTargetPreview.show();
       return;
     }
 
@@ -926,6 +1017,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     if (!pendingGroundTargetSpellId) return;
     pendingGroundTargetSpellId = null;
     container.classList.remove("ground-target-pending");
+    groundTargetPreview.hide();
   }
 
   function renderLootWindow() {
@@ -1337,7 +1429,13 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
     else if (e.code === "KeyP") characterPanel.hidden = !characterPanel.hidden;
     else if (e.code === "KeyI") inventoryPanel.hidden = !inventoryPanel.hidden;
-    else if (e.code === "KeyK") talentPanel.hidden = !talentPanel.hidden;
+    else if (e.code === "KeyK") {
+      talentPanel.hidden = !talentPanel.hidden;
+      // The tree's SVG connector lines are measured via getBoundingClientRect, which reads all
+      // zeroes while the panel is display:none - re-render on open so lines drawn during any
+      // earlier (hidden) pass get replaced with correctly-measured ones.
+      if (!talentPanel.hidden && localPlayerSchema) renderTalents(localPlayerSchema);
+    }
     else if (e.code === "KeyL") questLogPanel.hidden = !questLogPanel.hidden;
   });
 
@@ -1403,6 +1501,26 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
 
     setTarget((obj?.userData.enemyId as string) ?? (obj?.userData.sessionId as string) ?? null);
+  });
+
+  // Keeps groundTargetPreview under the cursor while a ground-targeted spell is pending
+  // placement - same ray/plane/clamp already used by the click handler's own ground-target branch.
+  gameScene.renderer.domElement.addEventListener("mousemove", (event) => {
+    if (!pendingGroundTargetSpellId) return;
+
+    const rect = gameScene.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(ndc, gameScene.camera);
+
+    const hitPoint = new THREE.Vector3();
+    if (raycaster.ray.intersectPlane(groundPlane, hitPoint)) {
+      const x = clamp(hitPoint.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      const z = clamp(hitPoint.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      groundTargetPreview.setPosition(x, z);
+    }
   });
 
   // Right-click opens the player-actions menu (Invite to Party today, more later): right-click
@@ -1578,6 +1696,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
             targetCastActive = true;
             targetCastStartRef = performance.now();
             targetCastBarEl.hidden = false;
+            targetCastNameEl.textContent = "Casting…";
           } else if (player.castSpellId === "" && targetCastActive) {
             targetCastActive = false;
             targetCastBarEl.hidden = true;
@@ -1657,6 +1776,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
             targetCastActive = true;
             targetCastStartRef = performance.now();
             targetCastBarEl.hidden = false;
+            targetCastNameEl.textContent = enemy.castAbilityName || "Casting…";
           } else if (!enemy.isCasting && targetCastActive) {
             targetCastActive = false;
             targetCastBarEl.hidden = true;
@@ -1738,6 +1858,44 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
   const clock = new THREE.Clock();
 
+  // Drives each boss's AoE telegraph purely from already-loaded state (enemySchemaById +
+  // ENEMY_TYPES content) - no extra synced fields needed beyond the existing isCasting/
+  // castAbilityName/aggroTargetId. The phase-2 splash (unnamed cast) centers on the current
+  // target's live position rather than the boss's own, which is why this can't just live inside
+  // EnemyAvatar.update() - it needs to see other avatars, not just its own transform.
+  function updateEnemyTelegraph(enemyId: string, avatar: EnemyAvatar) {
+    const schema = enemySchemaById.get(enemyId);
+    if (!schema?.isCasting || schema.behavior !== "boss") {
+      avatar.setTelegraph(false, 0, 0, 0);
+      return;
+    }
+
+    const stats = ENEMY_TYPES[schema.enemyTypeId]?.stats as BossStats | undefined;
+    if (!stats) {
+      avatar.setTelegraph(false, 0, 0, 0);
+      return;
+    }
+
+    if (schema.castAbilityName) {
+      const ability = stats.specialAbilities?.find((a) => a.name === schema.castAbilityName);
+      if (ability?.kind === "raidNova") {
+        avatar.setTelegraph(true, avatar.group.position.x, avatar.group.position.z, ability.radius);
+        return;
+      }
+      avatar.setTelegraph(false, 0, 0, 0);
+      return;
+    }
+
+    if (stats.aoeRadius && schema.aggroTargetId) {
+      const targetAvatar = avatars.get(schema.aggroTargetId);
+      if (targetAvatar) {
+        avatar.setTelegraph(true, targetAvatar.group.position.x, targetAvatar.group.position.z, stats.aoeRadius);
+        return;
+      }
+    }
+    avatar.setTelegraph(false, 0, 0, 0);
+  }
+
   function animate() {
     requestAnimationFrame(animate);
     const dt = Math.min(clock.getDelta(), 0.1);
@@ -1787,7 +1945,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       avatar.update(dt);
     }
 
-    for (const avatar of enemies.values()) avatar.update(dt);
+    for (const [enemyId, avatar] of enemies) {
+      avatar.update(dt);
+      updateEnemyTelegraph(enemyId, avatar);
+    }
     for (const avatar of npcs.values()) avatar.update(dt);
     for (const avatar of projectiles.values()) avatar.update();
     portal?.update(dt);

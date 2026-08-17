@@ -22,9 +22,18 @@ const PROP_COLOR = 0x3d2a1a;
 const FADE_MIN_OPACITY = 0.12;
 const FADE_MARGIN = 3;
 
+// A 4-sided ConeGeometry approximates a pyramid, but its `radius` is the distance from the
+// center to a *vertex*, not to the middle of a face - after the 45° rotation that aligns those
+// faces with the box's walls, each face sits at `radius * cos(45°)` from center, not at `radius`.
+// Without the compensating *Math.SQRT2 below, the roof's flat sides land noticeably inside the
+// wall footprint (and its corners short of the wall corners too), so the walls poke out from
+// under it instead of the roof properly capping/overhanging them.
+const ROOF_OVERHANG = 1.15;
+
 function pyramidRoof(width: number, depth: number, height: number): { mesh: THREE.Mesh; material: THREE.MeshStandardMaterial } {
   const material = new THREE.MeshStandardMaterial({ color: ROOF_COLOR, transparent: true });
-  const mesh = new THREE.Mesh(new THREE.ConeGeometry((Math.max(width, depth) / 2) * 1.15, height, 4), material);
+  const radius = (Math.max(width, depth) / 2) * ROOF_OVERHANG * Math.SQRT2;
+  const mesh = new THREE.Mesh(new THREE.ConeGeometry(radius, height, 4), material);
   mesh.rotation.y = Math.PI / 4;
   return { mesh, material };
 }

@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { EnemyBehavior, getTerrainHeight } from "@mmo/shared";
+import { AoeCircle } from "./AoeCircle";
 import { HealthBar } from "./HealthBar";
 import { fitHeight, ModelAnimator, spawnModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
@@ -42,6 +43,7 @@ const BOSS_HEALTH_BAR_Y_OFFSET = 2.6; // clears the boss's taller body; regular 
 export class EnemyAvatar {
   readonly group = new THREE.Group();
   readonly healthBar: HealthBar;
+  readonly telegraph = new AoeCircle();
   private readonly selectionRing: THREE.Mesh;
   private readonly isBoss: boolean;
   private readonly kind: EnemyBehavior;
@@ -98,15 +100,31 @@ export class EnemyAvatar {
     this.healthBar.setAggroColor(hasAggro);
   }
 
+  // Marks the ground area this enemy is about to hit while winding up an AoE ability - not
+  // necessarily centered on the enemy itself (see main.ts's updateEnemyTelegraph, which centers
+  // the existing phase-2 splash on its target instead), so this takes an explicit position rather
+  // than always following this.group.
+  setTelegraph(active: boolean, x: number, z: number, radius: number) {
+    if (!active) {
+      this.telegraph.hide();
+      return;
+    }
+    this.telegraph.setRadius(radius);
+    this.telegraph.setPosition(x, z);
+    this.telegraph.show();
+  }
+
   addTo(scene: THREE.Scene) {
     scene.add(this.group);
     scene.add(this.healthBar.group);
+    scene.add(this.telegraph.mesh);
     this.syncHealthBarPosition();
   }
 
   removeFrom(scene: THREE.Scene) {
     scene.remove(this.group);
     scene.remove(this.healthBar.group);
+    scene.remove(this.telegraph.mesh);
   }
 
   snapToTarget() {

@@ -466,9 +466,96 @@
         left: auto;
         right: 12px;
         top: 300px;
-        width: 260px;
+        width: 300px;
       }
       #talent-panel[hidden] {
+        display: none;
+      }
+      .talent-tree-wrap {
+        margin-top: 6px;
+        max-height: 360px;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+      /* A real prerequisite tree, not a flat list: nodes are grid-positioned by their
+         tier (row) and column, and .talent-tree-line SVG elements (drawn in JS, since their
+         endpoints depend on measured node positions) connect a node to the prerequisite it
+         needs ranked before it unlocks - mirrors modern WoW's talent tree connections. */
+      .talent-tree {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-auto-rows: 72px;
+        gap: 14px 10px;
+        padding: 6px 22px;
+      }
+      .talent-tree-lines {
+        position: absolute;
+        top: 0;
+        left: 0;
+        pointer-events: none;
+        overflow: visible;
+      }
+      .talent-tree-line {
+        stroke: #7d89ad;
+        stroke-width: 3;
+      }
+      .talent-tree-line.unlocked {
+        stroke: #c9a63c;
+      }
+      .talent-node {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        padding: 4px 3px;
+        border: 2px solid #4a5578;
+        border-radius: 10px;
+        background: rgba(0, 0, 0, 0.35);
+        color: #e6e6e6;
+        font: inherit;
+        text-align: center;
+        cursor: pointer;
+      }
+      .talent-node:hover:not(.locked):not(.maxed) {
+        border-color: #c9a63c;
+        background: rgba(40, 36, 20, 0.5);
+      }
+      .talent-node.ranked {
+        border-color: #4fd166;
+      }
+      .talent-node.maxed {
+        border-color: #c9a63c;
+        background: rgba(60, 50, 20, 0.45);
+        cursor: default;
+      }
+      .talent-node.locked {
+        cursor: not-allowed;
+        filter: grayscale(1);
+        opacity: 0.55;
+      }
+      .talent-node-name {
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 1.15;
+      }
+      .talent-node-rank {
+        font-size: 10px;
+        color: #c9a63c;
+      }
+      .talent-tooltip-lock {
+        color: #e0503c !important;
+      }
+      .talent-tooltip-lock:empty {
+        display: none;
+      }
+      .talent-tooltip-hint {
+        color: #6f7896 !important;
+      }
+      .talent-tooltip-hint:empty {
         display: none;
       }
       .talent-list {
@@ -954,7 +1041,17 @@
     <div id="talent-panel" class="unit-panel" hidden>
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <div class="unit-name">Talents <span class="level-tag" data-talent-points></span></div>
-      <div class="talent-list" id="talent-list"></div>
+      <div class="talent-tree-wrap">
+        <div class="talent-tree" id="talent-list"></div>
+      </div>
+    </div>
+
+    <div id="talent-tooltip" class="item-tooltip" hidden>
+      <div class="item-tooltip-name" data-talent-tooltip-name></div>
+      <div class="item-tooltip-slot" data-talent-tooltip-rank></div>
+      <div class="item-tooltip-desc" data-talent-tooltip-desc></div>
+      <div class="item-tooltip-slot talent-tooltip-lock" data-talent-tooltip-lock></div>
+      <div class="item-tooltip-slot talent-tooltip-hint" data-talent-tooltip-hint></div>
     </div>
 
     <div id="npc-dialogue-panel" class="unit-panel" hidden>
@@ -1009,7 +1106,7 @@
       </div>
       <div class="bar cast-bar" data-target-cast-bar hidden>
         <div class="bar-fill" data-target-cast-fill></div>
-        <span class="bar-label">Casting…</span>
+        <span class="bar-label" data-target-cast-name>Casting…</span>
       </div>
       <div class="ailment-tag" data-target-enrage hidden></div>
     </div>

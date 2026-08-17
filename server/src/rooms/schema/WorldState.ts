@@ -53,6 +53,7 @@ export class Enemy extends Schema {
   @type("boolean") isCasting = false;
   @type("number") enragesAt = 0; // epoch ms; 0 = boss not yet engaged, set on first damage taken
   @type("string") aggroTargetId = ""; // sessionId of whoever this enemy is currently attacking, "" if not engaged yet
+  @type("string") castAbilityName = ""; // display name while isCasting, only set for a named special-spell windup (see BossAbilityDef); "" for melee/the unnamed phase-2 attack
 }
 
 export class Projectile extends Schema {

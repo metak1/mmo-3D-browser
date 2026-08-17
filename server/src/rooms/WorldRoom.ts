@@ -29,6 +29,7 @@ import {
   PartyRespondMessage,
   QUESTS,
   RARITY_MULTIPLIER,
+  RefundTalentMessage,
   SPAWN_POINTS,
   SellItemMessage,
   SpendTalentMessage,
@@ -43,6 +44,8 @@ import {
   CastMessage,
   decodeItemToken,
   encodeItemToken,
+  hasRankedDependents,
+  isTalentUnlocked,
   resolveClassId,
   rollRarity,
 } from "@mmo/shared";
@@ -93,6 +96,7 @@ export class WorldRoom extends Room<WorldState> {
     this.onMessage("equip", (client, message: EquipMessage) => this.handleEquip(client, message));
     this.onMessage("unequip", (client, message: UnequipMessage) => this.handleUnequip(client, message));
     this.onMessage("spend_talent", (client, message: SpendTalentMessage) => this.handleSpendTalent(client, message));
+    this.onMessage("refund_talent", (client, message: RefundTalentMessage) => this.handleRefundTalent(client, message));
     this.onMessage("accept_quest", (client, message: AcceptQuestMessage) => this.handleAcceptQuest(client, message));
     this.onMessage("turn_in_quest", (client, message: TurnInQuestMessage) => this.handleTurnInQuest(client, message));
     this.onMessage("buy_item", (client, message: BuyItemMessage) => this.handleBuyItem(client, message));
@@ -596,12 +600,32 @@ export class WorldRoom extends Room<WorldState> {
 
     const def = TALENTS[message.talentId];
     if (!def || def.classId !== resolveClassId(player.classId)) return;
+    if (!isTalentUnlocked(def.id, player.talentRanks)) return;
 
     const currentRank = player.talentRanks.get(def.id) ?? 0;
     if (currentRank >= def.maxRank) return;
 
     player.talentRanks.set(def.id, currentRank + 1);
     player.talentPoints -= 1;
+    this.combat.recomputeMaxHp(player);
+  }
+
+  private handleRefundTalent(client: Client, message: RefundTalentMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const def = TALENTS[message.talentId];
+    if (!def || def.classId !== resolveClassId(player.classId)) return;
+
+    const currentRank = player.talentRanks.get(def.id) ?? 0;
+    if (currentRank <= 0) return;
+    // Dropping to 0 would strand any already-spent talent that requires this one as its
+    // prerequisite (unlocked node with a point in it, but the requirement no longer met) -
+    // refuse rather than silently invalidating the dependent.
+    if (currentRank === 1 && hasRankedDependents(def.id, player.talentRanks)) return;
+
+    player.talentRanks.set(def.id, currentRank - 1);
+    player.talentPoints += 1;
     this.combat.recomputeMaxHp(player);
   }
 

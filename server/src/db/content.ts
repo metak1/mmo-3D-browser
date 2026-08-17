@@ -99,6 +99,9 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     description: t.description,
     maxRank: t.max_rank,
     effect: t.effect as TalentDef["effect"],
+    tier: t.tier,
+    column: t.column_index,
+    prerequisiteTalentId: t.prerequisite_talent_id ?? undefined,
   }));
 
   const enemyTypes: EnemyTypeDef[] = enemyTypeRows.map((e) => ({

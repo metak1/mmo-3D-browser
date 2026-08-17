@@ -74,6 +74,15 @@ export const ENTITIES: EntitySchema[] = [
       { key: "description", label: "Description", type: "textarea" },
       { key: "max_rank", label: "Max Rank", type: "number" },
       { key: "effect", label: "Effect", type: "json" },
+      { key: "tier", label: "Tier (tree row, 1-based)", type: "number" },
+      { key: "column_index", label: "Column (0-based, within the row)", type: "number" },
+      {
+        key: "prerequisite_talent_id",
+        label: "Prerequisite Talent (must have 1+ rank to unlock this node)",
+        type: "reference",
+        referenceEntity: "talents",
+        optional: true,
+      },
     ],
   },
   {

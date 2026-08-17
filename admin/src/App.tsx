@@ -3,6 +3,7 @@ import { getToken, me, PublicUser, setToken } from "./api";
 import { Login } from "./Login";
 import { ENTITIES } from "./entities";
 import { EntityTable } from "./EntityTable";
+import { TalentTreeEditor } from "./TalentTreeEditor";
 import { MapEditor } from "./mapEditor/MapEditor";
 
 const MAP_EDITOR_KEY = "__map_editor__";
@@ -66,7 +67,15 @@ export function App() {
         </button>
       </nav>
       <main className={schema ? "content" : "content content-full"}>
-        {schema ? <EntityTable key={schema.key} schema={schema} /> : <MapEditor />}
+        {schema ? (
+          schema.key === "talents" ? (
+            <TalentTreeEditor key={schema.key} schema={schema} />
+          ) : (
+            <EntityTable key={schema.key} schema={schema} />
+          )
+        ) : (
+          <MapEditor />
+        )}
       </main>
     </div>
   );
