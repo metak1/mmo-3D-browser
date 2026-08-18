@@ -95,3 +95,73 @@ export function makeDraggable(panel: HTMLElement, key: string) {
     localStorage.setItem(posKey, JSON.stringify(pos));
   });
 }
+
+interface StoredSize {
+  width: number;
+  height: number;
+}
+
+// A custom resize handle instead of CSS `resize: both`: the native handle renders inside the
+// panel's own border-box corner, which sits underneath makeDraggable's mousedown listener with
+// no distinct element to exclude it by - mousedown there was being claimed as a drag (moving the
+// panel) before the browser's own resize gesture ever got a chance to start. A real element with
+// its own `data-no-drag` sidesteps that ambiguity entirely, and gives explicit min/max control.
+export function makeResizable(
+  panel: HTMLElement,
+  handle: HTMLElement,
+  key: string,
+  minWidth: number,
+  minHeight: number,
+) {
+  const sizeKey = `${STORAGE_PREFIX}${key}:size`;
+
+  const savedSize = localStorage.getItem(sizeKey);
+  if (savedSize) {
+    try {
+      const size: StoredSize = JSON.parse(savedSize);
+      panel.style.width = `${size.width}px`;
+      panel.style.height = `${size.height}px`;
+    } catch {
+      // ignore malformed storage, fall back to CSS default
+    }
+  }
+
+  let resizing = false;
+  let startX = 0;
+  let startY = 0;
+  let startWidth = 0;
+  let startHeight = 0;
+
+  handle.addEventListener("mousedown", (event) => {
+    const rect = panel.getBoundingClientRect();
+    resizing = true;
+    startX = event.clientX;
+    startY = event.clientY;
+    startWidth = rect.width;
+    startHeight = rect.height;
+    panel.classList.add("resizing");
+    event.preventDefault();
+    event.stopPropagation(); // don't also let makeDraggable's own listener treat this as a drag
+  });
+
+  window.addEventListener("mousemove", (event) => {
+    if (!resizing) return;
+
+    const maxWidth = window.innerWidth - panel.getBoundingClientRect().left;
+    const maxHeight = window.innerHeight - panel.getBoundingClientRect().top;
+    const newWidth = Math.min(Math.max(minWidth, startWidth + (event.clientX - startX)), maxWidth);
+    const newHeight = Math.min(Math.max(minHeight, startHeight + (event.clientY - startY)), maxHeight);
+
+    panel.style.width = `${newWidth}px`;
+    panel.style.height = `${newHeight}px`;
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!resizing) return;
+    resizing = false;
+    panel.classList.remove("resizing");
+
+    const size: StoredSize = { width: parseFloat(panel.style.width), height: parseFloat(panel.style.height) };
+    localStorage.setItem(sizeKey, JSON.stringify(size));
+  });
+}

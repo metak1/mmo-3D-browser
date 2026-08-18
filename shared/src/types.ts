@@ -807,6 +807,8 @@ const TERRAIN_BASE_AMPLITUDE = 3.5;
 const TERRAIN_DETAIL_WAVELENGTH = 18;
 const TERRAIN_DETAIL_AMPLITUDE = 1;
 const TERRAIN_FLATTEN_RADIUS = 6; // world units of smooth falloff beyond a structure's own footprint
+const TERRAIN_MAX_SEGMENTS = 150; // perf cap on the render mesh - see terrainSegments
+const TERRAIN_TARGET_STEP = 4; // world units between mesh vertices, below the cap
 
 // Deterministic pseudo-random value in [0,1) for an integer grid coordinate - no seed/RNG state,
 // so the exact same terrain is produced every time this is called, in every process.
@@ -834,14 +836,26 @@ function valueNoise2D(x: number, z: number): number {
   return nx0 + (nx1 - nx0) * sz;
 }
 
-// Two octaves of rolling hills, pulled flat under and just beyond every structure's footprint
-// so buildings (rigid boxes) always sit on a level pad instead of a slope. `structures` defaults
-// to the live STRUCTURES binding (populated by loadGameContent) - every client call site can
-// omit it and get correct flattening automatically. The admin map editor never calls
-// loadGameContent (it reads content straight from the REST API, not the live-game snapshot
-// pipeline), so it passes its own fetched structures list explicitly instead of silently getting
-// unflattened terrain under every building.
-export function getTerrainHeight(x: number, z: number, structures: StructureDef[] = STRUCTURES): number {
+// Number of segments the render mesh (client/src/game/Scene.ts) and the admin map editor's
+// preview both build for a map of this half-extent - exported so getTerrainHeight's own sampling
+// grid below can stay pixel-exact with whatever actually gets rendered, for any map size.
+export function terrainSegments(regionHalfExtent: number): number {
+  return Math.min(TERRAIN_MAX_SEGMENTS, Math.round((regionHalfExtent * 2) / TERRAIN_TARGET_STEP));
+}
+
+// Smoothly flattens `height` to 0 within `footprint` of some point, falling back off to the
+// unmodified height by `footprint + flattenRadius`. Shared by every "footprint" that gets pulled
+// level regardless of the noise underneath it - a structure's own footprint, and the boss arena's.
+function flattenTowards(height: number, dist: number, footprint: number, flattenRadius: number): number {
+  const flattenEnd = footprint + flattenRadius;
+  if (dist >= flattenEnd) return height;
+  const t = dist <= footprint ? 0 : (dist - footprint) / (flattenEnd - footprint);
+  return height * smoothstep(t);
+}
+
+// Just the noise formula, evaluated at one exact point. getTerrainHeight below never calls this
+// directly with an entity's raw position - see why there.
+function rawTerrainHeight(x: number, z: number, structures: StructureDef[]): number {
   const base = (valueNoise2D(x / TERRAIN_BASE_WAVELENGTH, z / TERRAIN_BASE_WAVELENGTH) - 0.5) * 2 * TERRAIN_BASE_AMPLITUDE;
   const detail =
     (valueNoise2D(x / TERRAIN_DETAIL_WAVELENGTH + 91.3, z / TERRAIN_DETAIL_WAVELENGTH + 91.3) - 0.5) * 2 * TERRAIN_DETAIL_AMPLITUDE;
@@ -849,14 +863,72 @@ export function getTerrainHeight(x: number, z: number, structures: StructureDef[
 
   for (const s of structures) {
     const footprint = Math.max(s.width, s.depth) / 2;
-    const flattenEnd = footprint + TERRAIN_FLATTEN_RADIUS;
-    const dist = Math.hypot(x - s.x, z - s.z);
-    if (dist >= flattenEnd) continue;
-    const t = dist <= footprint ? 0 : (dist - footprint) / (flattenEnd - footprint);
-    height *= smoothstep(t);
+    height = flattenTowards(height, Math.hypot(x - s.x, z - s.z), footprint, TERRAIN_FLATTEN_RADIUS);
   }
 
+  // The boss arena (BOSS_ARENA_CENTER/RADIUS) is drawn client-side as a flat decorative disc
+  // regardless of what the noise underneath it looks like (see client/src/game/Scene.ts) - flatten
+  // the actual terrain to match it, the same way a structure's footprint does, so the boss, its
+  // adds, and any nearby structure all stand on ground that matches what's drawn instead of
+  // floating above or sinking into hills that were never actually leveled.
+  height = flattenTowards(
+    height,
+    Math.hypot(x - BOSS_ARENA_CENTER.x, z - BOSS_ARENA_CENTER.z),
+    BOSS_ARENA_RADIUS,
+    TERRAIN_FLATTEN_RADIUS,
+  );
+
   return height;
+}
+
+// Set once per client session (client/src/game/Scene.ts, alongside the same isDungeon that
+// already keeps a dungeon's render mesh a flat, undisplaced quad) - dungeons have no elevation
+// at all, so entities there need to sit at a flat 0 instead of riding the overworld's noise, which
+// doesn't know or care that it's being evaluated at "dungeon (3, -2)" instead of "overworld (3,
+// -2)" (the two coordinate spaces overlap numerically, so the function can't tell them apart from
+// x/z alone).
+export let TERRAIN_FLAT = false;
+export function setTerrainFlat(flat: boolean) {
+  TERRAIN_FLAT = flat;
+}
+
+// Two octaves of rolling hills, pulled flat under and just beyond every structure's footprint
+// so buildings (rigid boxes) always sit on a level pad instead of a slope. `structures` defaults
+// to the live STRUCTURES binding (populated by loadGameContent) - every client call site can
+// omit it and get correct flattening automatically. The admin map editor never calls
+// loadGameContent (it reads content straight from the REST API, not the live-game snapshot
+// pipeline), so it passes its own fetched structures list explicitly instead of silently getting
+// unflattened terrain under every building.
+//
+// Samples rawTerrainHeight at the render mesh's own grid corners (see terrainSegments) and
+// bilinearly interpolates between them, rather than evaluating the raw noise at the exact x/z
+// given - the mesh only has a vertex every `step` world units, so a moving entity positioned at
+// the "true" analytic height could float above or sink into the coarser triangles between
+// vertices, especially on steeper slopes. This keeps every entity exactly on the surface that's
+// actually drawn, regardless of mesh resolution. `regionHalfExtent` only needs overriding by the
+// admin map editor, which can be previewing a map other than the currently active one.
+export function getTerrainHeight(
+  x: number,
+  z: number,
+  structures: StructureDef[] = STRUCTURES,
+  regionHalfExtent: number = MAP_HALF_EXTENT,
+): number {
+  if (TERRAIN_FLAT) return 0;
+
+  const step = (regionHalfExtent * 2) / terrainSegments(regionHalfExtent);
+  const gx0 = Math.floor(x / step) * step;
+  const gz0 = Math.floor(z / step) * step;
+  const sx = (x - gx0) / step;
+  const sz = (z - gz0) / step;
+
+  const h00 = rawTerrainHeight(gx0, gz0, structures);
+  const h10 = rawTerrainHeight(gx0 + step, gz0, structures);
+  const h01 = rawTerrainHeight(gx0, gz0 + step, structures);
+  const h11 = rawTerrainHeight(gx0 + step, gz0 + step, structures);
+
+  const hx0 = h00 + (h10 - h00) * sx;
+  const hx1 = h01 + (h11 - h01) * sx;
+  return hx0 + (hx1 - hx0) * sz;
 }
 
 export type MapKind = "overworld" | "dungeon";

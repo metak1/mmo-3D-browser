@@ -1,5 +1,13 @@
 import * as THREE from "three";
-import { BOSS_ARENA_CENTER, BOSS_ARENA_RADIUS, DUNGEON_HALF_EXTENT, getTerrainHeight, MAP_HALF_EXTENT } from "@mmo/shared";
+import {
+  BOSS_ARENA_CENTER,
+  BOSS_ARENA_RADIUS,
+  DUNGEON_HALF_EXTENT,
+  getTerrainHeight,
+  MAP_HALF_EXTENT,
+  setTerrainFlat,
+  terrainSegments,
+} from "@mmo/shared";
 import { groundTexture, stoneTexture } from "./textures";
 import { softTint } from "./textureTint";
 
@@ -22,6 +30,11 @@ export class GameScene {
     container: HTMLElement,
     private readonly isDungeon = false,
   ) {
+    // Dungeons have no elevation at all (their floor mesh below stays an undisplaced flat quad) -
+    // this keeps every entity's getTerrainHeight() call in lockstep with that, instead of riding
+    // the overworld's rolling-hill noise while standing on a floor that doesn't actually have any.
+    setTerrainFlat(isDungeon);
+
     // High-DPI screens (e.g. Retina) report devicePixelRatio 2-3, which multiplies
     // the number of pixels the GPU has to shade every frame. Cap it, and skip MSAA
     // once we're already supersampling at 2x — running both tanks framerate for
@@ -75,7 +88,9 @@ export class GameScene {
 
     // Dungeons stay a flat quad (small, enclosed instances - elevation adds nothing there).
     // The overworld gets real segments so terrain height can displace it into rolling hills.
-    const segments = this.isDungeon ? 1 : Math.min(150, Math.round(size / 4));
+    // terrainSegments is the same helper getTerrainHeight uses to snap its own sampling grid, so
+    // the two can never drift apart regardless of map size.
+    const segments = this.isDungeon ? 1 : terrainSegments(MAP_HALF_EXTENT);
     const groundGeometry = new THREE.PlaneGeometry(size, size, segments, segments);
     if (!this.isDungeon) {
       const pos = groundGeometry.attributes.position;

@@ -81,7 +81,7 @@ import { LootBagAvatar } from "./game/LootBagAvatar";
 import { InputController } from "./game/InputController";
 import { connectToWorld, consumeDungeonReservation } from "./network/connection";
 import * as api from "./network/api";
-import { makeDraggable } from "./ui/DraggablePanel";
+import { makeDraggable, makeResizable } from "./ui/DraggablePanel";
 
 const PLAYER_PROJECTILE_COLOR = 0xff9a3c;
 const PLAYER_PROJECTILE_EMISSIVE = 0xb35a12;
@@ -96,6 +96,24 @@ const AILMENT_LABELS: Record<string, string> = { weaken: "Weakened" };
 const hud = document.getElementById("hud")!;
 const container = document.getElementById("app")!;
 const minimap = new Minimap(document.getElementById("minimap") as HTMLCanvasElement);
+const bigMapPanel = document.getElementById("big-map-panel")!;
+const bigMapCanvas = document.getElementById("big-map") as HTMLCanvasElement;
+const bigMap = new Minimap(bigMapCanvas, true);
+
+// The panel is natively resizable (CSS `resize: both` on #big-map-panel) - keep the canvas's
+// backing resolution matched to its actual displayed size as the user drags the corner handle,
+// same devicePixelRatio cap GameScene's renderer uses, so the map stays crisp instead of just
+// stretching whatever resolution it happened to start at. Minimap.update() reads canvas.width/
+// height fresh every call, so no other wiring is needed for a resize to take effect.
+const bigMapResizeObserver = new ResizeObserver((entries) => {
+  const entry = entries[0];
+  if (!entry) return;
+  const { width, height } = entry.contentRect;
+  const pixelRatio = Math.min(window.devicePixelRatio, 2);
+  bigMapCanvas.width = Math.max(1, Math.round(width * pixelRatio));
+  bigMapCanvas.height = Math.max(1, Math.round(height * pixelRatio));
+});
+bigMapResizeObserver.observe(bigMapCanvas);
 
 const playerHpFill = document.querySelector<HTMLElement>("[data-player-hp-fill]")!;
 const playerHpLabel = document.querySelector<HTMLElement>("[data-player-hp-label]")!;
@@ -340,6 +358,14 @@ function bindPersistentItemTooltip(el: HTMLElement) {
 }
 
 makeDraggable(document.getElementById("minimap-panel")!, "minimap");
+makeDraggable(document.getElementById("big-map-panel")!, "big-map");
+makeResizable(
+  document.getElementById("big-map-panel")!,
+  document.getElementById("big-map-resize-handle")!,
+  "big-map",
+  380,
+  280,
+);
 makeDraggable(document.getElementById("player-panel")!, "player");
 makeDraggable(document.getElementById("target-panel")!, "target");
 makeDraggable(document.getElementById("spell-panel")!, "spells");
@@ -1437,6 +1463,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       if (!talentPanel.hidden && localPlayerSchema) renderTalents(localPlayerSchema);
     }
     else if (e.code === "KeyL") questLogPanel.hidden = !questLogPanel.hidden;
+    else if (e.code === "KeyM") bigMapPanel.hidden = !bigMapPanel.hidden;
   });
 
   const raycaster = new THREE.Raycaster();
@@ -1962,7 +1989,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         z: avatar.group.position.z,
         isBoss: enemySchemaById.get(enemyId)?.behavior === "boss",
       }));
-      minimap.update({ x: localPredicted.x, z: localPredicted.z, rotationY: localRotationY }, others, enemyDots, !isDungeon);
+      const selfDot = { x: localPredicted.x, z: localPredicted.z, rotationY: localRotationY };
+      minimap.update(selfDot, others, enemyDots, !isDungeon);
+      // Same per-frame data, just at a bigger radius - skip the extra canvas work while the
+      // panel is closed instead of redrawing a map nobody can see.
+      if (!bigMapPanel.hidden) bigMap.update(selfDot, others, enemyDots, !isDungeon);
     }
 
     if (localCastActive && localCastSpellId !== "") {

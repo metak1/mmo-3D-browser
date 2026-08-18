@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
-import { getTerrainHeight, StructureDef } from "@mmo/shared";
+import { getTerrainHeight, StructureDef, terrainSegments } from "@mmo/shared";
 import { ENTITIES } from "../entities";
 import { EntityForm } from "../EntityForm";
 import { createEntity, deleteEntity, listEntities, updateEntity } from "../api";
@@ -260,7 +260,8 @@ export function MapEditor() {
       // at its (possibly also just-moved) x/z rather than assuming only y changed.
       if (sel.type === "structures" || sel.type === "npcs") {
         const structureDefs = sel.type === "structures" ? toStructureDefs(structuresRef.current) : [];
-        const groundY = getTerrainHeight(mesh.position.x, mesh.position.z, structureDefs);
+        const halfExtent = Number(activeMap?.half_extent) || 50;
+        const groundY = getTerrainHeight(mesh.position.x, mesh.position.z, structureDefs, halfExtent);
         changes.y_offset = round(mesh.position.y - groundY);
       }
     }
@@ -283,13 +284,13 @@ export function MapEditor() {
     // snapshot), so the shared STRUCTURES binding it'd otherwise default to is always empty
     // here. Built once per sync and threaded through every getTerrainHeight call below.
     const structureDefs = toStructureDefs(structures);
-    const terrainY = (x: number, z: number) => (isOverworld ? getTerrainHeight(x, z, structureDefs) : 0);
+    const terrainY = (x: number, z: number) => (isOverworld ? getTerrainHeight(x, z, structureDefs, halfExtent) : 0);
 
     three.ground.geometry.dispose();
-    // Same technique as client/src/game/Scene.ts's setupGround - dungeons stay a flat quad,
-    // the overworld gets real segments displaced by the same shared getTerrainHeight function
-    // so this view always matches what the live game renders.
-    const segments = isOverworld ? Math.min(150, Math.round(size / 4)) : 1;
+    // Same technique as client/src/game/Scene.ts's setupGround - dungeons stay a flat quad, the
+    // overworld gets real segments displaced by the same shared getTerrainHeight function, at the
+    // same terrainSegments density, so this view always matches what the live game renders.
+    const segments = isOverworld ? terrainSegments(halfExtent) : 1;
     const groundGeometry = new THREE.PlaneGeometry(size, size, segments, segments);
     if (isOverworld) {
       const pos = groundGeometry.attributes.position;

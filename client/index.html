@@ -185,6 +185,58 @@
         background: rgba(20, 22, 32, 0.85);
         display: block;
       }
+      #big-map-panel {
+        position: fixed;
+        /* inset:0 + margin:auto centers a fixed-size box without a translate() transform, so the
+           custom resize handle (below) grows the panel outward from center instead of visibly
+           re-anchoring it every drag, until the user drags/resizes it at least once. */
+        inset: 0;
+        margin: auto;
+        width: 900px;
+        height: 600px;
+        min-width: 380px;
+        min-height: 280px;
+        max-width: 96vw;
+        max-height: 92vh;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        background: rgba(10, 10, 16, 0.94);
+        border: 2px solid #4a5578;
+        border-radius: 12px;
+        overflow: hidden; /* clips the canvas below (which touches every edge) to this border-radius */
+      }
+      #big-map-panel[hidden] {
+        display: none;
+      }
+      .big-map-title {
+        flex-shrink: 0;
+        padding: 10px 16px 6px;
+        text-align: center;
+        font-weight: 700;
+        color: #fff6d5;
+      }
+      .big-map-hint {
+        font-weight: 400;
+        font-size: 11px;
+        color: #a7b0c8;
+      }
+      #big-map {
+        display: block;
+        flex: 1;
+        width: 100%;
+        min-height: 0;
+        background: rgba(20, 22, 32, 0.85);
+      }
+      .big-map-resize-handle {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        width: 18px;
+        height: 18px;
+        cursor: nwse-resize;
+        background: linear-gradient(135deg, transparent 0 45%, #6b7691 45% 55%, transparent 55% 65%, #6b7691 65% 75%, transparent 75%);
+      }
       .unit-panel {
         position: fixed;
         left: 12px;
@@ -987,6 +1039,13 @@
     <div id="minimap-panel">
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <canvas id="minimap" width="300" height="300"></canvas>
+    </div>
+
+    <div id="big-map-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="big-map-title">Map <span class="big-map-hint">(press M to close · drag title to move · drag corner to resize)</span></div>
+      <canvas id="big-map" width="900" height="600" data-no-drag></canvas>
+      <div id="big-map-resize-handle" class="big-map-resize-handle" data-no-drag></div>
     </div>
 
     <div id="player-panel" class="unit-panel">
