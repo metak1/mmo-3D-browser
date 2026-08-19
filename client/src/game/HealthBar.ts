@@ -3,7 +3,7 @@ import { CAMERA_PITCH } from "./Scene";
 
 const WIDTH = 0.9;
 const HEIGHT = 0.12;
-const Y_OFFSET = 1.55;
+export const DEFAULT_Y_OFFSET = 1.55;
 
 const COLOR_HIGH = 0x4fd166;
 const COLOR_MID = 0xe0b23c;
@@ -25,7 +25,7 @@ export class HealthBar {
   private readonly fillMaterial: THREE.MeshBasicMaterial;
   private readonly yOffset: number;
 
-  constructor(yOffset = Y_OFFSET) {
+  constructor(yOffset = DEFAULT_Y_OFFSET) {
     this.yOffset = yOffset;
 
     const bg = new THREE.Mesh(

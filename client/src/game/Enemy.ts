@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { EnemyBehavior, getTerrainHeight } from "@mmo/shared";
 import { AoeCircle } from "./AoeCircle";
-import { HealthBar } from "./HealthBar";
+import { DEFAULT_Y_OFFSET, HealthBar } from "./HealthBar";
+import { NameLabel } from "./NameLabel";
 import { fitHeight, ModelAnimator, spawnModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
 
@@ -39,10 +40,12 @@ const BOSS_PHASE_2_COLOR = 0xe0503c;
 
 const SELECTION_RING_COLOR = 0xf5d76e;
 const BOSS_HEALTH_BAR_Y_OFFSET = 2.6; // clears the boss's taller body; regular enemies use HealthBar's own default
+const NAME_LABEL_GAP = 0.22; // clearance above the health bar so the two never overlap
 
 export class EnemyAvatar {
   readonly group = new THREE.Group();
   readonly healthBar: HealthBar;
+  readonly nameLabel: NameLabel;
   readonly telegraph = new AoeCircle();
   private readonly selectionRing: THREE.Mesh;
   private readonly isBoss: boolean;
@@ -51,10 +54,12 @@ export class EnemyAvatar {
   private animator?: ModelAnimator;
   private targetPosition = new THREE.Vector3();
 
-  constructor(kind: EnemyBehavior) {
+  constructor(kind: EnemyBehavior, name: string) {
     this.kind = kind;
     this.isBoss = kind === "boss";
-    this.healthBar = new HealthBar(this.isBoss ? BOSS_HEALTH_BAR_Y_OFFSET : undefined);
+    const healthBarYOffset = this.isBoss ? BOSS_HEALTH_BAR_Y_OFFSET : DEFAULT_Y_OFFSET;
+    this.healthBar = new HealthBar(healthBarYOffset);
+    this.nameLabel = new NameLabel(name, healthBarYOffset + NAME_LABEL_GAP);
 
     spawnModel(MODEL_PATH, MODEL_CLIPS).then(({ object, animator }) => {
       fitHeight(object, KIND_HEIGHT[kind]);
@@ -117,30 +122,33 @@ export class EnemyAvatar {
   addTo(scene: THREE.Scene) {
     scene.add(this.group);
     scene.add(this.healthBar.group);
+    scene.add(this.nameLabel.group);
     scene.add(this.telegraph.mesh);
-    this.syncHealthBarPosition();
+    this.syncOverlayPositions();
   }
 
   removeFrom(scene: THREE.Scene) {
     scene.remove(this.group);
     scene.remove(this.healthBar.group);
+    scene.remove(this.nameLabel.group);
     scene.remove(this.telegraph.mesh);
   }
 
   snapToTarget() {
     this.group.position.copy(this.targetPosition);
-    this.syncHealthBarPosition();
+    this.syncOverlayPositions();
   }
 
   update(dt: number) {
     const distance = this.group.position.distanceTo(this.targetPosition);
     this.group.position.lerp(this.targetPosition, INTERPOLATION_LERP);
-    this.syncHealthBarPosition();
+    this.syncOverlayPositions();
     this.animator?.setMoving(distance > MOVING_THRESHOLD);
     this.animator?.update(dt);
   }
 
-  private syncHealthBarPosition() {
+  private syncOverlayPositions() {
     this.healthBar.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
+    this.nameLabel.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
   }
 }

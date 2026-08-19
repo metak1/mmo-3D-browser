@@ -1998,7 +1998,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     });
 
     $(room.state).enemies.onAdd((enemy, enemyId) => {
-      const avatar = new EnemyAvatar(enemy.behavior as EnemyBehavior);
+      const enemyName = ENEMY_TYPES[enemy.enemyTypeId]?.name ?? enemy.enemyTypeId;
+      const avatar = new EnemyAvatar(enemy.behavior as EnemyBehavior, enemyName);
       avatar.group.userData.enemyId = enemyId;
       avatar.setTarget(enemy.x, enemy.z);
       avatar.snapToTarget();
