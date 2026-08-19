@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 // Mirrors shared/src/types.ts's TalentStatKey/BuffKind/TalentEffect - kept in sync by hand since
@@ -30,4 +29,8 @@ const updateSchema = talentSchema.omit({ id: true }).partial();
 // No checkDeletable - Character.talent_ranks is a JSON map keyed by talent id; a stale entry
 // for a deleted talent is silently ignored by getTalentBonus (same graceful-orphan pattern as
 // items), not a crash risk.
-export const talentsRouter = createCrudRouter(prisma.talent, { createSchema: talentSchema, updateSchema });
+export const talentsRouter = createCrudRouter("talents", {
+  createSchema: talentSchema,
+  updateSchema,
+  jsonColumns: ["effect"],
+});

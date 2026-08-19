@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
+import { countWhere } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const classSchema = z.object({
@@ -10,14 +10,14 @@ const classSchema = z.object({
 });
 const updateSchema = classSchema.omit({ id: true }).partial();
 
-export const classesRouter = createCrudRouter(prisma.gameClass, {
+export const classesRouter = createCrudRouter("game_classes", {
   createSchema: classSchema,
   updateSchema,
   checkDeletable: async (id) => {
     const [characterCount, spellCount, talentCount] = await Promise.all([
-      prisma.character.count({ where: { class_id: id } }),
-      prisma.spell.count({ where: { class_id: id } }),
-      prisma.talent.count({ where: { class_id: id } }),
+      countWhere("characters", "class_id = $1", [id]),
+      countWhere("spells", "class_id = $1", [id]),
+      countWhere("talents", "class_id = $1", [id]),
     ]);
     if (characterCount > 0) return `${characterCount} character(s) use this class`;
     if (spellCount > 0) return `${spellCount} spell(s) belong to this class - delete or reassign them first`;

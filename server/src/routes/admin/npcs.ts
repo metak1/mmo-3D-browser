@@ -4,7 +4,7 @@
 // hand-written rather than growing the factory a hook only one caller would ever use.
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
+import { countWhere, pool } from "../../db/client.js";
 import { asyncHandler } from "../../http/asyncHandler.js";
 import { reloadGameContent } from "../../db/content.js";
 
@@ -25,15 +25,18 @@ function stripVendorField<T extends { vendor_item_ids?: string[] }>({ vendor_ite
 
 async function syncVendorItems(npcId: string, itemIds: string[] | undefined) {
   if (itemIds === undefined) return; // field omitted entirely - leave the existing catalog untouched
-  await prisma.npcVendorItem.deleteMany({ where: { npc_id: npcId } });
+  await pool.query("DELETE FROM npc_vendor_items WHERE npc_id = $1", [npcId]);
   if (itemIds.length > 0) {
-    await prisma.npcVendorItem.createMany({ data: itemIds.map((item_id) => ({ npc_id: npcId, item_id })) });
+    const values = itemIds.map((_, i) => `($1, $${i + 2})`).join(", ");
+    await pool.query(`INSERT INTO npc_vendor_items (npc_id, item_id) VALUES ${values}`, [npcId, ...itemIds]);
   }
 }
 
-async function withVendorItems(npc: { id: string }) {
-  const vendorRows = await prisma.npcVendorItem.findMany({ where: { npc_id: npc.id } });
-  return { ...npc, vendor_item_ids: vendorRows.map((r) => r.item_id) };
+async function withVendorItems<T extends { id: string }>(npc: T) {
+  const { rows } = await pool.query<{ item_id: string }>("SELECT item_id FROM npc_vendor_items WHERE npc_id = $1", [
+    npc.id,
+  ]);
+  return { ...npc, vendor_item_ids: rows.map((r) => r.item_id) };
 }
 
 function formatZodError(error: { issues: { message: string }[] }): string {
@@ -45,20 +48,20 @@ export const npcsRouter = Router();
 npcsRouter.get(
   "/",
   asyncHandler(async (_req, res) => {
-    const npcs = await prisma.npc.findMany();
-    res.json({ items: await Promise.all(npcs.map(withVendorItems)) });
+    const { rows } = await pool.query("SELECT * FROM npcs");
+    res.json({ items: await Promise.all(rows.map(withVendorItems)) });
   }),
 );
 
 npcsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    const npc = await prisma.npc.findUnique({ where: { id: req.params.id } });
-    if (!npc) {
+    const { rows } = await pool.query("SELECT * FROM npcs WHERE id = $1", [req.params.id]);
+    if (rows.length === 0) {
       res.status(404).json({ error: "Not found" });
       return;
     }
-    res.json({ item: await withVendorItems(npc) });
+    res.json({ item: await withVendorItems(rows[0]) });
   }),
 );
 
@@ -70,10 +73,14 @@ npcsRouter.post(
       res.status(400).json({ error: formatZodError(parsed.error) });
       return;
     }
-    const npc = await prisma.npc.create({ data: stripVendorField(parsed.data) });
-    await syncVendorItems(npc.id, parsed.data.vendor_item_ids);
+    const { id, name, x, z, y_offset, map_id } = parsed.data;
+    const { rows } = await pool.query(
+      "INSERT INTO npcs (id, name, x, z, y_offset, map_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+      [id, name, x, z, y_offset, map_id],
+    );
+    await syncVendorItems(id, parsed.data.vendor_item_ids);
     await reloadGameContent();
-    res.status(201).json({ item: await withVendorItems(npc) });
+    res.status(201).json({ item: await withVendorItems(rows[0]) });
   }),
 );
 
@@ -85,22 +92,35 @@ npcsRouter.patch(
       res.status(400).json({ error: formatZodError(parsed.error) });
       return;
     }
-    const npc = await prisma.npc.update({ where: { id: req.params.id }, data: stripVendorField(parsed.data) });
-    await syncVendorItems(npc.id, parsed.data.vendor_item_ids);
+    const fields = stripVendorField(parsed.data) as Record<string, unknown>;
+    const columns = Object.keys(fields);
+    if (columns.length > 0) {
+      const setClause = columns.map((col, i) => `${col} = $${i + 1}`).join(", ");
+      await pool.query(`UPDATE npcs SET ${setClause} WHERE id = $${columns.length + 1}`, [
+        ...columns.map((col) => fields[col]),
+        req.params.id,
+      ]);
+    }
+    await syncVendorItems(req.params.id, parsed.data.vendor_item_ids);
     await reloadGameContent();
-    res.json({ item: await withVendorItems(npc) });
+    const { rows } = await pool.query("SELECT * FROM npcs WHERE id = $1", [req.params.id]);
+    if (rows.length === 0) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    res.json({ item: await withVendorItems(rows[0]) });
   }),
 );
 
 npcsRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
-    const questCount = await prisma.quest.count({ where: { giver_npc_id: req.params.id } });
+    const questCount = await countWhere("quests", "giver_npc_id = $1", [req.params.id]);
     if (questCount > 0) {
       res.status(409).json({ error: `${questCount} quest(s) are given by this NPC - delete or reassign them first` });
       return;
     }
-    await prisma.npc.delete({ where: { id: req.params.id } });
+    await pool.query("DELETE FROM npcs WHERE id = $1", [req.params.id]);
     await reloadGameContent();
     res.status(204).send();
   }),

@@ -45,7 +45,7 @@ export function me(): Promise<{ user: PublicUser }> {
   return request("/auth/me");
 }
 
-// Every list/get call reads live from the DB via the server's Prisma queries - the admin panel
+// Every list/get call reads live from the DB via the server's SQL queries - the admin panel
 // never relies on the in-memory game-content cache, so it's always current.
 export function listEntities<T>(entity: string): Promise<{ items: T[] }> {
   return request(`/admin/${entity}`);

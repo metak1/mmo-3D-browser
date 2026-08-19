@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const waypointSchema = z.object({
@@ -12,4 +11,4 @@ const waypointSchema = z.object({
 const updateSchema = waypointSchema.omit({ id: true }).partial();
 
 // No checkDeletable - nothing references a waypoint by id, it's a leaf row (same as structures).
-export const waypointsRouter = createCrudRouter(prisma.waypoint, { createSchema: waypointSchema, updateSchema });
+export const waypointsRouter = createCrudRouter("waypoints", { createSchema: waypointSchema, updateSchema });

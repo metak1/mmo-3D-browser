@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
+import { countWhere } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const enemyTypeSchema = z.object({
@@ -16,13 +16,14 @@ const enemyTypeSchema = z.object({
 });
 const updateSchema = enemyTypeSchema.omit({ id: true }).partial();
 
-export const enemyTypesRouter = createCrudRouter(prisma.enemyType, {
+export const enemyTypesRouter = createCrudRouter("enemy_types", {
   createSchema: enemyTypeSchema,
   updateSchema,
+  jsonColumns: ["stats"],
   checkDeletable: async (id) => {
     const [spawnCount, questCount] = await Promise.all([
-      prisma.enemySpawn.count({ where: { enemy_type_id: id } }),
-      prisma.quest.count({ where: { objective_enemy_type_id: id } }),
+      countWhere("enemy_spawns", "enemy_type_id = $1", [id]),
+      countWhere("quests", "objective_enemy_type_id = $1", [id]),
     ]);
     if (spawnCount > 0) return `${spawnCount} spawn point(s) use this enemy type - delete or reassign them first`;
     if (questCount > 0) return `${questCount} quest(s) target this enemy type - reassign or delete them first`;

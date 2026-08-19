@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
+import { countWhere, pool, withTransaction } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 import { asyncHandler } from "../../http/asyncHandler.js";
 import { reloadGameContent } from "../../db/content.js";
@@ -20,14 +20,14 @@ const mapSchema = z.object({
 // active overworld map" stays enforced instead of being editable as a plain boolean field).
 const updateSchema = mapSchema.omit({ id: true, kind: true }).partial();
 
-export const mapsRouter = createCrudRouter(prisma.gameMap, {
+export const mapsRouter = createCrudRouter("game_maps", {
   createSchema: mapSchema,
   updateSchema,
   checkDeletable: async (id) => {
     const [npcCount, spawnCount, dungeonCount] = await Promise.all([
-      prisma.npc.count({ where: { map_id: id } }),
-      prisma.enemySpawn.count({ where: { map_id: id } }),
-      prisma.dungeon.count({ where: { map_id: id } }),
+      countWhere("npcs", "map_id = $1", [id]),
+      countWhere("enemy_spawns", "map_id = $1", [id]),
+      countWhere("dungeons", "map_id = $1", [id]),
     ]);
     if (npcCount > 0) return `${npcCount} NPC(s) are placed on this map`;
     if (spawnCount > 0) return `${spawnCount} enemy spawn point(s) are on this map`;
@@ -41,7 +41,8 @@ export const mapsRouter = createCrudRouter(prisma.gameMap, {
 mapsRouter.post(
   "/:id/activate",
   asyncHandler(async (req, res) => {
-    const map = await prisma.gameMap.findUnique({ where: { id: req.params.id } });
+    const { rows } = await pool.query("SELECT * FROM game_maps WHERE id = $1", [req.params.id]);
+    const map = rows[0];
     if (!map) {
       res.status(404).json({ error: "Not found" });
       return;
@@ -51,11 +52,12 @@ mapsRouter.post(
       return;
     }
 
-    await prisma.$transaction([
-      prisma.gameMap.updateMany({ where: { kind: "overworld" }, data: { is_active: false } }),
-      prisma.gameMap.update({ where: { id: req.params.id }, data: { is_active: true } }),
-    ]);
+    await withTransaction(async (client) => {
+      await client.query("UPDATE game_maps SET is_active = false WHERE kind = 'overworld'");
+      await client.query("UPDATE game_maps SET is_active = true WHERE id = $1", [req.params.id]);
+    });
     await reloadGameContent();
-    res.json({ item: await prisma.gameMap.findUnique({ where: { id: req.params.id } }) });
+    const { rows: updated } = await pool.query("SELECT * FROM game_maps WHERE id = $1", [req.params.id]);
+    res.json({ item: updated[0] });
   }),
 );

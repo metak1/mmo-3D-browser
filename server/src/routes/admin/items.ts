@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
+import { countWhere } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const itemSchema = z.object({
@@ -13,15 +13,16 @@ const itemSchema = z.object({
 });
 const updateSchema = itemSchema.omit({ id: true }).partial();
 
-export const itemsRouter = createCrudRouter(prisma.item, {
+export const itemsRouter = createCrudRouter("items", {
   createSchema: itemSchema,
   updateSchema,
+  jsonColumns: ["bonuses"],
   checkDeletable: async (id) => {
     // character_items.item_id stores "itemId@rarity" tokens (or a bare legacy id) - see
     // encodeItemToken/decodeItemToken in shared/src/types.ts.
     const [itemCount, questCount] = await Promise.all([
-      prisma.characterItem.count({ where: { OR: [{ item_id: id }, { item_id: { startsWith: `${id}@` } }] } }),
-      prisma.quest.count({ where: { reward_item_id: id } }),
+      countWhere("character_items", "item_id = $1 OR item_id LIKE $2", [id, `${id}@%`]),
+      countWhere("quests", "reward_item_id = $1", [id]),
     ]);
     if (itemCount > 0) return `${itemCount} character item row(s) reference this item`;
     if (questCount > 0) return `${questCount} quest(s) reward this item - reassign or delete them first`;

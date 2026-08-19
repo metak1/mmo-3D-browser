@@ -19,10 +19,156 @@ import {
   FurnitureDef,
 } from "@mmo/shared";
 import { ClassRole } from "@mmo/shared";
-import { prisma } from "./client.js";
+import { pool } from "./client.js";
 
 function nullToUndefined<T>(value: T | null): T | undefined {
   return value === null ? undefined : value;
+}
+
+interface GameClassRow {
+  id: string;
+  name: string;
+  main_stat: string;
+  role: string;
+}
+
+interface SpellRow {
+  id: string;
+  class_id: string;
+  name: string;
+  description: string;
+  effect_type: string;
+  target_type: string;
+  amount: number | null;
+  aoe_radius: number | null;
+  interrupts_cast: boolean;
+  cooldown_ms: number;
+  cast_time_ms: number;
+  range: number;
+  projectile_speed: number | null;
+}
+
+interface ItemRow {
+  id: string;
+  name: string;
+  slot: string;
+  bonuses: unknown;
+  icon: string;
+  description: string;
+  base_price: number;
+}
+
+interface TalentRow {
+  id: string;
+  class_id: string;
+  name: string;
+  description: string;
+  max_rank: number;
+  effect: unknown;
+  tier: number;
+  column_index: number;
+  prerequisite_talent_id: string | null;
+}
+
+interface EnemyTypeRow {
+  id: string;
+  name: string;
+  behavior: string;
+  xp_reward: number;
+  gold_reward: number;
+  stats: unknown;
+}
+
+interface NpcRow {
+  id: string;
+  name: string;
+  x: number;
+  z: number;
+  map_id: string;
+  y_offset: number;
+}
+
+interface NpcVendorItemRow {
+  npc_id: string;
+  item_id: string;
+}
+
+interface QuestRow {
+  id: string;
+  name: string;
+  description: string;
+  giver_npc_id: string;
+  objective_enemy_type_id: string;
+  objective_count: number;
+  reward_xp: number;
+  reward_item_id: string | null;
+}
+
+interface GameMapRow {
+  id: string;
+  name: string;
+  kind: string;
+  half_extent: number;
+  is_active: boolean;
+  portal_x: number | null;
+  portal_z: number | null;
+  boss_arena_x: number | null;
+  boss_arena_z: number | null;
+  boss_arena_radius: number | null;
+}
+
+interface EnemySpawnRow {
+  id: string;
+  map_id: string;
+  enemy_type_id: string;
+  x: number;
+  z: number;
+  respawn_ms: number | null;
+}
+
+interface DungeonRow {
+  id: string;
+  name: string;
+  map_id: string;
+  is_active: boolean;
+  party_size: number;
+  composition: unknown;
+  encounters: unknown;
+}
+
+interface StructureRow {
+  id: string;
+  name: string;
+  map_id: string;
+  kind: string;
+  x: number;
+  z: number;
+  rotation_y: number;
+  width: number;
+  depth: number;
+  height: number;
+  color: string;
+  y_offset: number;
+}
+
+interface WaypointRow {
+  id: string;
+  name: string;
+  map_id: string;
+  x: number;
+  z: number;
+}
+
+interface FurnitureRow {
+  id: string;
+  name: string;
+  map_id: string;
+  kind: string;
+  x: number;
+  z: number;
+  rotation_y: number;
+  color: string;
+  y_offset: number;
 }
 
 export async function getContentSnapshot(): Promise<ContentSnapshot> {
@@ -42,20 +188,20 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     waypointRows,
     furnitureRows,
   ] = await Promise.all([
-    prisma.gameClass.findMany(),
-    prisma.spell.findMany(),
-    prisma.item.findMany(),
-    prisma.talent.findMany(),
-    prisma.enemyType.findMany(),
-    prisma.npc.findMany(),
-    prisma.npcVendorItem.findMany(),
-    prisma.quest.findMany(),
-    prisma.gameMap.findMany(),
-    prisma.enemySpawn.findMany(),
-    prisma.dungeon.findMany(),
-    prisma.structure.findMany(),
-    prisma.waypoint.findMany(),
-    prisma.furniture.findMany(),
+    pool.query<GameClassRow>("SELECT * FROM game_classes").then((r) => r.rows),
+    pool.query<SpellRow>("SELECT * FROM spells").then((r) => r.rows),
+    pool.query<ItemRow>("SELECT * FROM items").then((r) => r.rows),
+    pool.query<TalentRow>("SELECT * FROM talents").then((r) => r.rows),
+    pool.query<EnemyTypeRow>("SELECT * FROM enemy_types").then((r) => r.rows),
+    pool.query<NpcRow>("SELECT * FROM npcs").then((r) => r.rows),
+    pool.query<NpcVendorItemRow>("SELECT * FROM npc_vendor_items").then((r) => r.rows),
+    pool.query<QuestRow>("SELECT * FROM quests").then((r) => r.rows),
+    pool.query<GameMapRow>("SELECT * FROM game_maps").then((r) => r.rows),
+    pool.query<EnemySpawnRow>("SELECT * FROM enemy_spawns").then((r) => r.rows),
+    pool.query<DungeonRow>("SELECT * FROM dungeons").then((r) => r.rows),
+    pool.query<StructureRow>("SELECT * FROM structures").then((r) => r.rows),
+    pool.query<WaypointRow>("SELECT * FROM waypoints").then((r) => r.rows),
+    pool.query<FurnitureRow>("SELECT * FROM furniture").then((r) => r.rows),
   ]);
 
   const vendorItemIdsByNpc = new Map<string, string[]>();

@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const furnitureSchema = z.object({
@@ -17,4 +16,4 @@ const updateSchema = furnitureSchema.omit({ id: true }).partial();
 
 // No checkDeletable - nothing references a furniture row by id, it's a leaf row (purely
 // decorative geometry placed on a map, same as structures/waypoints).
-export const furnitureRouter = createCrudRouter(prisma.furniture, { createSchema: furnitureSchema, updateSchema });
+export const furnitureRouter = createCrudRouter("furniture", { createSchema: furnitureSchema, updateSchema });

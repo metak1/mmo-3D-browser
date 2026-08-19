@@ -1,9 +1,29 @@
 // Idempotent (every row is an upsert keyed by its content id) - inserts the exact content that
 // used to be hardcoded in shared/src/types.ts, so the game's live behavior is unchanged
 // immediately after migrating. See the "Admin Content Backend" plan. Safe to re-run.
-import { PrismaClient } from "@prisma/client";
+import "../src/env.js";
+import pg from "pg";
 
-const prisma = new PrismaClient();
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+
+async function upsert(table: string, row: Record<string, unknown>, jsonColumns: string[] = []): Promise<void> {
+  const columns = Object.keys(row);
+  const values = columns.map((c) => (jsonColumns.includes(c) ? JSON.stringify(row[c]) : row[c]));
+  const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
+  const updates = columns.filter((c) => c !== "id").map((c) => `${c} = EXCLUDED.${c}`).join(", ");
+  await pool.query(
+    `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (id) DO UPDATE SET ${updates}`,
+    values,
+  );
+}
+
+async function setVendorCatalog(npcId: string, itemIds: string[]): Promise<void> {
+  await pool.query("DELETE FROM npc_vendor_items WHERE npc_id = $1", [npcId]);
+  if (itemIds.length > 0) {
+    const values = itemIds.map((_, i) => `($1, $${i + 2})`).join(", ");
+    await pool.query(`INSERT INTO npc_vendor_items (npc_id, item_id) VALUES ${values}`, [npcId, ...itemIds]);
+  }
+}
 
 async function main() {
   // --- Classes ---
@@ -15,7 +35,7 @@ async function main() {
     { id: "mage", name: "Mage", main_stat: "intellect", role: "dps" },
   ];
   for (const c of classes) {
-    await prisma.gameClass.upsert({ where: { id: c.id }, create: c, update: c });
+    await upsert("game_classes", c);
   }
 
   // --- Spells ---
@@ -213,7 +233,7 @@ async function main() {
     },
   ];
   for (const s of spells) {
-    await prisma.spell.upsert({ where: { id: s.id }, create: s, update: s });
+    await upsert("spells", s);
   }
 
   // --- Items ---
@@ -349,7 +369,7 @@ async function main() {
     },
   ];
   for (const i of items) {
-    await prisma.item.upsert({ where: { id: i.id }, create: i, update: i });
+    await upsert("items", i, ["bonuses"]);
   }
 
   // --- Talents: a real tree per class, 2 tiers deep. Tier 1 is 3 side-by-side flat statBonus
@@ -658,7 +678,7 @@ async function main() {
       column_index: def.column,
       prerequisite_talent_id: def.prerequisiteSlug ? `${def.classId}_${def.prerequisiteSlug}` : null,
     };
-    await prisma.talent.upsert({ where: { id }, create: row, update: row });
+    await upsert("talents", row, ["effect"]);
   }
 
   // --- Enemy types ---
@@ -791,7 +811,7 @@ async function main() {
     },
   ];
   for (const e of enemyTypes) {
-    await prisma.enemyType.upsert({ where: { id: e.id }, create: e, update: e });
+    await upsert("enemy_types", e, ["stats"]);
   }
 
   // --- Maps ---
@@ -807,10 +827,10 @@ async function main() {
     boss_arena_z: 28,
     boss_arena_radius: 10,
   };
-  await prisma.gameMap.upsert({ where: { id: overworld.id }, create: overworld, update: overworld });
+  await upsert("game_maps", overworld);
 
   const dungeonGround = { id: "dungeon_ground", name: "Dungeon Ground", kind: "dungeon", half_extent: 16, is_active: false };
-  await prisma.gameMap.upsert({ where: { id: dungeonGround.id }, create: dungeonGround, update: dungeonGround });
+  await upsert("game_maps", dungeonGround);
 
   // --- NPCs ---
   const npcs = [
@@ -828,14 +848,14 @@ async function main() {
     { id: "frosthold_trader", name: "Frosthold Trader", x: -150, z: 103, map_id: "overworld" },
   ];
   for (const n of npcs) {
-    await prisma.npc.upsert({ where: { id: n.id }, create: n, update: n });
+    await upsert("npcs", n);
   }
 
   // Merchant sells every item except warden_relic (a unique boss-quest reward).
-  await prisma.npcVendorItem.deleteMany({ where: { npc_id: "merchant" } });
-  await prisma.npcVendorItem.createMany({
-    data: items.filter((i) => i.id !== "warden_relic").map((i) => ({ npc_id: "merchant", item_id: i.id })),
-  });
+  await setVendorCatalog(
+    "merchant",
+    items.filter((i) => i.id !== "warden_relic").map((i) => i.id),
+  );
 
   // Each new-city vendor sells a tier-appropriate slice of the catalog rather than everything -
   // gearing up at Frosthold should feel different from gearing up at Millbrook.
@@ -845,8 +865,7 @@ async function main() {
     frosthold_trader: ["padded_robe", "staff_of_embers", "frostguard_amulet"],
   };
   for (const [npcId, itemIds] of Object.entries(vendorCatalogs)) {
-    await prisma.npcVendorItem.deleteMany({ where: { npc_id: npcId } });
-    await prisma.npcVendorItem.createMany({ data: itemIds.map((item_id) => ({ npc_id: npcId, item_id })) });
+    await setVendorCatalog(npcId, itemIds);
   }
 
   // --- Quests ---
@@ -959,7 +978,7 @@ async function main() {
     },
   ];
   for (const q of quests) {
-    await prisma.quest.upsert({ where: { id: q.id }, create: q, update: q });
+    await upsert("quests", q);
   }
 
   // --- Enemy spawns (overworld) ---
@@ -993,7 +1012,7 @@ async function main() {
     { id: "frost-giant-4", map_id: "overworld", enemy_type_id: "frost_giant", x: -165, z: 80, respawn_ms: 25_000 },
   ];
   for (const s of spawns) {
-    await prisma.enemySpawn.upsert({ where: { id: s.id }, create: s, update: s });
+    await upsert("enemy_spawns", s);
   }
 
   // --- Structures (a small starter town near the quest_giver/merchant cluster - one of each
@@ -1059,7 +1078,7 @@ async function main() {
     { id: "frosthold_tower", name: "Frosthold Watchtower", map_id: "overworld", kind: "tower", x: -140, z: 100, rotation_y: 0, width: 4, depth: 4, height: 10, color: "#7d97a8" },
   ];
   for (const s of structures) {
-    await prisma.structure.upsert({ where: { id: s.id }, create: s, update: s });
+    await upsert("structures", s);
   }
 
   // --- Waypoints (fast travel between "cities" - just two example points to start: the town
@@ -1073,7 +1092,7 @@ async function main() {
     { id: "waypoint_frosthold", name: "Frosthold", map_id: "overworld", x: -150, z: 100 },
   ];
   for (const w of waypoints) {
-    await prisma.waypoint.upsert({ where: { id: w.id }, create: w, update: w });
+    await upsert("waypoints", w);
   }
 
   // --- Furniture (dresses every room's interior - a table facing pair of chairs plus a
@@ -1115,7 +1134,7 @@ async function main() {
     { id: "furn_frosthold_crate", name: "Crate", map_id: "overworld", kind: "crate", x: -148, z: 102.8, rotation_y: 0, color: "#7d97a8" },
   ];
   for (const f of furniture) {
-    await prisma.furniture.upsert({ where: { id: f.id }, create: f, update: f });
+    await upsert("furniture", f);
   }
 
   // --- Dungeon ---
@@ -1138,7 +1157,7 @@ async function main() {
       [{ enemyTypeId: "dungeon_boss", x: 0, z: 8 }],
     ],
   };
-  await prisma.dungeon.upsert({ where: { id: dungeon.id }, create: dungeon, update: dungeon });
+  await upsert("dungeons", dungeon, ["composition", "encounters"]);
 
   console.log("Seed complete.");
 }
@@ -1149,5 +1168,5 @@ main()
     process.exit(1);
   })
   .finally(async () => {
-    await prisma.$disconnect();
+    await pool.end();
   });

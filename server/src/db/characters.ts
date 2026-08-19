@@ -1,5 +1,5 @@
 import { BASE_STATS, ClassId, MAIN_STAT_START_BONUS, PlayerStats } from "@mmo/shared";
-import { prisma } from "./client.js";
+import { pool } from "./client.js";
 
 export function createInitialStats(): PlayerStats {
   return { ...BASE_STATS, mainStat: BASE_STATS.mainStat + MAIN_STAT_START_BONUS };
@@ -25,33 +25,34 @@ export interface CharacterRow {
 }
 
 export async function listCharacters(userId: number): Promise<CharacterRow[]> {
-  return prisma.character.findMany({
-    where: { user_id: userId },
-    orderBy: { created_at: "asc" },
-  });
+  const { rows } = await pool.query<CharacterRow>(
+    "SELECT * FROM characters WHERE user_id = $1 ORDER BY created_at ASC",
+    [userId],
+  );
+  return rows;
 }
 
 export async function getCharacterForUser(characterId: number, userId: number): Promise<CharacterRow | null> {
-  return prisma.character.findFirst({ where: { id: characterId, user_id: userId } });
+  const { rows } = await pool.query<CharacterRow>(
+    "SELECT * FROM characters WHERE id = $1 AND user_id = $2",
+    [characterId, userId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function findCharacterByName(name: string): Promise<CharacterRow | null> {
-  return prisma.character.findUnique({ where: { name } });
+  const { rows } = await pool.query<CharacterRow>("SELECT * FROM characters WHERE name = $1", [name]);
+  return rows[0] ?? null;
 }
 
 export async function createCharacter(userId: number, name: string, classId: ClassId): Promise<CharacterRow> {
   const stats = createInitialStats();
-  return prisma.character.create({
-    data: {
-      user_id: userId,
-      name,
-      class_id: classId,
-      main_stat: stats.mainStat,
-      vitality: stats.vitality,
-      luck: stats.luck,
-      armor: stats.armor,
-    },
-  });
+  const { rows } = await pool.query<CharacterRow>(
+    `INSERT INTO characters (user_id, name, class_id, main_stat, vitality, luck, armor)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [userId, name, classId, stats.mainStat, stats.vitality, stats.luck, stats.armor],
+  );
+  return rows[0];
 }
 
 export async function saveCharacterProgress(
@@ -67,20 +68,24 @@ export async function saveCharacterProgress(
     questCompleted: Record<string, number>;
   },
 ): Promise<void> {
-  await prisma.character.update({
-    where: { id: characterId },
-    data: {
-      level: progress.level,
-      xp: progress.xp,
-      main_stat: progress.stats.mainStat,
-      vitality: progress.stats.vitality,
-      luck: progress.stats.luck,
-      armor: progress.stats.armor,
-      gold: progress.gold,
-      talent_points: progress.talentPoints,
-      talent_ranks: progress.talentRanks,
-      quest_progress: progress.questProgress,
-      quest_completed: progress.questCompleted,
-    },
-  });
+  await pool.query(
+    `UPDATE characters SET
+       level = $1, xp = $2, main_stat = $3, vitality = $4, luck = $5, armor = $6, gold = $7,
+       talent_points = $8, talent_ranks = $9, quest_progress = $10, quest_completed = $11
+     WHERE id = $12`,
+    [
+      progress.level,
+      progress.xp,
+      progress.stats.mainStat,
+      progress.stats.vitality,
+      progress.stats.luck,
+      progress.stats.armor,
+      progress.gold,
+      progress.talentPoints,
+      JSON.stringify(progress.talentRanks),
+      JSON.stringify(progress.questProgress),
+      JSON.stringify(progress.questCompleted),
+      characterId,
+    ],
+  );
 }

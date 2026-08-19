@@ -1,4 +1,4 @@
-import { prisma } from "./client.js";
+import { pool } from "./client.js";
 
 export interface UserRow {
   id: number;
@@ -10,23 +10,27 @@ export interface UserRow {
 }
 
 export async function createUser(username: string, email: string, passwordHash: string): Promise<UserRow> {
-  return prisma.user.create({
-    data: { username, email, password_hash: passwordHash },
-  });
+  const { rows } = await pool.query<UserRow>(
+    "INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING *",
+    [username, email, passwordHash],
+  );
+  return rows[0];
 }
 
 export async function findUserByUsername(username: string): Promise<UserRow | null> {
-  return prisma.user.findUnique({ where: { username } });
+  const { rows } = await pool.query<UserRow>("SELECT * FROM users WHERE username = $1", [username]);
+  return rows[0] ?? null;
 }
 
 export async function findUserById(id: number): Promise<UserRow | null> {
-  return prisma.user.findUnique({ where: { id } });
+  const { rows } = await pool.query<UserRow>("SELECT * FROM users WHERE id = $1", [id]);
+  return rows[0] ?? null;
 }
 
 // A fresh DB lookup (not embedded in the JWT) so a role change takes effect on the very next
 // request rather than waiting out the token's expiry - selects only `role`, since this runs on
 // every /admin/* request and the caller doesn't need the rest of the row.
 export async function findUserRoleById(id: number): Promise<string | null> {
-  const user = await prisma.user.findUnique({ where: { id }, select: { role: true } });
-  return user?.role ?? null;
+  const { rows } = await pool.query<{ role: string }>("SELECT role FROM users WHERE id = $1", [id]);
+  return rows[0]?.role ?? null;
 }

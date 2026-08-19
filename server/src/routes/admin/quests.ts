@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const questSchema = z.object({
@@ -17,4 +16,4 @@ const updateSchema = questSchema.omit({ id: true }).partial();
 // No checkDeletable - Character.quest_progress/quest_completed are JSON maps keyed by quest
 // id; a stale entry for a deleted quest is simply never matched again, same graceful-orphan
 // pattern as talents.
-export const questsRouter = createCrudRouter(prisma.quest, { createSchema: questSchema, updateSchema });
+export const questsRouter = createCrudRouter("quests", { createSchema: questSchema, updateSchema });

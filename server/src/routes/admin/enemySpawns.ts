@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const spawnSchema = z.object({
@@ -14,4 +13,4 @@ const updateSchema = spawnSchema.omit({ id: true }).partial();
 
 // No checkDeletable - nothing references a spawn point by id, it's a leaf row (a place on a
 // map where an enemy type respawns).
-export const enemySpawnsRouter = createCrudRouter(prisma.enemySpawn, { createSchema: spawnSchema, updateSchema });
+export const enemySpawnsRouter = createCrudRouter("enemy_spawns", { createSchema: spawnSchema, updateSchema });

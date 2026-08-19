@@ -1,5 +1,5 @@
 import { EquipSlot } from "@mmo/shared";
-import { prisma } from "./client.js";
+import { pool, withTransaction } from "./client.js";
 
 export interface CharacterItemRow {
   id: number;
@@ -15,8 +15,11 @@ export interface EquippedItemIds {
 }
 
 export async function listCharacterItems(characterId: number): Promise<CharacterItemRow[]> {
-  const rows = await prisma.characterItem.findMany({ where: { character_id: characterId } });
-  return rows as CharacterItemRow[];
+  const { rows } = await pool.query<CharacterItemRow>(
+    "SELECT * FROM character_items WHERE character_id = $1",
+    [characterId],
+  );
+  return rows;
 }
 
 // Inventory is small (capped at INVENTORY_SIZE + 3 equip slots), so rather than tracking
@@ -35,12 +38,13 @@ export async function replaceCharacterItems(
     ...(equipped.trinket ? [{ item_id: equipped.trinket, slot: "trinket" as EquipSlot }] : []),
   ];
 
-  await prisma.$transaction([
-    prisma.characterItem.deleteMany({ where: { character_id: characterId } }),
-    ...rows.map((row) =>
-      prisma.characterItem.create({
-        data: { character_id: characterId, item_id: row.item_id, slot: row.slot },
-      }),
-    ),
-  ]);
+  await withTransaction(async (client) => {
+    await client.query("DELETE FROM character_items WHERE character_id = $1", [characterId]);
+    for (const row of rows) {
+      await client.query(
+        "INSERT INTO character_items (character_id, item_id, slot) VALUES ($1, $2, $3)",
+        [characterId, row.item_id, row.slot],
+      );
+    }
+  });
 }

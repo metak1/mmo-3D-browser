@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { prisma } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
 
 const spellSchema = z.object({
@@ -21,4 +20,4 @@ const updateSchema = spellSchema.omit({ id: true }).partial();
 
 // No checkDeletable - nothing else references a spell by id (characters don't "learn" spells
 // individually, every spell belonging to your class is simply available).
-export const spellsRouter = createCrudRouter(prisma.spell, { createSchema: spellSchema, updateSchema });
+export const spellsRouter = createCrudRouter("spells", { createSchema: spellSchema, updateSchema });
