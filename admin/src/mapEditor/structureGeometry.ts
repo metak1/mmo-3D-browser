@@ -1,60 +1,27 @@
 import * as THREE from "three";
-import {
-  STRUCTURE_DOOR_WIDTH_FRACTION,
-  STRUCTURE_GATE_PILLAR_FRACTION,
-  STRUCTURE_MAX_DOOR_WIDTH,
-  STRUCTURE_WALL_THICKNESS,
-  StructureDef,
-} from "@mmo/shared";
+import { STRUCTURE_GATE_PILLAR_FRACTION, StructureDef, StructureLoop } from "@mmo/shared";
 
-// Mirrors client/src/game/Structure.ts's geometry exactly (same shared wall/door/pillar
-// constants), minus the fade-material bookkeeping - the editor always shows structures fully
-// solid, there's no walk-in fading concept here. Kept as a separate file rather than imported
-// from the client app or moved into @mmo/shared: admin has no other Three.js code today and
-// shared is deliberately rendering-library-free (the server imports it too). The duplication is
-// the ~80 lines of box/cone construction below, not the numbers that actually matter for
+// Mirrors client/src/game/Structure.ts's geometry exactly (same shared wall/pillar constants),
+// minus the fade-material bookkeeping - the editor always shows structures fully solid, there's
+// no walk-in fading concept here. Kept as a separate file rather than imported from the client
+// app or moved into @mmo/shared: admin has no other Three.js code today and shared is
+// deliberately rendering-library-free (the server imports it too). The duplication is the ~100
+// lines of box/cone/polygon construction below, not the numbers that actually matter for
 // correctness (those stay single-sourced in @mmo/shared).
 const ROOF_COLOR = 0x4a3626;
+const FLOOR_COLOR = 0x6b4a30;
 
-function pyramidRoof(width: number, depth: number, height: number): THREE.Mesh {
+function towerCap(width: number, depth: number, height: number): THREE.Mesh {
+  // flatShading matters here even more than on the client: this is a bare, untextured cone, and
+  // without it the 4 faces blend into each other at the shared edges (ConeGeometry smooths its
+  // vertex normals by default) - the cap reads as a soft blob instead of a crisp pyramid, which
+  // also makes it hard to judge while resizing since there's no visible ridge to gauge proportions.
   const mesh = new THREE.Mesh(
     new THREE.ConeGeometry((Math.max(width, depth) / 2) * 1.15, height, 4),
-    new THREE.MeshStandardMaterial({ color: ROOF_COLOR }),
+    new THREE.MeshStandardMaterial({ color: ROOF_COLOR, flatShading: true }),
   );
   mesh.rotation.y = Math.PI / 4;
   return mesh;
-}
-
-function buildHouse(def: StructureDef): THREE.Object3D {
-  const group = new THREE.Group();
-  const wallHeight = def.height * 0.7;
-  const wallMaterial = new THREE.MeshStandardMaterial({ color: def.color });
-
-  const doorWidth = Math.min(def.width * STRUCTURE_DOOR_WIDTH_FRACTION, STRUCTURE_MAX_DOOR_WIDTH);
-  const frontSegmentWidth = (def.width - doorWidth) / 2;
-  if (frontSegmentWidth > 0.05) {
-    for (const sign of [-1, 1]) {
-      const segment = new THREE.Mesh(new THREE.BoxGeometry(frontSegmentWidth, wallHeight, STRUCTURE_WALL_THICKNESS), wallMaterial);
-      segment.position.set(sign * (doorWidth / 2 + frontSegmentWidth / 2), wallHeight / 2, -def.depth / 2);
-      group.add(segment);
-    }
-  }
-
-  const backWall = new THREE.Mesh(new THREE.BoxGeometry(def.width, wallHeight, STRUCTURE_WALL_THICKNESS), wallMaterial);
-  backWall.position.set(0, wallHeight / 2, def.depth / 2);
-  group.add(backWall);
-
-  for (const sign of [-1, 1]) {
-    const sideWall = new THREE.Mesh(new THREE.BoxGeometry(STRUCTURE_WALL_THICKNESS, wallHeight, def.depth), wallMaterial);
-    sideWall.position.set((sign * def.width) / 2, wallHeight / 2, 0);
-    group.add(sideWall);
-  }
-
-  const roof = pyramidRoof(def.width, def.depth, def.height * 0.4);
-  roof.position.y = wallHeight + (def.height * 0.4) / 2;
-  group.add(roof);
-
-  return group;
 }
 
 function buildWall(def: StructureDef): THREE.Object3D {
@@ -64,6 +31,27 @@ function buildWall(def: StructureDef): THREE.Object3D {
   );
   mesh.position.y = def.height / 2;
   return mesh;
+}
+
+// A simple frame (two posts + a lintel) rather than a solid box - mirrors client/src/game/
+// Structure.ts's buildDoor exactly, so the editor preview matches what actually renders in-game.
+function buildDoor(def: StructureDef): THREE.Object3D {
+  const group = new THREE.Group();
+  const material = new THREE.MeshStandardMaterial({ color: def.color });
+  const postWidth = Math.min(def.width * 0.18, 0.3);
+
+  for (const sign of [-1, 1]) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(postWidth, def.height, def.depth), material);
+    post.position.set((sign * (def.width - postWidth)) / 2, def.height / 2, 0);
+    group.add(post);
+  }
+
+  const lintelHeight = def.height * 0.15;
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(def.width, lintelHeight, def.depth), material);
+  lintel.position.y = def.height - lintelHeight / 2;
+  group.add(lintel);
+
+  return group;
 }
 
 function buildTower(def: StructureDef): THREE.Object3D {
@@ -76,7 +64,7 @@ function buildTower(def: StructureDef): THREE.Object3D {
   body.position.y = bodyHeight / 2;
   group.add(body);
 
-  const cap = pyramidRoof(def.width, def.depth, def.height * 0.25);
+  const cap = towerCap(def.width, def.depth, def.height * 0.25);
   cap.position.y = bodyHeight + (def.height * 0.25) / 2;
   group.add(cap);
   return group;
@@ -106,14 +94,49 @@ function buildGate(def: StructureDef): THREE.Object3D {
 // x/z/rotationY, same division of responsibility as client/src/game/Structure.ts's StructureAvatar.
 export function buildStructureShape(def: StructureDef): THREE.Object3D {
   switch (def.kind) {
-    case "house":
-    case "shop":
-      return buildHouse(def);
     case "wall":
       return buildWall(def);
+    case "door":
+      return buildDoor(def);
     case "tower":
       return buildTower(def);
     case "gate":
       return buildGate(def);
+    default:
+      return new THREE.Group(); // unrecognized kind (e.g. stale data) - render nothing rather than crash
   }
+}
+
+// Mirrors client/src/game/Structure.ts's buildFlatPolygon - see its comment for why this
+// triangulates in x/z and writes y directly instead of going through THREE.Shape's local-XY-plane
+// + rotation route. Meshes are already in world space (unlike buildStructureShape's pieces, which
+// the caller positions/rotates) since a room's polygon comes from several structures at once and
+// has no single def to be "local" to.
+function buildFlatPolygon(points: { x: number; z: number }[], y: number, material: THREE.Material): THREE.Mesh {
+  const positions: number[] = [];
+  for (const p of points) positions.push(p.x, y, p.z);
+
+  const triangles = THREE.ShapeUtils.triangulateShape(
+    points.map((p) => new THREE.Vector2(p.x, p.z)),
+    [],
+  );
+  const indices: number[] = [];
+  for (const [a, b, c] of triangles) indices.push(a, b, c);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry, material);
+}
+
+// The floor + roof over one room detected by findStructureLoops - shown fully opaque (no walk-in
+// fade, matching every other structure in the editor) so an admin can always see the room they
+// just closed off. Returns a world-space group, already positioned - unlike buildStructureShape,
+// the caller doesn't reposition this.
+export function buildEnclosureShape(loop: StructureLoop): THREE.Object3D {
+  const group = new THREE.Group();
+  group.add(buildFlatPolygon(loop.floorPoints, loop.floorY + 0.02, new THREE.MeshStandardMaterial({ color: FLOOR_COLOR, side: THREE.DoubleSide })));
+  group.add(buildFlatPolygon(loop.roofPoints, loop.roofY, new THREE.MeshStandardMaterial({ color: ROOF_COLOR, side: THREE.DoubleSide })));
+  return group;
 }

@@ -43,6 +43,7 @@ export class DungeonRoom extends Room<DungeonState> {
       onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
         this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
       onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
+      onCombatText: (event) => this.broadcast("combat_text", event),
     });
 
     this.spawnEncounter(0);

@@ -16,6 +16,7 @@ import {
   CLASSES,
   ClassId,
   ClassRole,
+  CombatTextEvent,
   ContentSnapshot,
   DUNGEON_COMPOSITION,
   DUNGEON_PARTY_SIZE,
@@ -24,6 +25,7 @@ import {
   EnemyBehavior,
   EquipMessage,
   EquipSlot,
+  FURNITURE,
   InputMessage,
   INVENTORY_SIZE,
   ITEMS,
@@ -46,6 +48,7 @@ import {
   RARITY_MULTIPLIER,
   RefundTalentMessage,
   resolveStructureCollisions,
+  SPAWN_POINTS,
   SPELLS,
   SellItemMessage,
   SpellId,
@@ -60,8 +63,12 @@ import {
   TurnInQuestMessage,
   UnequipMessage,
   VENDOR_SELL_FRACTION,
+  WAYPOINTS,
+  WAYPOINT_INTERACT_RADIUS,
+  WaypointTravelMessage,
   decodeItemToken,
   encodeItemToken,
+  findStructureLoops,
   getEffectiveStats,
   getSpellCharges,
   getTerrainHeight,
@@ -70,11 +77,15 @@ import {
 } from "@mmo/shared";
 import { GameScene } from "./game/Scene";
 import { AoeCircle } from "./game/AoeCircle";
+import { FloatingCombatText } from "./game/FloatingCombatText";
+import { playHitSound, playHealSound } from "./game/sfx";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
 import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
-import { StructureAvatar } from "./game/Structure";
-import { Minimap } from "./game/Minimap";
+import { StructureAvatar, StructureEnclosureAvatar } from "./game/Structure";
+import { WaypointAvatar } from "./game/Waypoint";
+import { FurnitureAvatar } from "./game/Furniture";
+import { Minimap, QuestAreaMarker } from "./game/Minimap";
 import { PortalAvatar } from "./game/Portal";
 import { ProjectileAvatar } from "./game/Projectile";
 import { LootBagAvatar } from "./game/LootBagAvatar";
@@ -190,6 +201,9 @@ const inventoryListEl = document.getElementById("inventory-list")!;
 
 const lootWindow = document.getElementById("loot-window")!;
 const lootListEl = document.getElementById("loot-list")!;
+
+const waypointPanel = document.getElementById("waypoint-panel")!;
+const waypointListEl = document.getElementById("waypoint-list")!;
 
 const talentPanel = document.getElementById("talent-panel")!;
 const talentListEl = document.getElementById("talent-list")!;
@@ -373,6 +387,7 @@ makeDraggable(document.getElementById("character-panel")!, "character");
 makeDraggable(document.getElementById("xp-panel")!, "xp");
 makeDraggable(inventoryPanel, "inventory");
 makeDraggable(lootWindow, "loot");
+makeDraggable(waypointPanel, "waypoint");
 makeDraggable(talentPanel, "talents");
 makeDraggable(npcDialoguePanel, "npc-dialogue");
 makeDraggable(questLogPanel, "quest-log");
@@ -638,14 +653,39 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     npcs.set(def.id, avatar);
   }
 
+  // Waypoints are static shared data too, same as NPCs - a fast-travel destination list, not
+  // synced room state.
+  const waypoints = new Map<string, WaypointAvatar>();
+  for (const def of WAYPOINTS) {
+    const avatar = new WaypointAvatar();
+    avatar.group.userData.waypointId = def.id;
+    avatar.setPosition(def.x, def.z);
+    avatar.addTo(gameScene.scene);
+    waypoints.set(def.id, avatar);
+  }
+
+  // Furniture is static shared data too - purely decorative, never clicked/interacted with, so
+  // unlike npcs/waypoints there's no userData tag or click handling to wire up for it.
+  for (const def of FURNITURE) {
+    const avatar = new FurnitureAvatar(def);
+    avatar.addTo(gameScene.scene);
+  }
+
   // Structures are static shared data too (no state, never move) - spawned once at boot the
   // same way as NPCs. Kept in an array (unlike npcs' Map) since nothing ever looks one up by id
-  // client-side - they only need per-frame update() calls for the house/shop walk-in fade.
-  const structures: StructureAvatar[] = [];
+  // client-side - they only need per-frame update() calls for a room's walk-in roof fade.
+  // findStructureLoops re-derives every enclosed room purely from the wall/door list (see
+  // shared/src/types.ts) - there's nothing else to load, an admin never authors a "room" directly.
+  const structures: (StructureAvatar | StructureEnclosureAvatar)[] = [];
   for (const def of STRUCTURES) {
     const avatar = new StructureAvatar(def);
     avatar.addTo(gameScene.scene);
     structures.push(avatar);
+  }
+  for (const loop of findStructureLoops()) {
+    const enclosure = new StructureEnclosureAvatar(loop);
+    enclosure.addTo(gameScene.scene);
+    structures.push(enclosure);
   }
 
   // The portal only exists in the overworld - it's how a dungeon instance is entered in
@@ -663,13 +703,19 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const groundTargetPreview = new AoeCircle();
   gameScene.scene.add(groundTargetPreview.mesh);
 
+  const combatText = new FloatingCombatText(gameScene.scene);
+
   let room: Room | undefined;
   let localSessionId: string | null = null;
   let currentTargetId: string | null = null;
   let currentLootBagId: string | null = null;
   let currentNpcDialogueId: string | null = null;
+  let currentWaypointId: string | null = null;
   let localPlayerSchema: PlayerStatsSnapshot | undefined;
   let pendingGroundTargetSpellId: SpellId | null = null;
+  let pendingGroundTargetSlotIndex: number | null = null;
+  let lastGroundCursorX = 0;
+  let lastGroundCursorZ = 0;
 
   let localHp = 0;
   let localMaxHp = 0;
@@ -1011,6 +1057,57 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     room?.send("cast", message);
   }
 
+  // Mirrors CombatEngine.RANGE_BUFFER (a small allowance for latency between this check and the
+  // server's own) so an "in range" verdict here doesn't diverge from what the server will accept.
+  const CLIENT_RANGE_BUFFER = 1;
+
+  function isWithinSpellRange(spellId: SpellId, targetX: number, targetZ: number): boolean {
+    const dist = Math.hypot(localPredicted.x - targetX, localPredicted.z - targetZ);
+    return dist <= SPELLS[spellId].range + CLIENT_RANGE_BUFFER;
+  }
+
+  // Briefly flashes a hotbar slot red on top of whatever steady state it's already in - the extra
+  // acknowledgment for a cast that was just refused for being out of range (see castSpell/the
+  // ground-target click handler below). The steady "too-far" state itself is driven continuously
+  // by isSpellOutOfRange, not by this.
+  function flashOutOfRange(slotIndex: number) {
+    const el = spellSlotEls[slotIndex];
+    if (!el) return;
+    el.classList.remove("out-of-range");
+    void el.offsetWidth; // force reflow so re-adding the class restarts the CSS animation
+    el.classList.add("out-of-range");
+    el.addEventListener("animationend", () => el.classList.remove("out-of-range"), { once: true });
+  }
+
+  // Live (not cast-attempt-gated) check of whether a slot's spell would currently reach its
+  // would-be target - drives the hotbar's steady red border every frame so it clears the instant
+  // the player walks back into range, without needing another cast attempt. "ally" mirrors the
+  // server's own fallback-to-self (see CombatEngine.resolveCastTarget), which is always in range,
+  // so only an explicitly-selected other player counts; "ground" only applies while that spell's
+  // placement is the one currently pending, checked against the last known cursor position.
+  function isSpellOutOfRange(spellId: SpellId): boolean {
+    const spell = SPELLS[spellId];
+    if (spell.targetType === "enemy") {
+      if (!currentTargetId || !enemySchemaById.has(currentTargetId)) return false;
+      const pos = enemies.get(currentTargetId)?.group.position;
+      return pos ? !isWithinSpellRange(spellId, pos.x, pos.z) : false;
+    }
+    if (spell.targetType === "ally") {
+      if (!currentTargetId || currentTargetId === localSessionId || !playerSchemaById.has(currentTargetId)) return false;
+      const pos = avatars.get(currentTargetId)?.group.position;
+      return pos ? !isWithinSpellRange(spellId, pos.x, pos.z) : false;
+    }
+    if (spell.targetType === "ground") {
+      if (pendingGroundTargetSpellId !== spellId) return false;
+      return !isWithinSpellRange(spellId, lastGroundCursorX, lastGroundCursorZ);
+    }
+    return false;
+  }
+
+  // Range is checked here, client-side, purely so an out-of-range attempt never calls sendCast in
+  // the first place - the server already refuses the cast for the same reason (see CombatEngine's
+  // own dist check in handleCast, which runs before it consumes a charge), but by then the
+  // hotbar's cooldown sweep has already started predicting a cast that will never land.
   function castSpell(slotIndex: number) {
     if (!room) return;
     const spellId = slotSpellIds[slotIndex];
@@ -1022,6 +1119,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     if (spell.targetType === "ground") {
       pendingGroundTargetSpellId = spellId;
+      pendingGroundTargetSlotIndex = slotIndex;
       container.classList.add("ground-target-pending");
       groundTargetPreview.setRadius(spell.aoeRadius ?? 0);
       groundTargetPreview.show();
@@ -1030,9 +1128,21 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     if (spell.targetType === "enemy") {
       if (!currentTargetId || !enemySchemaById.has(currentTargetId)) return;
+      const enemyPos = enemies.get(currentTargetId)?.group.position;
+      if (enemyPos && !isWithinSpellRange(spellId, enemyPos.x, enemyPos.z)) {
+        flashOutOfRange(slotIndex);
+        return;
+      }
       sendCast(spellId, { spellId, targetId: currentTargetId });
     } else if (spell.targetType === "ally") {
       const targetId = currentTargetId && playerSchemaById.has(currentTargetId) ? currentTargetId : localSessionId ?? undefined;
+      if (targetId && targetId !== localSessionId) {
+        const allyPos = avatars.get(targetId)?.group.position;
+        if (allyPos && !isWithinSpellRange(spellId, allyPos.x, allyPos.z)) {
+          flashOutOfRange(slotIndex);
+          return;
+        }
+      }
       sendCast(spellId, { spellId, targetId });
     } else if (spell.targetType === "self") {
       sendCast(spellId, { spellId });
@@ -1042,6 +1152,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   function cancelPendingGroundTarget() {
     if (!pendingGroundTargetSpellId) return;
     pendingGroundTargetSpellId = null;
+    pendingGroundTargetSlotIndex = null;
     container.classList.remove("ground-target-pending");
     groundTargetPreview.hide();
   }
@@ -1093,6 +1204,41 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
   });
 
+  // Lists every OTHER waypoint on the map - the server independently re-validates that the
+  // player is actually standing near some waypoint (see WorldRoom.handleWaypointTravel), this
+  // just keeps the current one from pointlessly listing itself as a destination.
+  function renderWaypointPanel() {
+    if (!currentWaypointId) return;
+
+    waypointListEl.innerHTML = "";
+    for (const def of WAYPOINTS) {
+      if (def.id === currentWaypointId) continue;
+
+      const row = document.createElement("button");
+      row.className = "item-row";
+      row.textContent = def.name;
+      row.addEventListener("click", () => {
+        const message: WaypointTravelMessage = { targetWaypointId: def.id };
+        room?.send("waypoint_travel", message);
+        closeWaypointPanel();
+      });
+      waypointListEl.appendChild(row);
+    }
+  }
+
+  function openWaypointPanel(waypointId: string) {
+    currentWaypointId = waypointId;
+    waypointPanel.hidden = false;
+    renderWaypointPanel();
+  }
+
+  function closeWaypointPanel() {
+    currentWaypointId = null;
+    waypointPanel.hidden = true;
+  }
+
+  document.querySelector("[data-waypoint-close]")!.addEventListener("click", () => closeWaypointPanel());
+
   type QuestState = "available" | "active" | "ready" | "completed";
 
   function questStateFor(questId: string): QuestState {
@@ -1107,6 +1253,44 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     const noun = quest.objectiveCount === 1 ? "Enemy" : "Enemies";
     const enemyName = ENEMY_TYPES[quest.objectiveEnemyTypeId]?.name ?? quest.objectiveEnemyTypeId;
     return `Kill ${quest.objectiveCount} ${enemyName} ${noun}`;
+  }
+
+  // Stable per-player numbering for every quest currently in the log (accepted, whether still
+  // in progress or ready to turn in) - questProgress is a MapSchema, so iteration order matches
+  // acceptance order, giving quest "3" the same meaning everywhere it's shown: the log, the
+  // giver's dialogue, and its map area circle (see computeQuestAreaMarkers below).
+  function activeQuestNumbers(): Map<string, number> {
+    const numbers = new Map<string, number>();
+    if (!localPlayerSchema) return numbers;
+    let index = 1;
+    for (const [questId] of localPlayerSchema.questProgress) numbers.set(questId, index++);
+    return numbers;
+  }
+
+  // A quest has no location of its own - only an enemy type (QuestDef.objectiveEnemyTypeId) - so
+  // "where do I go" is derived from wherever that type actually spawns (SPAWN_POINTS), the same
+  // way an NPC's quest indicator is derived rather than authored. One circle per quest, centered
+  // on and sized to bound every matching spawn point (plus a flat margin so even a single spawn -
+  // e.g. the one-off world boss - still reads as a real area, not a pinpoint).
+  const QUEST_AREA_PADDING = 12;
+
+  function computeQuestAreaMarkers(): QuestAreaMarker[] {
+    if (!localPlayerSchema) return [];
+    const markers: QuestAreaMarker[] = [];
+    let index = 1;
+    for (const [questId] of localPlayerSchema.questProgress) {
+      const number = index++;
+      const quest = QUESTS[questId];
+      if (!quest) continue;
+      const spawns = SPAWN_POINTS.filter((s) => s.enemyTypeId === quest.objectiveEnemyTypeId);
+      if (spawns.length === 0) continue;
+
+      const x = spawns.reduce((sum, s) => sum + s.x, 0) / spawns.length;
+      const z = spawns.reduce((sum, s) => sum + s.z, 0) / spawns.length;
+      const radius = Math.max(...spawns.map((s) => Math.hypot(s.x - x, s.z - z))) + QUEST_AREA_PADDING;
+      markers.push({ x, z, radius, number });
+    }
+    return markers;
   }
 
   // Ready-to-turn-in takes priority (most actionable), then a new quest to offer, then a
@@ -1140,16 +1324,19 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     npcDialogueNameEl.textContent = npc.name;
     npcDialogueQuestsEl.innerHTML = "";
+    const questNumbers = activeQuestNumbers();
 
     for (const questId of NPC_QUEST_IDS[npc.id] ?? []) {
       const quest = QUESTS[questId];
       const state = questStateFor(questId);
       const progress = localPlayerSchema ? (new Map(localPlayerSchema.questProgress).get(questId) ?? 0) : 0;
+      const number = questNumbers.get(questId);
+      const numberBadge = number !== undefined ? `<span class="quest-number">${number}</span>` : "";
 
       const card = document.createElement("div");
       card.className = "talent-card";
       card.innerHTML = `
-        <div class="talent-card-top"><span>${quest.name}</span></div>
+        <div class="talent-card-top"><span>${numberBadge}${quest.name}</span></div>
         <span class="talent-desc">${quest.description}</span>
         <span class="quest-objective">${questObjectiveLabel(quest)}</span>
       `;
@@ -1366,13 +1553,15 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   function renderQuestLog() {
     questLogListEl.innerHTML = "";
     if (!localPlayerSchema) return;
+    let index = 1;
     for (const [questId, progress] of localPlayerSchema.questProgress) {
+      const number = index++;
       const quest = QUESTS[questId];
       if (!quest) continue;
       const row = document.createElement("div");
       row.className = "item-row";
       row.innerHTML = `
-        <span>${quest.name}<span class="quest-objective">${questObjectiveLabel(quest)}</span></span>
+        <span><span class="quest-number">${number}</span>${quest.name}<span class="quest-objective">${questObjectiveLabel(quest)}</span></span>
         <span class="item-slot-tag">${progress} / ${quest.objectiveCount}</span>
       `;
       questLogListEl.appendChild(row);
@@ -1478,11 +1667,16 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     if (pendingGroundTargetSpellId) {
       const spellId = pendingGroundTargetSpellId;
+      const slotIndex = pendingGroundTargetSlotIndex;
       cancelPendingGroundTarget();
       const hitPoint = new THREE.Vector3();
       if (raycaster.ray.intersectPlane(groundPlane, hitPoint)) {
         const targetX = clamp(hitPoint.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
         const targetZ = clamp(hitPoint.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        if (!isWithinSpellRange(spellId, targetX, targetZ)) {
+          if (slotIndex !== null) flashOutOfRange(slotIndex);
+          return;
+        }
         sendCast(spellId, { spellId, targetX, targetZ });
       }
       return;
@@ -1493,6 +1687,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       ...[...avatars.values()].map((avatar) => avatar.group),
       ...[...lootBags.values()].map((avatar) => avatar.group),
       ...[...npcs.values()].map((avatar) => avatar.group),
+      ...[...waypoints.values()].map((avatar) => avatar.group),
       ...(portal ? [portal.group] : []),
     ];
     const hits = raycaster.intersectObjects(clickable, true);
@@ -1509,6 +1704,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       !obj.userData.bagId &&
       !obj.userData.sessionId &&
       !obj.userData.npcId &&
+      !obj.userData.waypointId &&
       !obj.userData.isPortal
     ) {
       obj = obj.parent;
@@ -1520,6 +1716,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
     if (obj?.userData.npcId) {
       openNpcDialogue(obj.userData.npcId as string);
+      return;
+    }
+    if (obj?.userData.waypointId) {
+      openWaypointPanel(obj.userData.waypointId as string);
       return;
     }
     if (obj?.userData.isPortal) {
@@ -1547,6 +1747,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       const x = clamp(hitPoint.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
       const z = clamp(hitPoint.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
       groundTargetPreview.setPosition(x, z);
+      lastGroundCursorX = x;
+      lastGroundCursorZ = z;
     }
   });
 
@@ -1639,6 +1841,22 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     room.onMessage("trade_complete", () => closeTradeWindow());
     room.onMessage("trade_cancelled", () => closeTradeWindow());
 
+    // Transient, not synced schema state (see CombatTextEvent) - a target that's already
+    // despawned by the time this arrives (killing blow, or a projectile landing after death)
+    // just has nothing to spawn the number above.
+    room.onMessage("combat_text", (event: CombatTextEvent) => {
+      const position =
+        event.targetKind === "player" ? avatars.get(event.targetId)?.group.position : enemies.get(event.targetId)?.group.position;
+      if (!position) return;
+
+      const text = `${event.kind === "heal" ? "+" : "-"}${Math.round(event.amount)}`;
+      const color = event.kind === "heal" ? "#5fe089" : event.isCrit ? "#ffcf4a" : "#ff5a5a";
+      combatText.spawn(position.x, position.y, position.z, text, color, event.isCrit);
+
+      if (event.kind === "heal") playHealSound();
+      else playHitSound(event.isCrit);
+    });
+
     dungeonStatusPanel.hidden = !isDungeon;
     if (isDungeon) {
       const updateDungeonStatusPanel = () => {
@@ -1707,6 +1925,12 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         $(player.ailments).onRemove(() => updateAilmentIndicator(player));
         $(player.buffs).onAdd(() => updateBuffIndicator(player));
         $(player.buffs).onRemove(() => updateBuffIndicator(player));
+        // Same reasoning as above - a completed trade removes/adds inventory tokens (see
+        // TradeManager.finalize) without necessarily touching gold (a trade can be items-only),
+        // so the parent Player onChange below isn't guaranteed to fire and the inventory panel
+        // was staying stale until something unrelated (equip, loot, reconnect) forced a re-render.
+        $(player.inventory).onAdd(() => renderInventory(player));
+        $(player.inventory).onRemove(() => renderInventory(player));
       }
 
       $(player).onChange(() => {
@@ -1977,8 +2201,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       updateEnemyTelegraph(enemyId, avatar);
     }
     for (const avatar of npcs.values()) avatar.update(dt);
+    for (const avatar of waypoints.values()) avatar.update(dt);
     for (const avatar of projectiles.values()) avatar.update();
     portal?.update(dt);
+    combatText.update(dt);
 
     if (localSessionId) {
       const others = [...avatars.entries()]
@@ -1990,10 +2216,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         isBoss: enemySchemaById.get(enemyId)?.behavior === "boss",
       }));
       const selfDot = { x: localPredicted.x, z: localPredicted.z, rotationY: localRotationY };
-      minimap.update(selfDot, others, enemyDots, !isDungeon);
+      const questAreas = computeQuestAreaMarkers();
+      minimap.update(selfDot, others, enemyDots, !isDungeon, questAreas);
       // Same per-frame data, just at a bigger radius - skip the extra canvas work while the
       // panel is closed instead of redrawing a map nobody can see.
-      if (!bigMapPanel.hidden) bigMap.update(selfDot, others, enemyDots, !isDungeon);
+      if (!bigMapPanel.hidden) bigMap.update(selfDot, others, enemyDots, !isDungeon, questAreas);
     }
 
     if (localCastActive && localCastSpellId !== "") {
@@ -2031,6 +2258,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       const spellId = slotSpellIds[i];
       const cooldownEl = cooldownEls[i];
       const chargesEl = chargesEls[i];
+      const slotEl = spellSlotEls[i];
       if (!cooldownEl || !spellId) continue;
 
       const now = performance.now();
@@ -2049,6 +2277,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         chargesEl.hidden = max <= 1;
         if (max > 1) chargesEl.textContent = `${available}/${max}`;
       }
+
+      slotEl?.classList.toggle("too-far", isSpellOutOfRange(spellId));
     }
 
     gameScene.render();

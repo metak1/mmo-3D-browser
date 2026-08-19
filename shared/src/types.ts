@@ -448,6 +448,18 @@ export interface RefundTalentMessage {
   talentId: string;
 }
 
+// A broadcast-only combat feedback event (client/src/game/FloatingCombatText.ts) - not part of
+// synced schema state, since it's a transient "this happened" notice rather than a value that
+// needs to stay consistent for a late-joining client. targetId is a sessionId when targetKind is
+// "player", an enemyId when "enemy" - the client already tracks avatars for both by id.
+export interface CombatTextEvent {
+  targetId: string;
+  targetKind: "player" | "enemy";
+  amount: number;
+  kind: "damage" | "heal";
+  isCrit: boolean;
+}
+
 export const NPC_INTERACT_RADIUS = 3; // mirrors LOOT_PICKUP_RADIUS
 
 export interface NpcDef {
@@ -470,6 +482,26 @@ export let NPC_QUEST_IDS: Record<NpcId, string[]> = {};
 // Selling always nets less than buying back would cost, even at the lowest (common) rarity a
 // purchase produces - buyPrice * VENDOR_SELL_FRACTION < buyPrice, so there's no arbitrage loop.
 export const VENDOR_SELL_FRACTION = 0.4;
+
+// Fast-travel points (client/src/game/Waypoint.ts) - a player standing within
+// WAYPOINT_INTERACT_RADIUS of any waypoint on the map can teleport to any other one, server-
+// authoritative (see WorldRoom.handleWaypointTravel). No per-character "discovered" state -
+// every waypoint on the active map is usable by anyone close enough to one, from the start.
+export const WAYPOINT_INTERACT_RADIUS = 4; // mirrors NPC_INTERACT_RADIUS/LOOT_PICKUP_RADIUS
+
+export interface WaypointDef {
+  id: string;
+  name: string;
+  mapId: MapId;
+  x: number;
+  z: number;
+}
+
+export let WAYPOINTS: WaypointDef[] = [];
+
+export interface WaypointTravelMessage {
+  targetWaypointId: string;
+}
 
 export interface BuyItemMessage {
   npcId: string;
@@ -608,8 +640,14 @@ export let SPAWN_POINTS: EnemySpawnDef[] = [];
 // kind is a closed union selecting a hardcoded procedural shape builder client-side
 // (client/src/game/Structure.ts); everything else is open admin content. Walls/pillars are
 // solid (see getStructureColliders below) - only players collide with them, blocking movement
-// server-side; doorway/gate gaps stay open on both the visual and the collision side.
-export type StructureKind = "house" | "shop" | "wall" | "tower" | "gate";
+// server-side; a door stays open on both the visual and the collision side.
+//
+// There's no "house"/"shop" prefab kind anymore - a building is just however many "wall"
+// segments an admin freely places (any position/length/rotation) plus one "door" segment where
+// they want the entrance. findStructureLoops below detects when a set of wall/door segments
+// forms a closed loop and auto-generates a floor + roof over it, so authoring a room is placing
+// walls around its perimeter and one door, not picking a single rigid rectangular prefab.
+export type StructureKind = "wall" | "door" | "tower" | "gate";
 
 export interface StructureDef {
   id: string;
@@ -627,6 +665,26 @@ export interface StructureDef {
 }
 
 export let STRUCTURES: StructureDef[] = [];
+
+// Purely decorative dressing for a room's interior (client/src/game/Furniture.ts) - unlike a
+// structure, furniture never collides and has no admin-set size, just a position/rotation/color
+// per fixed-shape kind (mirrors how an NPC has no size either). No server-side meaning at all;
+// it exists purely so an enclosed room (see StructureLoop) doesn't read as an empty box.
+export type FurnitureKind = "table" | "chair" | "barrel" | "crate" | "bookshelf";
+
+export interface FurnitureDef {
+  id: string;
+  name: string;
+  mapId: MapId;
+  kind: FurnitureKind;
+  x: number;
+  z: number;
+  rotationY: number;
+  color: string; // hex, e.g. "#8a6d4b"
+  yOffset: number; // added on top of the auto-computed terrain height - see getTerrainHeight
+}
+
+export let FURNITURE: FurnitureDef[] = [];
 
 // These shape a structure's solid geometry - shared between the client's wall/door/pillar
 // meshes (client/src/game/Structure.ts) and the server's collision resolution below, so what
@@ -647,35 +705,15 @@ export interface StructureCollider {
 }
 
 // Solid rectangles for a structure, in local (unrotated) space - one entry per wall/pillar
-// segment, mirroring exactly what buildHouse/buildWall/buildTower/buildGate render as solid.
+// segment, mirroring exactly what buildWall/buildDoor/buildTower/buildGate render as solid.
+// The `default` isn't reachable through the type system (the switch is already exhaustive over
+// StructureKind) - it's a runtime safety net for a stale/unrecognized kind value living in the
+// database mid-rollout of a StructureKind change, so a bad row makes that one structure
+// decoration-only instead of crashing every collision/line-of-sight check on the server.
 export function getStructureColliders(def: StructureDef): StructureCollider[] {
   switch (def.kind) {
-    case "house":
-    case "shop": {
-      const doorWidth = Math.min(def.width * STRUCTURE_DOOR_WIDTH_FRACTION, STRUCTURE_MAX_DOOR_WIDTH);
-      const frontSegmentWidth = (def.width - doorWidth) / 2;
-      const colliders: StructureCollider[] = [];
-      if (frontSegmentWidth > 0.05) {
-        for (const sign of [-1, 1]) {
-          colliders.push({
-            localX: sign * (doorWidth / 2 + frontSegmentWidth / 2),
-            localZ: -def.depth / 2,
-            halfWidth: frontSegmentWidth / 2,
-            halfDepth: STRUCTURE_WALL_THICKNESS / 2,
-          });
-        }
-      }
-      colliders.push({ localX: 0, localZ: def.depth / 2, halfWidth: def.width / 2, halfDepth: STRUCTURE_WALL_THICKNESS / 2 });
-      for (const sign of [-1, 1]) {
-        colliders.push({
-          localX: (sign * def.width) / 2,
-          localZ: 0,
-          halfWidth: STRUCTURE_WALL_THICKNESS / 2,
-          halfDepth: def.depth / 2,
-        });
-      }
-      return colliders;
-    }
+    case "door":
+      return []; // fully open - a door never blocks movement or line of sight
     case "wall":
     case "tower":
       return [{ localX: 0, localZ: 0, halfWidth: def.width / 2, halfDepth: def.depth / 2 }];
@@ -689,6 +727,8 @@ export function getStructureColliders(def: StructureDef): StructureCollider[] {
         halfDepth: def.depth / 2,
       }));
     }
+    default:
+      return [];
   }
 }
 
@@ -792,6 +832,173 @@ export function hasLineOfSight(x1: number, z1: number, x2: number, z2: number, s
     }
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Room detection - a "wall"/"door" segment is just a line in the x/z plane (its two endpoints,
+// derived from x/z/width/rotationY below); findStructureLoops looks for places where several of
+// them connect end-to-end into a single closed loop, which is what makes a room a room instead of
+// just some walls standing near each other. See client/src/game/Structure.ts's buildEnclosure
+// (and the admin map editor's mirror of it) for what actually gets built from a StructureLoop.
+// ---------------------------------------------------------------------------------------------
+
+// Endpoints are computed within LOOP_ENDPOINT_TOLERANCE of "exact", not exactly - free placement
+// (dragging a wall's translate/rotate gizmo by hand) will never land two adjacent walls' corners
+// on the exact same float coordinate, so endpoints this close are treated as the same joint.
+const LOOP_ENDPOINT_TOLERANCE = 0.6;
+const LOOP_FLOOR_INSET = 0.9; // floor sits slightly inside the walls' centerline, not clipping through them
+const LOOP_ROOF_OVERHANG = 1.15; // roof overhangs the walls' centerline - mirrors the old pyramid roof's ROOF_OVERHANG
+// Without this, roofY lands exactly at the shortest wall's own top face - a flat roof plane and a
+// flat wall-top face at the exact same Y z-fight (the renderer can't consistently decide which
+// wins the depth test, producing a jagged/flickering seam right where they meet). The old pyramid
+// roof never had this problem since a cone's sloped faces are never coplanar with a wall's flat
+// top; a flat roof needs an explicit clearance instead.
+const LOOP_ROOF_Y_CLEARANCE = 0.05;
+
+export interface StructureLoop {
+  // Ordered polygon vertices (world x/z), one per wall/door joint - floorPoints inset slightly
+  // inside the walls' centerline, roofPoints overhung slightly beyond it (LOOP_FLOOR_INSET/
+  // LOOP_ROOF_OVERHANG), mirroring the old pyramid roof/floor's own inset vs. overhang.
+  floorPoints: { x: number; z: number }[];
+  roofPoints: { x: number; z: number }[];
+  floorY: number;
+  roofY: number;
+}
+
+// A wall/door's two endpoints in world space - width is the segment's own length along its local
+// (pre-rotation) x-axis, matching exactly how buildWall/buildDoor's BoxGeometry(width, height,
+// depth) is authored and rotated by rotationY.
+function structureEndpoints(def: StructureDef): [{ x: number; z: number }, { x: number; z: number }] {
+  const dx = Math.cos(def.rotationY) * (def.width / 2);
+  const dz = -Math.sin(def.rotationY) * (def.width / 2);
+  return [
+    { x: def.x - dx, z: def.z - dz },
+    { x: def.x + dx, z: def.z + dz },
+  ];
+}
+
+function scaleAroundCentroid(
+  points: { x: number; z: number }[],
+  centroidX: number,
+  centroidZ: number,
+  factor: number,
+): { x: number; z: number }[] {
+  return points.map((p) => ({
+    x: centroidX + (p.x - centroidX) * factor,
+    z: centroidZ + (p.z - centroidZ) * factor,
+  }));
+}
+
+// Detects every closed room formed by the map's "wall"/"door" segments and returns one
+// StructureLoop per room (floor/roof polygon points already inset/overhung - see
+// LOOP_FLOOR_INSET/LOOP_ROOF_OVERHANG - so callers can build geometry straight from `points`).
+// A "room" is a connected component of wall/door segments where every joint has exactly degree 2
+// (a connected graph with every node at degree 2 is necessarily one simple cycle - nothing fancier
+// than that theorem is needed here) and at least one segment in the loop is a door; anything
+// else - a dangling wall, a T/X junction, an open row of walls with no door - just isn't a room
+// and gets no floor/roof, same as today's freestanding "wall" structures.
+export function findStructureLoops(
+  structures: StructureDef[] = STRUCTURES,
+  regionHalfExtent: number = MAP_HALF_EXTENT,
+): StructureLoop[] {
+  const segments = structures.filter((def) => def.kind === "wall" || def.kind === "door");
+
+  // Cluster endpoints within tolerance into shared joints, keyed by array index ("node id").
+  // O(segments * joints so far) - structure counts are small (dozens, not thousands) so a linear
+  // scan per endpoint is simpler than a spatial index and plenty fast for a design-time tool.
+  const nodes: { x: number; z: number; count: number }[] = [];
+  function nodeFor(point: { x: number; z: number }): number {
+    for (let i = 0; i < nodes.length; i++) {
+      if (Math.hypot(nodes[i].x - point.x, nodes[i].z - point.z) <= LOOP_ENDPOINT_TOLERANCE) {
+        const node = nodes[i];
+        node.x = (node.x * node.count + point.x) / (node.count + 1);
+        node.z = (node.z * node.count + point.z) / (node.count + 1);
+        node.count += 1;
+        return i;
+      }
+    }
+    nodes.push({ x: point.x, z: point.z, count: 1 });
+    return nodes.length - 1;
+  }
+
+  interface Edge {
+    def: StructureDef;
+    a: number;
+    b: number;
+  }
+  const edges: Edge[] = segments.map((def) => {
+    const [p1, p2] = structureEndpoints(def);
+    return { def, a: nodeFor(p1), b: nodeFor(p2) };
+  });
+
+  const adjacency = new Map<number, Edge[]>();
+  for (const edge of edges) {
+    for (const nodeId of [edge.a, edge.b]) {
+      if (!adjacency.has(nodeId)) adjacency.set(nodeId, []);
+      adjacency.get(nodeId)!.push(edge);
+    }
+  }
+
+  const visited = new Set<number>();
+  const loops: StructureLoop[] = [];
+
+  for (const startNode of adjacency.keys()) {
+    if (visited.has(startNode)) continue;
+
+    const componentNodes = new Set<number>([startNode]);
+    const componentEdges = new Set<Edge>();
+    const queue = [startNode];
+    while (queue.length > 0) {
+      const current = queue.pop()!;
+      for (const edge of adjacency.get(current) ?? []) {
+        componentEdges.add(edge);
+        const other = edge.a === current ? edge.b : edge.a;
+        if (!componentNodes.has(other)) {
+          componentNodes.add(other);
+          queue.push(other);
+        }
+      }
+    }
+    for (const nodeId of componentNodes) visited.add(nodeId);
+
+    const isSimpleCycle =
+      componentNodes.size >= 3 &&
+      componentEdges.size === componentNodes.size &&
+      [...componentNodes].every((nodeId) => (adjacency.get(nodeId)?.length ?? 0) === 2);
+    if (!isSimpleCycle || ![...componentEdges].some((edge) => edge.def.kind === "door")) continue;
+
+    // Walk the cycle in edge order, always stepping to whichever endpoint of the next unused
+    // edge isn't where we already are - produces the polygon's vertices in traversal order
+    // (some winding direction; which one is arbitrary and irrelevant, see buildEnclosure).
+    const orderedNodes: number[] = [startNode];
+    const usedEdges = new Set<Edge>();
+    let current = startNode;
+    while (usedEdges.size < componentEdges.size) {
+      const next = (adjacency.get(current) ?? []).find((edge) => !usedEdges.has(edge));
+      if (!next) break;
+      usedEdges.add(next);
+      current = next.a === current ? next.b : next.a;
+      orderedNodes.push(current);
+    }
+    orderedNodes.pop(); // walking a closed loop revisits the start node last - don't duplicate it
+
+    const rawPoints = orderedNodes.map((nodeId) => ({ x: nodes[nodeId].x, z: nodes[nodeId].z }));
+    const centroidX = rawPoints.reduce((sum, p) => sum + p.x, 0) / rawPoints.length;
+    const centroidZ = rawPoints.reduce((sum, p) => sum + p.z, 0) / rawPoints.length;
+
+    const groundY = getTerrainHeight(centroidX, centroidZ, structures, regionHalfExtent);
+    const floorY = groundY + Math.max(...[...componentEdges].map((edge) => edge.def.yOffset));
+    const roofY = floorY + Math.min(...[...componentEdges].map((edge) => edge.def.height)) + LOOP_ROOF_Y_CLEARANCE;
+
+    loops.push({
+      floorPoints: scaleAroundCentroid(rawPoints, centroidX, centroidZ, LOOP_FLOOR_INSET),
+      roofPoints: scaleAroundCentroid(rawPoints, centroidX, centroidZ, LOOP_ROOF_OVERHANG),
+      floorY,
+      roofY,
+    });
+  }
+
+  return loops;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -981,6 +1188,8 @@ export interface ContentSnapshot {
   dungeons: DungeonDef[];
   spawns: EnemySpawnDef[];
   structures: StructureDef[];
+  waypoints: WaypointDef[];
+  furniture: FurnitureDef[];
 }
 
 // The single entry point that turns a fetched content snapshot into every live table/constant
@@ -1017,6 +1226,8 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   NPCS = Object.fromEntries(snapshot.npcs.filter((n) => n.mapId === ACTIVE_MAP?.id).map((n) => [n.id, n]));
   SPAWN_POINTS = snapshot.spawns.filter((s) => s.mapId === ACTIVE_MAP?.id);
   STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_MAP?.id);
+  WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_MAP?.id);
+  FURNITURE = snapshot.furniture.filter((f) => f.mapId === ACTIVE_MAP?.id);
 
   if (ACTIVE_MAP) {
     MAP_HALF_EXTENT = ACTIVE_MAP.halfExtent;

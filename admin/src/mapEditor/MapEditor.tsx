@@ -2,14 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
-import { getTerrainHeight, StructureDef, terrainSegments } from "@mmo/shared";
+import { findStructureLoops, FurnitureDef, getTerrainHeight, StructureDef, terrainSegments } from "@mmo/shared";
 import { ENTITIES } from "../entities";
 import { EntityForm } from "../EntityForm";
 import { createEntity, deleteEntity, listEntities, updateEntity } from "../api";
-import { buildStructureShape } from "./structureGeometry";
+import { buildEnclosureShape, buildStructureShape } from "./structureGeometry";
+import { buildFurnitureShape } from "./furnitureGeometry";
 
 type RowData = Record<string, unknown>;
-type SelectableType = "structures" | "npcs" | "enemy-spawns";
+type SelectableType = "structures" | "npcs" | "enemy-spawns" | "waypoints" | "furniture";
 type GizmoMode = "translate" | "rotate" | "scale";
 
 interface Selected {
@@ -17,9 +18,10 @@ interface Selected {
   row: RowData;
 }
 
-const STRUCTURE_KINDS = ["house", "shop", "wall", "tower", "gate"] as const;
+const STRUCTURE_KINDS = ["wall", "door", "tower", "gate"] as const;
 const NPC_MARKER_COLOR = 0xf5d76e;
 const SPAWN_MARKER_COLOR = 0xe05a4e;
+const WAYPOINT_MARKER_COLOR = 0xf5c451;
 const GROUND_COLOR = 0x2b3348;
 const GRID_COLOR = 0x4a5578;
 const GRID_COLOR_DARK = 0x3a4260;
@@ -79,6 +81,8 @@ export function MapEditor() {
   const [structures, setStructures] = useState<RowData[]>([]);
   const [npcs, setNpcs] = useState<RowData[]>([]);
   const [spawns, setSpawns] = useState<RowData[]>([]);
+  const [waypoints, setWaypoints] = useState<RowData[]>([]);
+  const [furniture, setFurniture] = useState<RowData[]>([]);
   const [enemyTypes, setEnemyTypes] = useState<RowData[]>([]);
   const [selected, setSelected] = useState<Selected | null>(null);
   const [gizmoMode, setGizmoMode] = useState<GizmoMode>("translate");
@@ -110,6 +114,8 @@ export function MapEditor() {
     listEntities<RowData>("structures").then((res) => setStructures(res.items.filter((s) => s.map_id === mapId)));
     listEntities<RowData>("npcs").then((res) => setNpcs(res.items.filter((n) => n.map_id === mapId)));
     listEntities<RowData>("enemy-spawns").then((res) => setSpawns(res.items.filter((s) => s.map_id === mapId)));
+    listEntities<RowData>("waypoints").then((res) => setWaypoints(res.items.filter((w) => w.map_id === mapId)));
+    listEntities<RowData>("furniture").then((res) => setFurniture(res.items.filter((f) => f.map_id === mapId)));
   }, [mapId]);
 
   useEffect(() => {
@@ -226,13 +232,31 @@ export function MapEditor() {
   const structuresRef = useRef<RowData[]>([]);
   const npcsRef = useRef<RowData[]>([]);
   const spawnsRef = useRef<RowData[]>([]);
+  const waypointsRef = useRef<RowData[]>([]);
+  const furnitureRef = useRef<RowData[]>([]);
   structuresRef.current = structures;
   npcsRef.current = npcs;
   spawnsRef.current = spawns;
+  waypointsRef.current = waypoints;
+  furnitureRef.current = furniture;
+
+  function refsByType(type: SelectableType): RowData[] {
+    switch (type) {
+      case "structures":
+        return structuresRef.current;
+      case "npcs":
+        return npcsRef.current;
+      case "enemy-spawns":
+        return spawnsRef.current;
+      case "waypoints":
+        return waypointsRef.current;
+      case "furniture":
+        return furnitureRef.current;
+    }
+  }
 
   function selectByTag(type: SelectableType, id: string) {
-    const list = type === "structures" ? structuresRef.current : type === "npcs" ? npcsRef.current : spawnsRef.current;
-    const row = list.find((r) => String(r.id) === id);
+    const row = refsByType(type).find((r) => String(r.id) === id);
     if (row) setSelected({ type, row });
   }
 
@@ -250,15 +274,15 @@ export function MapEditor() {
       changes.width = round(Number(sel.row.width) * mesh.scale.x);
       changes.depth = round(Number(sel.row.depth) * mesh.scale.z);
       changes.height = round(Number(sel.row.height) * mesh.scale.y);
-    } else if (sel.type === "structures" && gizmoModeRef.current === "rotate") {
+    } else if ((sel.type === "structures" || sel.type === "furniture") && gizmoModeRef.current === "rotate") {
       changes.rotation_y = round(mesh.rotation.y, 3);
     } else {
       changes.x = round(mesh.position.x);
       changes.z = round(mesh.position.z);
-      // Only structures/npcs have a y_offset column (see the translate showY gate above) - the
-      // drag may have moved the mesh vertically, so re-derive the offset from the ground height
-      // at its (possibly also just-moved) x/z rather than assuming only y changed.
-      if (sel.type === "structures" || sel.type === "npcs") {
+      // Only structures/npcs/furniture have a y_offset column (see the translate showY gate
+      // above) - the drag may have moved the mesh vertically, so re-derive the offset from the
+      // ground height at its (possibly also just-moved) x/z rather than assuming only y changed.
+      if (sel.type === "structures" || sel.type === "npcs" || sel.type === "furniture") {
         const structureDefs = sel.type === "structures" ? toStructureDefs(structuresRef.current) : [];
         const halfExtent = Number(activeMap?.half_extent) || 50;
         const groundY = getTerrainHeight(mesh.position.x, mesh.position.z, structureDefs, halfExtent);
@@ -329,6 +353,13 @@ export function MapEditor() {
       three.content.add(group);
     }
 
+    // Rooms aren't authored directly - they fall out of whichever wall/door segments happen to
+    // form a closed loop (see shared's findStructureLoops), so there's no row/gizmo/selection for
+    // these the way there is for a real structure - just a preview of what the client will render.
+    for (const loop of findStructureLoops(structureDefs, halfExtent)) {
+      three.content.add(buildEnclosureShape(loop));
+    }
+
     for (const row of npcs) {
       const marker = buildMarker(NPC_MARKER_COLOR);
       const x = Number(row.x);
@@ -348,13 +379,45 @@ export function MapEditor() {
       three.content.add(marker);
     }
 
+    for (const row of waypoints) {
+      const marker = buildMarker(WAYPOINT_MARKER_COLOR);
+      const x = Number(row.x);
+      const z = Number(row.z);
+      marker.position.set(x, terrainY(x, z), z);
+      marker.userData = { entityType: "waypoints", entityId: String(row.id) };
+      three.content.add(marker);
+    }
+
+    for (const row of furniture) {
+      const group = new THREE.Group();
+      // buildFurnitureShape only reads kind/color - no need to reshape the whole snake_case row
+      // into a real FurnitureDef just to build the preview mesh.
+      group.add(buildFurnitureShape({ kind: row.kind, color: row.color } as FurnitureDef));
+      const x = Number(row.x);
+      const z = Number(row.z);
+      const yOffset = Number(row.y_offset ?? 0);
+      group.position.set(x, terrainY(x, z) + yOffset, z);
+      group.rotation.y = Number(row.rotation_y ?? 0);
+      group.userData = { entityType: "furniture", entityId: String(row.id) };
+      three.content.add(group);
+    }
+
     // Re-attach the gizmo to whichever object is still selected (it was just rebuilt from
     // scratch above) and refresh its row data - otherwise the inspector form would keep
     // showing pre-drag values after a gizmo commit reloads fresh data from the server. Detach
     // if the row no longer exists at all (e.g. it just got deleted).
     if (selectedRef.current) {
       const { type, row } = selectedRef.current;
-      const list = type === "structures" ? structures : type === "npcs" ? npcs : spawns;
+      const list =
+        type === "structures"
+          ? structures
+          : type === "npcs"
+            ? npcs
+            : type === "enemy-spawns"
+              ? spawns
+              : type === "waypoints"
+                ? waypoints
+                : furniture;
       const freshRow = list.find((r) => String(r.id) === String(row.id));
       if (freshRow) {
         const match = three.content.children.find(
@@ -367,7 +430,7 @@ export function MapEditor() {
         setSelected(null);
       }
     }
-  }, [structures, npcs, spawns, activeMap]);
+  }, [structures, npcs, spawns, waypoints, furniture, activeMap]);
 
   // --- Attach the gizmo to the current selection + set its mode/axis constraints ---
   // (Separate from the scene-sync effect below: that one only re-runs when the fetched content
@@ -388,15 +451,19 @@ export function MapEditor() {
     );
     if (match) three.transform.attach(match);
 
-    const mode: GizmoMode = selected.type === "structures" ? gizmoMode : "translate";
+    // Furniture supports rotate (orienting a chair toward a table matters) but not scale - it has
+    // no width/depth/height column to persist a scale change to (see commitTransformRef).
+    const canRotate = selected.type === "structures" || selected.type === "furniture";
+    const mode: GizmoMode = selected.type === "structures" ? gizmoMode : canRotate && gizmoMode === "rotate" ? "rotate" : "translate";
     three.transform.setMode(mode);
     if (mode === "translate") {
       three.transform.showX = true;
-      // Structures/NPCs are static in the live game and have a y_offset field to carry a manual
-      // vertical adjustment on top of the auto-computed terrain height - enemy spawns don't (the
-      // enemy that spawns there moves and re-derives its height dynamically every frame, so a
-      // y_offset on the spawn point would have no visible effect in game - not worth exposing).
-      three.transform.showY = selected.type === "structures" || selected.type === "npcs";
+      // Structures/NPCs/furniture are static in the live game and have a y_offset field to carry
+      // a manual vertical adjustment on top of the auto-computed terrain height - enemy spawns
+      // don't (the enemy that spawns there moves and re-derives its height dynamically every
+      // frame, so a y_offset on the spawn point would have no visible effect in game - not worth
+      // exposing).
+      three.transform.showY = selected.type === "structures" || selected.type === "npcs" || selected.type === "furniture";
       three.transform.showZ = true;
     } else if (mode === "rotate") {
       three.transform.showX = false;
@@ -416,6 +483,9 @@ export function MapEditor() {
   // freshly-fetched list wouldn't be visible to them until after this callback already returned.
   function createStructure(kind: (typeof STRUCTURE_KINDS)[number]) {
     if (!mapId) return;
+    // wall/door default to a thin, wall-length box (place several end-to-end and drag their
+    // translate/rotate gizmos to close a loop); tower/gate keep the old boxier default.
+    const isWallLike = kind === "wall" || kind === "door";
     const row: RowData = {
       id: `structure_${Date.now()}`,
       name: `New ${kind}`,
@@ -425,7 +495,7 @@ export function MapEditor() {
       z: 0,
       rotation_y: 0,
       width: 4,
-      depth: 4,
+      depth: isWallLike ? 0.2 : 4,
       height: 3,
       color: "#8a6d4b",
     };
@@ -456,6 +526,32 @@ export function MapEditor() {
     createEntity("enemy-spawns", row).then(() => {
       reloadContent();
       setSelected({ type: "enemy-spawns", row });
+    });
+  }
+
+  function createWaypoint() {
+    if (!mapId) return;
+    const row: RowData = { id: `waypoint_${Date.now()}`, name: "New Waypoint", map_id: mapId, x: 0, z: 0 };
+    createEntity("waypoints", row).then(() => {
+      reloadContent();
+      setSelected({ type: "waypoints", row });
+    });
+  }
+
+  function createFurniture() {
+    if (!mapId) return;
+    const row: RowData = {
+      id: `furniture_${Date.now()}`,
+      name: "New Furniture",
+      map_id: mapId,
+      kind: "table",
+      x: 0,
+      z: 0,
+      color: "#8a6d4b",
+    };
+    createEntity("furniture", row).then(() => {
+      reloadContent();
+      setSelected({ type: "furniture", row });
     });
   }
 
@@ -508,10 +604,25 @@ export function MapEditor() {
           <button onClick={createSpawn} disabled={!mapId || enemyTypes.length === 0}>
             + Enemy Spawn
           </button>
+          <button onClick={createWaypoint} disabled={!mapId}>
+            + Waypoint
+          </button>
+          <button onClick={createFurniture} disabled={!mapId}>
+            + Furniture
+          </button>
         </span>
         {selected?.type === "structures" && (
           <span className="map-editor-toolbar-group">
             {(["translate", "rotate", "scale"] as GizmoMode[]).map((mode) => (
+              <button key={mode} className={mode === gizmoMode ? "active" : ""} onClick={() => setGizmoMode(mode)}>
+                {mode}
+              </button>
+            ))}
+          </span>
+        )}
+        {selected?.type === "furniture" && (
+          <span className="map-editor-toolbar-group">
+            {(["translate", "rotate"] as GizmoMode[]).map((mode) => (
               <button key={mode} className={mode === gizmoMode ? "active" : ""} onClick={() => setGizmoMode(mode)}>
                 {mode}
               </button>

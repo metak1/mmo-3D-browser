@@ -12,6 +12,8 @@ import { questsRouter } from "./quests.js";
 import { mapsRouter } from "./maps.js";
 import { dungeonsRouter } from "./dungeons.js";
 import { structuresRouter } from "./structures.js";
+import { waypointsRouter } from "./waypoints.js";
+import { furnitureRouter } from "./furniture.js";
 
 export const adminRouter = Router();
 
@@ -26,6 +28,8 @@ adminRouter.use("/quests", questsRouter);
 adminRouter.use("/maps", mapsRouter);
 adminRouter.use("/dungeons", dungeonsRouter);
 adminRouter.use("/structures", structuresRouter);
+adminRouter.use("/waypoints", waypointsRouter);
+adminRouter.use("/furniture", furnitureRouter);
 
 // Manual escape hatch - every CRUD mutation already reloads on its own, but this is useful
 // after a direct DB edit or for the admin UI to force-refresh the live server's view of content.

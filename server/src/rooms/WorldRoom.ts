@@ -41,6 +41,9 @@ import {
   TurnInQuestMessage,
   UnequipMessage,
   VENDOR_SELL_FRACTION,
+  WAYPOINTS,
+  WAYPOINT_INTERACT_RADIUS,
+  WaypointTravelMessage,
   CastMessage,
   decodeItemToken,
   encodeItemToken,
@@ -82,6 +85,7 @@ export class WorldRoom extends Room<WorldState> {
       onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
         this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
       onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
+      onCombatText: (event) => this.broadcast("combat_text", event),
       collidableStructures: true,
     });
     this.trade = new TradeManager(this);
@@ -116,6 +120,7 @@ export class WorldRoom extends Room<WorldState> {
     this.onMessage("trade_offer", (client, message: TradeOfferMessage) => this.trade.handleOffer(client, message));
     this.onMessage("trade_accept", (client) => this.trade.handleAccept(client));
     this.onMessage("trade_cancel", (client) => this.trade.handleCancel(client));
+    this.onMessage("waypoint_travel", (client, message: WaypointTravelMessage) => this.handleWaypointTravel(client, message));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
@@ -633,6 +638,24 @@ export class WorldRoom extends Room<WorldState> {
     const npc = NPCS[npcId];
     if (!npc) return false;
     return Math.hypot(player.x - npc.x, player.z - npc.z) <= NPC_INTERACT_RADIUS;
+  }
+
+  // Requires standing within range of *some* waypoint (not necessarily the target) - same
+  // "have to be at a flight master to use one" rule every waypoint system enforces, just without
+  // any per-character discovery/unlock state to check alongside it (see shared's WAYPOINTS).
+  private handleWaypointTravel(client: Client, message: WaypointTravelMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) return;
+
+    const target = WAYPOINTS.find((w) => w.id === message.targetWaypointId);
+    if (!target) return;
+
+    const nearAnyWaypoint = WAYPOINTS.some((w) => Math.hypot(player.x - w.x, player.z - w.z) <= WAYPOINT_INTERACT_RADIUS);
+    if (!nearAnyWaypoint) return;
+
+    player.x = target.x;
+    player.y = 0;
+    player.z = target.z;
   }
 
   private handleAcceptQuest(client: Client, message: AcceptQuestMessage) {

@@ -1,24 +1,21 @@
 import * as THREE from "three";
 import {
-  getTerrainHeight,
-  STRUCTURE_DOOR_WIDTH_FRACTION,
   STRUCTURE_GATE_PILLAR_FRACTION,
-  STRUCTURE_MAX_DOOR_WIDTH,
-  STRUCTURE_WALL_THICKNESS,
   StructureDef,
+  StructureLoop,
+  getTerrainHeight,
 } from "@mmo/shared";
-import { stoneTexture, woodTexture } from "./textures";
+import { stoneTexture } from "./textures";
 import { softTint } from "./textureTint";
 
 // Fixed regardless of an individual structure's wall color, so roofs/caps always read clearly
 // against whatever color an admin picks for the walls.
 const ROOF_COLOR = 0x4a3626;
 const FLOOR_COLOR = 0x6b4a30;
-const PROP_COLOR = 0x3d2a1a;
 
-// How translucent a house/shop's roof gets once the player is well inside its footprint, and how
-// many world units beyond the footprint the fade transitions over (WoW-style "walk under the
-// roof") - walls stay solid always, see buildHouse's doorway gap for how you actually get in.
+// How translucent an enclosed room's roof gets once the player is well inside its footprint, and
+// how many world units beyond the footprint the fade transitions over (WoW-style "walk under the
+// roof") - walls stay solid always, a door is how you actually get in.
 const FADE_MIN_OPACITY = 0.12;
 const FADE_MARGIN = 3;
 
@@ -26,84 +23,26 @@ const FADE_MARGIN = 3;
 // center to a *vertex*, not to the middle of a face - after the 45° rotation that aligns those
 // faces with the box's walls, each face sits at `radius * cos(45°)` from center, not at `radius`.
 // Without the compensating *Math.SQRT2 below, the roof's flat sides land noticeably inside the
-// wall footprint (and its corners short of the wall corners too), so the walls poke out from
+// tower's footprint (and its corners short of the wall corners too), so the walls poke out from
 // under it instead of the roof properly capping/overhanging them.
-const ROOF_OVERHANG = 1.15;
+const TOWER_CAP_OVERHANG = 1.15;
 
-function pyramidRoof(width: number, depth: number, height: number): { mesh: THREE.Mesh; material: THREE.MeshStandardMaterial } {
-  const material = new THREE.MeshStandardMaterial({ color: ROOF_COLOR, transparent: true });
-  const radius = (Math.max(width, depth) / 2) * ROOF_OVERHANG * Math.SQRT2;
+function towerCap(width: number, depth: number, height: number): THREE.Mesh {
+  // ConeGeometry smooths its vertex normals across the seam between adjacent faces by default
+  // (fine for a round cone, but this one only has 4 radial segments to approximate a pyramid) -
+  // without flatShading each of the 4 triangular faces blends into its neighbors instead of
+  // reading as a distinct flat plane, which is what made the cap look like a soft blob/smudge
+  // rather than a crisp low-poly roof (matching the sharp-faced look every BoxGeometry wall
+  // already has for free, since a box never shares vertices/normals across its faces).
+  const material = new THREE.MeshStandardMaterial({ color: ROOF_COLOR, flatShading: true });
+  const radius = (Math.max(width, depth) / 2) * TOWER_CAP_OVERHANG * Math.SQRT2;
   const mesh = new THREE.Mesh(new THREE.ConeGeometry(radius, height, 4), material);
   mesh.rotation.y = Math.PI / 4;
-  return { mesh, material };
-}
-
-// A bare floor + a single prop, just enough that "inside" doesn't read as an empty void once the
-// walls/roof fade out - not a real furnished room, this game has no interior content system.
-function buildInterior(def: StructureDef): THREE.Object3D {
-  const group = new THREE.Group();
-
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(def.width * 0.85, def.depth * 0.85),
-    new THREE.MeshStandardMaterial({ color: FLOOR_COLOR }),
-  );
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = 0.02;
-  group.add(floor);
-
-  const propSize = Math.min(def.width, def.depth) * 0.25;
-  const prop = new THREE.Mesh(new THREE.BoxGeometry(propSize, 0.4, propSize), new THREE.MeshStandardMaterial({ color: PROP_COLOR }));
-  prop.position.y = 0.2;
-  group.add(prop);
-
-  return group;
+  return mesh;
 }
 
 interface BuiltStructure {
   object: THREE.Object3D;
-  // Materials that fade as the player approaches - empty for kinds with no walkable interior.
-  fadeMaterials: THREE.MeshStandardMaterial[];
-}
-
-// Four separate wall segments rather than one solid box, so the walls can stay fully solid
-// (a real building silhouette from every angle) while the front one leaves an actual gap to
-// walk through - the doorway - instead of relying on fading to get inside. Local -z is the
-// front/entrance side by convention; a structure's rotationY reorients the whole doorway with it.
-function buildHouse(def: StructureDef): BuiltStructure {
-  const group = new THREE.Group();
-  const wallHeight = def.height * 0.7;
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: softTint(def.color),
-    map: woodTexture(Math.max(def.width, def.depth), wallHeight),
-  });
-
-  const doorWidth = Math.min(def.width * STRUCTURE_DOOR_WIDTH_FRACTION, STRUCTURE_MAX_DOOR_WIDTH);
-  const frontSegmentWidth = (def.width - doorWidth) / 2;
-  if (frontSegmentWidth > 0.05) {
-    for (const sign of [-1, 1]) {
-      const segment = new THREE.Mesh(new THREE.BoxGeometry(frontSegmentWidth, wallHeight, STRUCTURE_WALL_THICKNESS), wallMaterial);
-      segment.position.set(sign * (doorWidth / 2 + frontSegmentWidth / 2), wallHeight / 2, -def.depth / 2);
-      group.add(segment);
-    }
-  }
-
-  const backWall = new THREE.Mesh(new THREE.BoxGeometry(def.width, wallHeight, STRUCTURE_WALL_THICKNESS), wallMaterial);
-  backWall.position.set(0, wallHeight / 2, def.depth / 2);
-  group.add(backWall);
-
-  for (const sign of [-1, 1]) {
-    const sideWall = new THREE.Mesh(new THREE.BoxGeometry(STRUCTURE_WALL_THICKNESS, wallHeight, def.depth), wallMaterial);
-    sideWall.position.set((sign * def.width) / 2, wallHeight / 2, 0);
-    group.add(sideWall);
-  }
-
-  const { mesh: roof, material: roofMaterial } = pyramidRoof(def.width, def.depth, def.height * 0.4);
-  roof.position.y = wallHeight + (def.height * 0.4) / 2;
-  group.add(roof);
-
-  group.add(buildInterior(def));
-
-  return { object: group, fadeMaterials: [roofMaterial] };
 }
 
 function buildWall(def: StructureDef): BuiltStructure {
@@ -112,7 +51,29 @@ function buildWall(def: StructureDef): BuiltStructure {
     new THREE.MeshStandardMaterial({ color: softTint(def.color), map: stoneTexture(def.width, def.height) }),
   );
   mesh.position.y = def.height / 2;
-  return { object: mesh, fadeMaterials: [] };
+  return { object: mesh };
+}
+
+// A simple frame (two posts + a lintel) rather than a solid box - a door never collides (see
+// shared's getStructureColliders), so this is purely a visual marker of where the opening is,
+// both standing alone and as part of a wall run that findStructureLoops turned into a room.
+function buildDoor(def: StructureDef): BuiltStructure {
+  const group = new THREE.Group();
+  const material = new THREE.MeshStandardMaterial({ color: softTint(def.color), map: stoneTexture(def.width, def.height) });
+  const postWidth = Math.min(def.width * 0.18, 0.3);
+
+  for (const sign of [-1, 1]) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(postWidth, def.height, def.depth), material);
+    post.position.set((sign * (def.width - postWidth)) / 2, def.height / 2, 0);
+    group.add(post);
+  }
+
+  const lintelHeight = def.height * 0.15;
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(def.width, lintelHeight, def.depth), material);
+  lintel.position.y = def.height - lintelHeight / 2;
+  group.add(lintel);
+
+  return { object: group };
 }
 
 function buildTower(def: StructureDef): BuiltStructure {
@@ -125,10 +86,10 @@ function buildTower(def: StructureDef): BuiltStructure {
   body.position.y = bodyHeight / 2;
   group.add(body);
 
-  const { mesh: cap } = pyramidRoof(def.width, def.depth, def.height * 0.25);
+  const cap = towerCap(def.width, def.depth, def.height * 0.25);
   cap.position.y = bodyHeight + (def.height * 0.25) / 2;
   group.add(cap);
-  return { object: group, fadeMaterials: [] };
+  return { object: group };
 }
 
 function buildGate(def: StructureDef): BuiltStructure {
@@ -147,30 +108,27 @@ function buildGate(def: StructureDef): BuiltStructure {
   const lintel = new THREE.Mesh(new THREE.BoxGeometry(def.width, lintelHeight, def.depth), material);
   lintel.position.y = def.height + lintelHeight / 2;
   group.add(lintel);
-  return { object: group, fadeMaterials: [] };
+  return { object: group };
 }
 
 // Every existing avatar in this codebase (Player/Npc/Enemy) is simple procedural Three.js
 // geometry with no asset loading - structures follow the same convention. kind selects one of
 // these hardcoded shape builders; everything else (position/size/color/rotation) is admin content.
 // Walls/pillars are solid and actually block the player server-side (see shared's
-// getStructureColliders/resolveStructureCollisions) - houses/shops leave a real doorway gap to
-// walk through, and their roof fades out once inside so the interior stays visible under the
-// angled camera (see update()).
+// getStructureColliders/resolveStructureCollisions) - a door never blocks. A room's floor/roof
+// aren't part of any single StructureDef/StructureAvatar - see StructureEnclosureAvatar below,
+// built separately from findStructureLoops over the whole structure list.
 export class StructureAvatar {
   readonly group = new THREE.Group();
-  private readonly fadeMaterials: THREE.MeshStandardMaterial[];
-  private readonly fadeInnerRadius: number;
 
-  constructor(private readonly def: StructureDef) {
+  constructor(def: StructureDef) {
     let built: BuiltStructure;
     switch (def.kind) {
-      case "house":
-      case "shop":
-        built = buildHouse(def);
-        break;
       case "wall":
         built = buildWall(def);
+        break;
+      case "door":
+        built = buildDoor(def);
         break;
       case "tower":
         built = buildTower(def);
@@ -178,6 +136,8 @@ export class StructureAvatar {
       case "gate":
         built = buildGate(def);
         break;
+      default:
+        built = { object: new THREE.Group() }; // unrecognized kind (e.g. stale data) - render nothing rather than crash
     }
     this.group.add(built.object);
     // getTerrainHeight flattens the ground under every structure's own footprint (see
@@ -186,20 +146,82 @@ export class StructureAvatar {
     // ruin) via the map editor's Y-axis gizmo.
     this.group.position.set(def.x, getTerrainHeight(def.x, def.z) + def.yOffset, def.z);
     this.group.rotation.y = def.rotationY;
-
-    this.fadeMaterials = built.fadeMaterials;
-    this.fadeInnerRadius = Math.max(def.width, def.depth) / 2;
   }
 
-  // Called every frame with the local player's world position - a no-op for kinds with nothing
-  // to fade (wall/tower/gate never build any fadeMaterials).
-  update(playerX: number, playerZ: number) {
-    if (this.fadeMaterials.length === 0) return;
+  // No-op today - kept so main.ts can iterate structures and enclosures through the same
+  // `update(x, z)` call without caring which of the two it's actually holding.
+  update(_playerX: number, _playerZ: number) {}
 
-    const dist = Math.hypot(playerX - this.def.x, playerZ - this.def.z);
+  addTo(scene: THREE.Scene) {
+    scene.add(this.group);
+  }
+
+  removeFrom(scene: THREE.Scene) {
+    scene.remove(this.group);
+  }
+}
+
+// Builds one arbitrary-polygon-shaped flat mesh (a room's floor or roof) directly in 3D rather
+// than via THREE.Shape/ExtrudeGeometry - those build in the shape's local XY plane and need a
+// rotation to lie flat, which flips the winding (and therefore which side the normal/texture
+// faces) depending on sign conventions that are easy to get backwards. Triangulating in x/z and
+// writing y directly sidesteps that; the mesh is double-sided (see callers) so the loop's
+// arbitrary winding direction never matters for visibility either.
+function buildFlatPolygon(points: { x: number; z: number }[], y: number, material: THREE.Material): THREE.Mesh {
+  const positions: number[] = [];
+  for (const p of points) positions.push(p.x, y, p.z);
+
+  const triangles = THREE.ShapeUtils.triangulateShape(
+    points.map((p) => new THREE.Vector2(p.x, p.z)),
+    [],
+  );
+  const indices: number[] = [];
+  for (const [a, b, c] of triangles) indices.push(a, b, c);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry, material);
+}
+
+// The floor + roof over one room detected by findStructureLoops - a sibling to the individual
+// wall/door StructureAvatars that make up the room's perimeter, not a child of any one of them,
+// since the polygon is a function of all of them together. Exposes the same
+// update/addTo/removeFrom shape as StructureAvatar so main.ts can manage both through one list.
+export class StructureEnclosureAvatar {
+  readonly group = new THREE.Group();
+  private readonly roofMaterial: THREE.MeshStandardMaterial;
+  private readonly centroidX: number;
+  private readonly centroidZ: number;
+  private readonly fadeInnerRadius: number;
+
+  constructor(loop: StructureLoop) {
+    const floorMaterial = new THREE.MeshStandardMaterial({ color: FLOOR_COLOR, side: THREE.DoubleSide });
+    const floor = buildFlatPolygon(loop.floorPoints, loop.floorY + 0.02, floorMaterial);
+    this.group.add(floor);
+
+    this.roofMaterial = new THREE.MeshStandardMaterial({
+      color: ROOF_COLOR,
+      transparent: true,
+      side: THREE.DoubleSide,
+    });
+    const roof = buildFlatPolygon(loop.roofPoints, loop.roofY, this.roofMaterial);
+    this.group.add(roof);
+
+    this.centroidX = loop.floorPoints.reduce((sum, p) => sum + p.x, 0) / loop.floorPoints.length;
+    this.centroidZ = loop.floorPoints.reduce((sum, p) => sum + p.z, 0) / loop.floorPoints.length;
+    let maxRadius = 0;
+    for (const p of loop.floorPoints) maxRadius = Math.max(maxRadius, Math.hypot(p.x - this.centroidX, p.z - this.centroidZ));
+    this.fadeInnerRadius = maxRadius;
+  }
+
+  // Called every frame with the local player's world position - fades the roof out once the
+  // player is well inside the room, same WoW-style "walk under the roof" as the old pyramid roof.
+  update(playerX: number, playerZ: number) {
+    const dist = Math.hypot(playerX - this.centroidX, playerZ - this.centroidZ);
     const t = Math.min(1, Math.max(0, (dist - this.fadeInnerRadius) / FADE_MARGIN));
-    const opacity = FADE_MIN_OPACITY + (1 - FADE_MIN_OPACITY) * t;
-    for (const material of this.fadeMaterials) material.opacity = opacity;
+    this.roofMaterial.opacity = FADE_MIN_OPACITY + (1 - FADE_MIN_OPACITY) * t;
   }
 
   addTo(scene: THREE.Scene) {

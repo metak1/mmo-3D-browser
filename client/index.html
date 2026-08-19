@@ -514,6 +514,15 @@
       #loot-window[hidden] {
         display: none;
       }
+      #waypoint-panel {
+        left: auto;
+        right: 12px;
+        top: 48px;
+        width: 220px;
+      }
+      #waypoint-panel[hidden] {
+        display: none;
+      }
       #talent-panel {
         left: auto;
         right: 12px;
@@ -662,6 +671,22 @@
         font-size: 10px;
         font-weight: 600;
         color: #c9a63c;
+      }
+      /* Same number shown next to a quest here, on its map area circle (see Minimap.ts), and on
+         the quest giver's dialogue card - a quest is "quest 3" everywhere at once. */
+      .quest-number {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 15px;
+        height: 15px;
+        margin-right: 5px;
+        border-radius: 50%;
+        background: #ffd23f;
+        color: #1a1c26;
+        font-size: 10px;
+        font-weight: 700;
+        flex-shrink: 0;
       }
       #npc-dialogue-panel {
         left: auto;
@@ -905,6 +930,24 @@
         bottom: 0;
         height: 0%;
         background: rgba(0, 0, 0, 0.65);
+      }
+      .spell-slot.too-far {
+        border-color: #e0503c;
+        box-shadow: 0 0 6px rgba(224, 80, 60, 0.55);
+      }
+      .spell-slot.out-of-range {
+        animation: spell-out-of-range 380ms ease;
+      }
+      @keyframes spell-out-of-range {
+        0%,
+        100% {
+          border-color: #e0503c;
+          box-shadow: 0 0 6px rgba(224, 80, 60, 0.55);
+        }
+        25% {
+          border-color: #e0503c;
+          box-shadow: 0 0 14px rgba(224, 80, 60, 1);
+        }
       }
       .ailment-tag {
         margin-top: 4px;
@@ -1153,6 +1196,15 @@
       <div class="loot-actions">
         <button type="button" class="overlay-button" data-loot-take-all>Take All</button>
         <button type="button" class="overlay-button" data-loot-close>Close</button>
+      </div>
+    </div>
+
+    <div id="waypoint-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Waypoint</div>
+      <div class="item-list" id="waypoint-list"></div>
+      <div class="loot-actions">
+        <button type="button" class="overlay-button" data-waypoint-close>Close</button>
       </div>
     </div>
 

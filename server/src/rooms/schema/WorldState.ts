@@ -64,6 +64,7 @@ export class Projectile extends Schema {
   @type("string") source = "enemy";
   @type("string") targetId = "";
   @type("string") ownerId = "";
+  @type("boolean") isCrit = false; // only ever true for a player-sourced projectile - see CombatEngine.computePlayerDamage
 }
 
 export class LootBag extends Schema {

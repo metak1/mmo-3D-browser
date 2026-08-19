@@ -308,6 +308,45 @@ async function main() {
       description: "Torn from the Warden's shattered core, still humming with old power.",
       base_price: 120,
     },
+    // --- Leveling-path rewards (see quests below) - each roughly double the previous tier's
+    // bonuses, so a quest reward always feels like a real upgrade over what a starting-town
+    // vendor sells, not just a reskinned rusty_sword.
+    {
+      id: "reinforced_platemail",
+      name: "Reinforced Platemail",
+      slot: "armor",
+      bonuses: { armor: 10, vitality: 4 },
+      icon: "🛡️",
+      description: "Keep-forged plate, dented from the trolls that failed to dent the wearer.",
+      base_price: 90,
+    },
+    {
+      id: "staff_of_embers",
+      name: "Staff of Embers",
+      slot: "weapon",
+      bonuses: { mainStat: 8 },
+      icon: "🔥",
+      description: "Still warm from the cultist who last carried it.",
+      base_price: 100,
+    },
+    {
+      id: "frostguard_amulet",
+      name: "Frostguard Amulet",
+      slot: "trinket",
+      bonuses: { vitality: 6, armor: 4 },
+      icon: "❄️",
+      description: "Carved from a giant's tusk, cold to everyone but its wearer.",
+      base_price: 130,
+    },
+    {
+      id: "crown_of_the_north",
+      name: "Crown of the North",
+      slot: "trinket",
+      bonuses: { mainStat: 10, vitality: 6, luck: 4 },
+      icon: "👑",
+      description: "Frosthold's last relic of the age before the giants came south.",
+      base_price: 250,
+    },
   ];
   for (const i of items) {
     await prisma.item.upsert({ where: { id: i.id }, create: i, update: i });
@@ -700,6 +739,56 @@ async function main() {
         specialCooldownMs: 20_000,
       },
     },
+    // --- Leveling-path enemies (see the quest chain below) - roughly one tier per new city,
+    // each meaningfully tougher than the last so the path's difficulty tracks its reward xp.
+    {
+      id: "wolf",
+      name: "Dire Wolf",
+      behavior: "melee",
+      xp_reward: 25,
+      gold_reward: 6,
+      stats: { maxHp: 55, damage: 9, range: 1.6, intervalMs: 1300 },
+    },
+    {
+      id: "bandit",
+      name: "Bandit Thug",
+      behavior: "melee",
+      xp_reward: 55,
+      gold_reward: 15,
+      stats: { maxHp: 90, damage: 14, range: 1.8, intervalMs: 1400 },
+    },
+    {
+      id: "bandit_archer",
+      name: "Bandit Archer",
+      behavior: "caster",
+      xp_reward: 65,
+      gold_reward: 18,
+      stats: { maxHp: 60, damage: 12, range: 12, cooldownMs: 2000, projectileSpeed: 7, castTimeMs: 900 },
+    },
+    {
+      id: "troll",
+      name: "Cave Troll",
+      behavior: "melee",
+      xp_reward: 120,
+      gold_reward: 35,
+      stats: { maxHp: 180, damage: 22, range: 2, intervalMs: 1500 },
+    },
+    {
+      id: "dark_mage",
+      name: "Dark Cultist",
+      behavior: "caster",
+      xp_reward: 140,
+      gold_reward: 40,
+      stats: { maxHp: 130, damage: 20, range: 11, cooldownMs: 1800, projectileSpeed: 8, castTimeMs: 950 },
+    },
+    {
+      id: "frost_giant",
+      name: "Frost Giant",
+      behavior: "melee",
+      xp_reward: 220,
+      gold_reward: 70,
+      stats: { maxHp: 320, damage: 30, range: 2.2, intervalMs: 1600 },
+    },
   ];
   for (const e of enemyTypes) {
     await prisma.enemyType.upsert({ where: { id: e.id }, create: e, update: e });
@@ -728,6 +817,15 @@ async function main() {
     { id: "quest_giver", name: "Weary Quartermaster", x: 0, z: -3, map_id: "overworld" },
     { id: "boss_watcher", name: "Scarred Sentinel", x: 0, z: 20, map_id: "overworld" },
     { id: "merchant", name: "Traveling Merchant", x: -6, z: -3, map_id: "overworld" },
+    // --- Leveling-path cities - each pairs one quest giver with one vendor, same "different
+    // kinds of NPCs" split as the starting town, so every city reads the same way once you
+    // arrive: someone with work for you, someone selling gear for the coin it pays.
+    { id: "elara", name: "Ranger Elara", x: 70, z: -15, map_id: "overworld" },
+    { id: "millbrook_trader", name: "Millbrook Trader", x: 70, z: -7, map_id: "overworld" },
+    { id: "kael", name: "Sergeant Kael", x: 140, z: 43, map_id: "overworld" },
+    { id: "ashford_quartermaster", name: "Keep Quartermaster", x: 140, z: 53, map_id: "overworld" },
+    { id: "frostbeard", name: "Elder Frostbeard", x: -150, z: 93, map_id: "overworld" },
+    { id: "frosthold_trader", name: "Frosthold Trader", x: -150, z: 103, map_id: "overworld" },
   ];
   for (const n of npcs) {
     await prisma.npc.upsert({ where: { id: n.id }, create: n, update: n });
@@ -738,6 +836,18 @@ async function main() {
   await prisma.npcVendorItem.createMany({
     data: items.filter((i) => i.id !== "warden_relic").map((i) => ({ npc_id: "merchant", item_id: i.id })),
   });
+
+  // Each new-city vendor sells a tier-appropriate slice of the catalog rather than everything -
+  // gearing up at Frosthold should feel different from gearing up at Millbrook.
+  const vendorCatalogs: Record<string, string[]> = {
+    millbrook_trader: ["rusty_sword", "hunting_bow", "apprentice_wand", "leather_vest", "lucky_charm"],
+    ashford_quartermaster: ["chainmail_hauberk", "signet_ring", "amulet_of_vigor", "reinforced_platemail"],
+    frosthold_trader: ["padded_robe", "staff_of_embers", "frostguard_amulet"],
+  };
+  for (const [npcId, itemIds] of Object.entries(vendorCatalogs)) {
+    await prisma.npcVendorItem.deleteMany({ where: { npc_id: npcId } });
+    await prisma.npcVendorItem.createMany({ data: itemIds.map((item_id) => ({ npc_id: npcId, item_id })) });
+  }
 
   // --- Quests ---
   const quests = [
@@ -771,6 +881,82 @@ async function main() {
       reward_xp: 500,
       reward_item_id: "warden_relic",
     },
+    // --- The leveling path: quest_giver (starting town) points you toward Millbrook, whose
+    // quest giver points toward Ashford, whose quest giver points toward Frosthold - a straight
+    // line of increasingly dangerous cities, each with two quests against that zone's enemies.
+    // There's no hard level-gate (QuestDef has no requiredLevel field, and none of this game's
+    // other systems gate by level either) - the enemies' own difficulty is what paces this, same
+    // as every other quest here.
+    {
+      id: "kill_wolf_5",
+      name: "Wolves at the Border",
+      description: "Wolves have been shadowing travelers on the road east to Millbrook. Kill 5 of them.",
+      giver_npc_id: "quest_giver",
+      objective_enemy_type_id: "wolf",
+      objective_count: 5,
+      reward_xp: 300,
+      reward_item_id: "leather_vest",
+    },
+    {
+      id: "kill_bandit_5",
+      name: "Bandit Trouble",
+      description: "Bandits have been raiding the trade road. Kill 5 of them.",
+      giver_npc_id: "elara",
+      objective_enemy_type_id: "bandit",
+      objective_count: 5,
+      reward_xp: 500,
+      reward_item_id: "hunting_bow",
+    },
+    {
+      id: "kill_bandit_archer_5",
+      name: "Silence the Archers",
+      description: "The bandits' archers are the ones picking off our scouts. Kill 5 of them.",
+      giver_npc_id: "elara",
+      objective_enemy_type_id: "bandit_archer",
+      objective_count: 5,
+      reward_xp: 650,
+      reward_item_id: "chainmail_hauberk",
+    },
+    {
+      id: "kill_troll_5",
+      name: "Troll Menace",
+      description: "Cave trolls have wandered down from the highlands near Ashford. Kill 5 of them.",
+      giver_npc_id: "kael",
+      objective_enemy_type_id: "troll",
+      objective_count: 5,
+      reward_xp: 950,
+      reward_item_id: "reinforced_platemail",
+    },
+    {
+      id: "kill_dark_mage_6",
+      name: "Cult of Ash",
+      description: "A cult has taken root in the hills, calling on powers best left alone. Kill 6 of their cultists.",
+      giver_npc_id: "kael",
+      objective_enemy_type_id: "dark_mage",
+      objective_count: 6,
+      reward_xp: 1200,
+      reward_item_id: "staff_of_embers",
+    },
+    {
+      id: "kill_frost_giant_4",
+      name: "Giants of the North",
+      description: "Frost giants guard every approach to Frosthold. Kill 4 of them to clear a path.",
+      giver_npc_id: "frostbeard",
+      objective_enemy_type_id: "frost_giant",
+      objective_count: 4,
+      reward_xp: 1800,
+      reward_item_id: "frostguard_amulet",
+    },
+    {
+      id: "kill_frost_giant_8",
+      name: "The Frozen Threat",
+      description: "The giants keep coming. Break them for good - kill 8 more.",
+      giver_npc_id: "frostbeard",
+      objective_enemy_type_id: "frost_giant",
+      objective_count: 8,
+      reward_xp: 2600,
+      reward_item_id: "crown_of_the_north",
+    },
   ];
   for (const q of quests) {
     await prisma.quest.upsert({ where: { id: q.id }, create: q, update: q });
@@ -783,6 +969,28 @@ async function main() {
     { id: "caster-1", map_id: "overworld", enemy_type_id: "caster", x: 8, z: -8 },
     { id: "caster-2", map_id: "overworld", enemy_type_id: "caster", x: -8, z: -8 },
     { id: "boss-1", map_id: "overworld", enemy_type_id: "boss", x: 0, z: 28, respawn_ms: 60_000 },
+    // Wolves: the road east from the starting town toward Millbrook.
+    { id: "wolf-1", map_id: "overworld", enemy_type_id: "wolf", x: 30, z: -5 },
+    { id: "wolf-2", map_id: "overworld", enemy_type_id: "wolf", x: 40, z: -15 },
+    { id: "wolf-3", map_id: "overworld", enemy_type_id: "wolf", x: 25, z: 10 },
+    // Bandits/archers: the trade road ringing Millbrook.
+    { id: "bandit-1", map_id: "overworld", enemy_type_id: "bandit", x: 60, z: -25 },
+    { id: "bandit-2", map_id: "overworld", enemy_type_id: "bandit", x: 85, z: -5 },
+    { id: "bandit-3", map_id: "overworld", enemy_type_id: "bandit", x: 55, z: 5 },
+    { id: "bandit-archer-1", map_id: "overworld", enemy_type_id: "bandit_archer", x: 90, z: -20 },
+    { id: "bandit-archer-2", map_id: "overworld", enemy_type_id: "bandit_archer", x: 60, z: 10 },
+    // Trolls/dark mages: the highlands around Ashford Keep.
+    { id: "troll-1", map_id: "overworld", enemy_type_id: "troll", x: 120, z: 35, respawn_ms: 15_000 },
+    { id: "troll-2", map_id: "overworld", enemy_type_id: "troll", x: 160, z: 65, respawn_ms: 15_000 },
+    { id: "troll-3", map_id: "overworld", enemy_type_id: "troll", x: 130, z: 70, respawn_ms: 15_000 },
+    { id: "dark-mage-1", map_id: "overworld", enemy_type_id: "dark_mage", x: 155, z: 35, respawn_ms: 15_000 },
+    { id: "dark-mage-2", map_id: "overworld", enemy_type_id: "dark_mage", x: 125, z: 65, respawn_ms: 15_000 },
+    // Frost giants: the approaches to Frosthold - four spawns since the two local quests need
+    // 12 kills between them, and a longer respawn so the area doesn't feel like a farming pit.
+    { id: "frost-giant-1", map_id: "overworld", enemy_type_id: "frost_giant", x: -130, z: 85, respawn_ms: 25_000 },
+    { id: "frost-giant-2", map_id: "overworld", enemy_type_id: "frost_giant", x: -170, z: 115, respawn_ms: 25_000 },
+    { id: "frost-giant-3", map_id: "overworld", enemy_type_id: "frost_giant", x: -140, z: 130, respawn_ms: 25_000 },
+    { id: "frost-giant-4", map_id: "overworld", enemy_type_id: "frost_giant", x: -165, z: 80, respawn_ms: 25_000 },
   ];
   for (const s of spawns) {
     await prisma.enemySpawn.upsert({ where: { id: s.id }, create: s, update: s });
@@ -791,17 +999,123 @@ async function main() {
   // --- Structures (a small starter town near the quest_giver/merchant cluster - one of each
   // kind, meant as a copyable example for building out bigger cities via the admin panel).
   // Sized/spaced to clear the fixed enemy spawns at (+-8, +-8) with margin to spare - nothing
-  // about structure size is capped anywhere in the code, these are just bigger example values. ---
+  // about structure size is capped anywhere in the code, these are just bigger example values.
+  //
+  // A "house" is no longer its own structure kind (see shared's StructureKind/
+  // findStructureLoops) - it's just 4 "wall" segments closed into a loop with one "door" segment
+  // on it, exactly what an admin would place by hand via the map editor's "+ wall"/"+ door"
+  // buttons. Each room below is the axis-aligned wall+door layout findStructureLoops needs to
+  // detect it as a closed loop and auto-generate its floor/roof - a worked example to copy. ---
   const structures = [
-    { id: "house_1", name: "Quartermaster's House", map_id: "overworld", kind: "house", x: 3, z: -13, rotation_y: 0, width: 6, depth: 6, height: 4.5, color: "#8a6d4b" },
-    { id: "house_2", name: "Traveler's Cottage", map_id: "overworld", kind: "house", x: -15, z: -13, rotation_y: 0.3, width: 6, depth: 6, height: 4.5, color: "#9c7a52" },
-    { id: "merchant_shop", name: "Traveling Merchant's Shop", map_id: "overworld", kind: "shop", x: -14, z: 1, rotation_y: -0.4, width: 8, depth: 6, height: 5, color: "#5c7a99" },
+    // Quartermaster's House (was a single "house" structure at x:3, z:-13, 6x6, door facing -z)
+    { id: "house_1_wall_front_l", name: "Quartermaster's House (front-left)", map_id: "overworld", kind: "wall", x: 1.1, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#8a6d4b" },
+    { id: "house_1_door", name: "Quartermaster's House (door)", map_id: "overworld", kind: "door", x: 3, z: -16, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
+    { id: "house_1_wall_front_r", name: "Quartermaster's House (front-right)", map_id: "overworld", kind: "wall", x: 4.9, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#8a6d4b" },
+    { id: "house_1_wall_back", name: "Quartermaster's House (back)", map_id: "overworld", kind: "wall", x: 3, z: -10, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
+    { id: "house_1_wall_left", name: "Quartermaster's House (left)", map_id: "overworld", kind: "wall", x: 0, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
+    { id: "house_1_wall_right", name: "Quartermaster's House (right)", map_id: "overworld", kind: "wall", x: 6, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
+    // Traveler's Cottage (was a single "house" structure at x:-15, z:-13, 6x6, door facing -z)
+    { id: "house_2_wall_front_l", name: "Traveler's Cottage (front-left)", map_id: "overworld", kind: "wall", x: -16.9, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#9c7a52" },
+    { id: "house_2_door", name: "Traveler's Cottage (door)", map_id: "overworld", kind: "door", x: -15, z: -16, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#9c7a52" },
+    { id: "house_2_wall_front_r", name: "Traveler's Cottage (front-right)", map_id: "overworld", kind: "wall", x: -13.1, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#9c7a52" },
+    { id: "house_2_wall_back", name: "Traveler's Cottage (back)", map_id: "overworld", kind: "wall", x: -15, z: -10, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#9c7a52" },
+    { id: "house_2_wall_left", name: "Traveler's Cottage (left)", map_id: "overworld", kind: "wall", x: -18, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#9c7a52" },
+    { id: "house_2_wall_right", name: "Traveler's Cottage (right)", map_id: "overworld", kind: "wall", x: -12, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#9c7a52" },
+    // Traveling Merchant's Shop (was a single "shop" structure at x:-14, z:1, 8x6, door facing -z)
+    { id: "merchant_shop_wall_front_l", name: "Traveling Merchant's Shop (front-left)", map_id: "overworld", kind: "wall", x: -16.4, z: -2, rotation_y: 0, width: 3.2, depth: 0.2, height: 3.5, color: "#5c7a99" },
+    { id: "merchant_shop_door", name: "Traveling Merchant's Shop (door)", map_id: "overworld", kind: "door", x: -14, z: -2, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.5, color: "#5c7a99" },
+    { id: "merchant_shop_wall_front_r", name: "Traveling Merchant's Shop (front-right)", map_id: "overworld", kind: "wall", x: -11.6, z: -2, rotation_y: 0, width: 3.2, depth: 0.2, height: 3.5, color: "#5c7a99" },
+    { id: "merchant_shop_wall_back", name: "Traveling Merchant's Shop (back)", map_id: "overworld", kind: "wall", x: -14, z: 4, rotation_y: 0, width: 8, depth: 0.2, height: 3.5, color: "#5c7a99" },
+    { id: "merchant_shop_wall_left", name: "Traveling Merchant's Shop (left)", map_id: "overworld", kind: "wall", x: -18, z: 1, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.5, color: "#5c7a99" },
+    { id: "merchant_shop_wall_right", name: "Traveling Merchant's Shop (right)", map_id: "overworld", kind: "wall", x: -10, z: 1, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.5, color: "#5c7a99" },
     { id: "town_wall", name: "Town Wall", map_id: "overworld", kind: "wall", x: -3, z: -19, rotation_y: 0, width: 22, depth: 1.2, height: 4, color: "#7d7d7d" },
     { id: "town_gate", name: "Town Gate", map_id: "overworld", kind: "gate", x: -3, z: -9, rotation_y: 0, width: 6, depth: 1.2, height: 5.5, color: "#6b6b6b" },
     { id: "watch_tower", name: "Sentinel's Watchtower", map_id: "overworld", kind: "tower", x: 6, z: 22, rotation_y: 0, width: 4, depth: 4, height: 12, color: "#6e6a63" },
+    // --- Millbrook (trading outpost, x~70/z~-10) - one room, no perimeter, matches its role as
+    // a small waystation rather than a fortified city. ---
+    { id: "millbrook_hall_wall_front_l", name: "Millbrook Trading Hall (front-left)", map_id: "overworld", kind: "wall", x: 67.85, z: -13.5, rotation_y: 0, width: 2.7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
+    { id: "millbrook_hall_door", name: "Millbrook Trading Hall (door)", map_id: "overworld", kind: "door", x: 70, z: -13.5, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#6b8a5c" },
+    { id: "millbrook_hall_wall_front_r", name: "Millbrook Trading Hall (front-right)", map_id: "overworld", kind: "wall", x: 72.15, z: -13.5, rotation_y: 0, width: 2.7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
+    { id: "millbrook_hall_wall_back", name: "Millbrook Trading Hall (back)", map_id: "overworld", kind: "wall", x: 70, z: -6.5, rotation_y: 0, width: 7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
+    { id: "millbrook_hall_wall_left", name: "Millbrook Trading Hall (left)", map_id: "overworld", kind: "wall", x: 66.5, z: -10, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
+    { id: "millbrook_hall_wall_right", name: "Millbrook Trading Hall (right)", map_id: "overworld", kind: "wall", x: 73.5, z: -10, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
+    // --- Ashford Keep (fortified city, x~140/z~50) - hall plus a tower and a gate marking the
+    // approach, reads as more military than Millbrook's single trading hall. ---
+    { id: "ashford_hall_wall_front_l", name: "Ashford Keep Hall (front-left)", map_id: "overworld", kind: "wall", x: 137.6, z: 46, rotation_y: 0, width: 3.2, depth: 0.2, height: 3.5, color: "#5a5a68" },
+    { id: "ashford_hall_door", name: "Ashford Keep Hall (door)", map_id: "overworld", kind: "door", x: 140, z: 46, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.5, color: "#5a5a68" },
+    { id: "ashford_hall_wall_front_r", name: "Ashford Keep Hall (front-right)", map_id: "overworld", kind: "wall", x: 142.4, z: 46, rotation_y: 0, width: 3.2, depth: 0.2, height: 3.5, color: "#5a5a68" },
+    { id: "ashford_hall_wall_back", name: "Ashford Keep Hall (back)", map_id: "overworld", kind: "wall", x: 140, z: 54, rotation_y: 0, width: 8, depth: 0.2, height: 3.5, color: "#5a5a68" },
+    { id: "ashford_hall_wall_left", name: "Ashford Keep Hall (left)", map_id: "overworld", kind: "wall", x: 136, z: 50, rotation_y: 1.5708, width: 8, depth: 0.2, height: 3.5, color: "#5a5a68" },
+    { id: "ashford_hall_wall_right", name: "Ashford Keep Hall (right)", map_id: "overworld", kind: "wall", x: 144, z: 50, rotation_y: 1.5708, width: 8, depth: 0.2, height: 3.5, color: "#5a5a68" },
+    { id: "ashford_tower", name: "Ashford Watchtower", map_id: "overworld", kind: "tower", x: 150, z: 50, rotation_y: 0, width: 4, depth: 4, height: 11, color: "#5a5a68" },
+    { id: "ashford_gate", name: "Ashford Gate", map_id: "overworld", kind: "gate", x: 140, z: 38, rotation_y: 0, width: 6, depth: 1.2, height: 5.5, color: "#5a5a68" },
+    // --- Frosthold (northern outpost, x~-150/z~100) - hall plus its own watchtower. ---
+    { id: "frosthold_hall_wall_front_l", name: "Frosthold Lodge (front-left)", map_id: "overworld", kind: "wall", x: -152.15, z: 96.5, rotation_y: 0, width: 2.7, depth: 0.2, height: 3.15, color: "#7d97a8" },
+    { id: "frosthold_hall_door", name: "Frosthold Lodge (door)", map_id: "overworld", kind: "door", x: -150, z: 96.5, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#7d97a8" },
+    { id: "frosthold_hall_wall_front_r", name: "Frosthold Lodge (front-right)", map_id: "overworld", kind: "wall", x: -147.85, z: 96.5, rotation_y: 0, width: 2.7, depth: 0.2, height: 3.15, color: "#7d97a8" },
+    { id: "frosthold_hall_wall_back", name: "Frosthold Lodge (back)", map_id: "overworld", kind: "wall", x: -150, z: 103.5, rotation_y: 0, width: 7, depth: 0.2, height: 3.15, color: "#7d97a8" },
+    { id: "frosthold_hall_wall_left", name: "Frosthold Lodge (left)", map_id: "overworld", kind: "wall", x: -153.5, z: 100, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#7d97a8" },
+    { id: "frosthold_hall_wall_right", name: "Frosthold Lodge (right)", map_id: "overworld", kind: "wall", x: -146.5, z: 100, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#7d97a8" },
+    { id: "frosthold_tower", name: "Frosthold Watchtower", map_id: "overworld", kind: "tower", x: -140, z: 100, rotation_y: 0, width: 4, depth: 4, height: 10, color: "#7d97a8" },
   ];
   for (const s of structures) {
     await prisma.structure.upsert({ where: { id: s.id }, create: s, update: s });
+  }
+
+  // --- Waypoints (fast travel between "cities" - just two example points to start: the town
+  // near spawn, and out by the watchtower, standing in for a second settlement. An admin adds
+  // more via the map editor's "+ Waypoint" button as more cities get built out.) ---
+  const waypoints = [
+    { id: "waypoint_town", name: "Town", map_id: "overworld", x: -3, z: -13 },
+    { id: "waypoint_watchtower", name: "Watchtower", map_id: "overworld", x: 6, z: 18 },
+    { id: "waypoint_millbrook", name: "Millbrook", map_id: "overworld", x: 70, z: -10 },
+    { id: "waypoint_ashford", name: "Ashford Keep", map_id: "overworld", x: 140, z: 50 },
+    { id: "waypoint_frosthold", name: "Frosthold", map_id: "overworld", x: -150, z: 100 },
+  ];
+  for (const w of waypoints) {
+    await prisma.waypoint.upsert({ where: { id: w.id }, create: w, update: w });
+  }
+
+  // --- Furniture (dresses every room's interior - a table facing pair of chairs plus a
+  // crate/barrel, bookshelf too in the two bigger rooms - so a house doesn't read as an empty
+  // box. Colors match each room's own wall color for a cohesive look. See shared's FurnitureKind/
+  // client/src/game/Furniture.ts.) ---
+  const furniture = [
+    // Quartermaster's House (6x6, center 3,-13)
+    { id: "furn_house1_table", name: "Table", map_id: "overworld", kind: "table", x: 3, z: -13, rotation_y: 0, color: "#8a6d4b" },
+    { id: "furn_house1_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 3, z: -11.7, rotation_y: 3.1416, color: "#8a6d4b" },
+    { id: "furn_house1_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 3, z: -14.3, rotation_y: 0, color: "#8a6d4b" },
+    { id: "furn_house1_crate", name: "Crate", map_id: "overworld", kind: "crate", x: 5, z: -10.8, rotation_y: 0, color: "#8a6d4b" },
+    // Traveler's Cottage (6x6, center -15,-13)
+    { id: "furn_house2_table", name: "Table", map_id: "overworld", kind: "table", x: -15, z: -13, rotation_y: 0, color: "#9c7a52" },
+    { id: "furn_house2_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -15, z: -11.7, rotation_y: 3.1416, color: "#9c7a52" },
+    { id: "furn_house2_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -15, z: -14.3, rotation_y: 0, color: "#9c7a52" },
+    { id: "furn_house2_crate", name: "Crate", map_id: "overworld", kind: "crate", x: -13, z: -10.8, rotation_y: 0, color: "#9c7a52" },
+    // Traveling Merchant's Shop (8x6, center -14,1)
+    { id: "furn_shop_table", name: "Table", map_id: "overworld", kind: "table", x: -14, z: 1, rotation_y: 0, color: "#5c7a99" },
+    { id: "furn_shop_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -14, z: 2.3, rotation_y: 3.1416, color: "#5c7a99" },
+    { id: "furn_shop_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -14, z: -0.3, rotation_y: 0, color: "#5c7a99" },
+    { id: "furn_shop_barrel", name: "Barrel", map_id: "overworld", kind: "barrel", x: -16.5, z: 3.2, rotation_y: 0, color: "#5c7a99" },
+    { id: "furn_shop_bookshelf", name: "Bookshelf", map_id: "overworld", kind: "bookshelf", x: -17.3, z: 1, rotation_y: 1.5708, color: "#5c7a99" },
+    // Millbrook Trading Hall (7x7, center 70,-10)
+    { id: "furn_millbrook_table", name: "Table", map_id: "overworld", kind: "table", x: 70, z: -10, rotation_y: 0, color: "#6b8a5c" },
+    { id: "furn_millbrook_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 70, z: -8.7, rotation_y: 3.1416, color: "#6b8a5c" },
+    { id: "furn_millbrook_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 70, z: -11.3, rotation_y: 0, color: "#6b8a5c" },
+    { id: "furn_millbrook_crate", name: "Crate", map_id: "overworld", kind: "crate", x: 72, z: -7.2, rotation_y: 0, color: "#6b8a5c" },
+    // Ashford Keep Hall (8x8, center 140,50)
+    { id: "furn_ashford_table", name: "Table", map_id: "overworld", kind: "table", x: 140, z: 50, rotation_y: 0, color: "#5a5a68" },
+    { id: "furn_ashford_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 140, z: 51.5, rotation_y: 3.1416, color: "#5a5a68" },
+    { id: "furn_ashford_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 140, z: 48.5, rotation_y: 0, color: "#5a5a68" },
+    { id: "furn_ashford_barrel", name: "Barrel", map_id: "overworld", kind: "barrel", x: 142.5, z: 52.5, rotation_y: 0, color: "#5a5a68" },
+    { id: "furn_ashford_bookshelf", name: "Bookshelf", map_id: "overworld", kind: "bookshelf", x: 137.3, z: 50, rotation_y: 1.5708, color: "#5a5a68" },
+    // Frosthold Lodge (7x7, center -150,100)
+    { id: "furn_frosthold_table", name: "Table", map_id: "overworld", kind: "table", x: -150, z: 100, rotation_y: 0, color: "#7d97a8" },
+    { id: "furn_frosthold_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -150, z: 101.3, rotation_y: 3.1416, color: "#7d97a8" },
+    { id: "furn_frosthold_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -150, z: 98.7, rotation_y: 0, color: "#7d97a8" },
+    { id: "furn_frosthold_crate", name: "Crate", map_id: "overworld", kind: "crate", x: -148, z: 102.8, rotation_y: 0, color: "#7d97a8" },
+  ];
+  for (const f of furniture) {
+    await prisma.furniture.upsert({ where: { id: f.id }, create: f, update: f });
   }
 
   // --- Dungeon ---

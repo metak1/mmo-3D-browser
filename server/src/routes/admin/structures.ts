@@ -6,7 +6,7 @@ const structureSchema = z.object({
   id: z.string().min(1).max(32),
   name: z.string().min(1).max(64),
   map_id: z.string().min(1).max(32),
-  kind: z.enum(["house", "shop", "wall", "tower", "gate"]),
+  kind: z.enum(["wall", "door", "tower", "gate"]),
   x: z.number(),
   z: z.number(),
   rotation_y: z.number().default(0),

@@ -13,6 +13,7 @@ import {
   CastMessage,
   ClassId,
   ClassRole,
+  CombatTextEvent,
   DAMAGE_STAT_FACTOR,
   ENEMY_TYPES,
   INTERRUPT_LOCKOUT_MS,
@@ -105,6 +106,11 @@ export interface CombatEngineConfig {
   // Called after a dead player's hp/ailments/cast have already been reset - the room decides
   // where they land (the overworld's fixed (0,0,0), or a dungeon's own entry point).
   onPlayerRespawn: (sessionId: string, player: Player) => void;
+  // Fired on every damage/heal application (see applySpellDamage/damagePlayer/healPlayer) - the
+  // room just rebroadcasts it as-is (see WorldRoom/DungeonRoom's identical "combat_text" wiring).
+  // Not synced schema state on purpose: it's a transient notice, not a value a late-joining
+  // client needs to reconcile.
+  onCombatText: (event: CombatTextEvent) => void;
   // Gates both movement collision and line-of-sight checks (player casts and enemy casts) against
   // STRUCTURES. Only the overworld has any (dungeon coordinates are unrelated small numbers that
   // could otherwise collide with/be blocked by unrelated overworld buildings) - WorldRoom passes
@@ -289,17 +295,18 @@ export class CombatEngine {
     }
   }
 
-  computePlayerDamage(player: Player, baseDamage: number, spellId?: SpellId): number {
+  computePlayerDamage(player: Player, baseDamage: number, spellId?: SpellId): { amount: number; isCrit: boolean } {
     const effective = this.getEffectiveStatsFor(player);
     const bonus = this.getCombinedBonusFor(player, spellId);
     const ailmentMultiplier = this.getAilmentDamageMultiplier(player);
     const statBonus = Math.floor(effective.mainStat * DAMAGE_STAT_FACTOR);
     let damage = (baseDamage + statBonus) * (1 + bonus.damagePercent / 100) * ailmentMultiplier;
     const critChance = Math.min(1, critChanceFromLuck(effective.luck) + bonus.critChanceBonus / 100);
-    if (Math.random() < critChance) {
+    const isCrit = Math.random() < critChance;
+    if (isCrit) {
       damage = damage * CRIT_MULTIPLIER;
     }
-    return Math.round(damage);
+    return { amount: Math.round(damage), isCrit };
   }
 
   // Healing reuses the talent system's damagePercent bucket as a general "spell power"
@@ -313,10 +320,18 @@ export class CombatEngine {
     return Math.round(heal);
   }
 
-  healPlayer(caster: Player, casterSessionId: string, target: Player, baseAmount: number, spellId?: SpellId) {
+  healPlayer(
+    caster: Player,
+    casterSessionId: string,
+    target: Player,
+    targetSessionId: string,
+    baseAmount: number,
+    spellId?: SpellId,
+  ) {
     const heal = this.computePlayerHeal(caster, baseAmount, spellId);
     target.hp = Math.min(target.maxHp, target.hp + heal);
     this.addHealThreat(caster, casterSessionId, heal);
+    this.config.onCombatText({ targetId: targetSessionId, targetKind: "player", amount: heal, kind: "heal", isCrit: false });
   }
 
   // Healing has no direct "which enemy" to attribute threat to (unlike damage, which always
@@ -356,6 +371,7 @@ export class CombatEngine {
     const effective = this.getEffectiveStatsFor(player);
     const armorBonus = this.getCombinedBonusFor(player).armorBonus;
     const mitigated = Math.max(1, amount - (effective.armor + armorBonus));
+    this.config.onCombatText({ targetId: sessionId, targetKind: "player", amount: mitigated, kind: "damage", isCrit: false });
     player.hp = Math.max(0, player.hp - mitigated);
     if (player.hp === 0) {
       this.cancelPlayerCast(sessionId);
@@ -456,26 +472,27 @@ export class CombatEngine {
         const impact = this.resolveImpactPoint(caster, target);
         if (!impact) return;
         forEachAlive(this.state.enemies, impact.x, impact.z, spell.aoeRadius, (enemy, enemyId) => {
-          const damage = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
-          this.applySpellDamage(enemy, damage, enemyId, casterSessionId);
+          const { amount, isCrit } = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
+          this.applySpellDamage(enemy, amount, enemyId, casterSessionId, isCrit);
         });
       } else if (target.kind === "enemy") {
         const enemy = this.state.enemies.get(target.id);
         if (enemy && enemy.hp > 0) {
-          const damage = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
-          this.applySpellDamage(enemy, damage, target.id, casterSessionId);
+          const { amount, isCrit } = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
+          this.applySpellDamage(enemy, amount, target.id, casterSessionId, isCrit);
         }
       }
     } else if (spell.effectType === "heal") {
       if (spell.aoeRadius) {
         const impact = this.resolveImpactPoint(caster, target);
         if (!impact) return;
-        forEachAlive(this.state.players, impact.x, impact.z, spell.aoeRadius, (ally) => {
-          this.healPlayer(caster, casterSessionId, ally, spell.amount ?? 0, spell.id);
+        forEachAlive(this.state.players, impact.x, impact.z, spell.aoeRadius, (ally, allySessionId) => {
+          this.healPlayer(caster, casterSessionId, ally, allySessionId, spell.amount ?? 0, spell.id);
         });
       } else {
         const ally = this.resolveAllyUnit(caster, target);
-        if (ally) this.healPlayer(caster, casterSessionId, ally, spell.amount ?? 0, spell.id);
+        const allySessionId = target.kind === "ally" ? target.id : casterSessionId;
+        if (ally) this.healPlayer(caster, casterSessionId, ally, allySessionId, spell.amount ?? 0, spell.id);
       }
     } else if (spell.effectType === "dispel") {
       const ally = this.resolveAllyUnit(caster, target);
@@ -536,12 +553,13 @@ export class CombatEngine {
 
   // --- Enemy damage / kill ---
 
-  applySpellDamage(target: Enemy, damage: number, targetId: string, killerSessionId: string) {
+  applySpellDamage(target: Enemy, damage: number, targetId: string, killerSessionId: string, isCrit = false) {
     // Starts the enrage clock on the boss's first hit taken, never reset until it dies
     // (each room creates a fresh Enemy() per spawn, so a respawned/re-spawned boss starts clean).
     if (target.behavior === "boss" && target.enragesAt === 0) target.enragesAt = Date.now() + BOSS_ENRAGE_MS;
 
     this.addThreat(targetId, killerSessionId, damage * this.threatRoleMultiplierFor(killerSessionId));
+    this.config.onCombatText({ targetId, targetKind: "enemy", amount: damage, kind: "damage", isCrit });
 
     target.hp = Math.max(0, target.hp - damage);
     if (target.hp === 0) {
@@ -638,8 +656,8 @@ export class CombatEngine {
       if (this.config.collidableStructures && !hasLineOfSight(player.x, player.z, impact.x, impact.z, STRUCTURES)) continue;
 
       if (spell.projectileSpeed && pending.target.kind === "enemy") {
-        const damage = this.computePlayerDamage(player, spell.amount ?? 0);
-        this.spawnProjectile(player.x, player.z, "player", pending.target.id, damage, spell.projectileSpeed, sessionId);
+        const { amount, isCrit } = this.computePlayerDamage(player, spell.amount ?? 0);
+        this.spawnProjectile(player.x, player.z, "player", pending.target.id, amount, spell.projectileSpeed, sessionId, isCrit);
       } else {
         this.resolveSpellEffect(player, sessionId, spell, pending.target);
       }
@@ -892,6 +910,7 @@ export class CombatEngine {
     damage: number,
     speed: number,
     ownerId: string,
+    isCrit = false,
   ) {
     const projectile = new Projectile();
     projectile.x = x;
@@ -901,6 +920,7 @@ export class CombatEngine {
     projectile.damage = damage;
     projectile.speed = speed;
     projectile.ownerId = ownerId;
+    projectile.isCrit = isCrit;
 
     const id = `proj-${this.projectileSeq++}`;
     this.state.projectiles.set(id, projectile);
@@ -953,7 +973,7 @@ export class CombatEngine {
           }
         } else {
           const enemy = this.state.enemies.get(projectile.targetId)!;
-          this.applySpellDamage(enemy, projectile.damage, projectile.targetId, projectile.ownerId);
+          this.applySpellDamage(enemy, projectile.damage, projectile.targetId, projectile.ownerId, projectile.isCrit);
         }
         this.removeProjectile(id);
         continue;

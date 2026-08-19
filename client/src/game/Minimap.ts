@@ -27,6 +27,8 @@ const COLOR_STRUCTURE = "#8a95b8";
 const COLOR_PORTAL = "#b06fe0";
 const COLOR_BOSS_ARENA = "rgba(224, 90, 78, 0.25)";
 const COLOR_RING = "#4a5578";
+const COLOR_QUEST_AREA = "rgba(255, 210, 63, 0.18)";
+const COLOR_QUEST_AREA_BORDER = "#ffd23f";
 
 export interface MinimapEntity {
   x: number;
@@ -35,6 +37,18 @@ export interface MinimapEntity {
 
 export interface MinimapEnemy extends MinimapEntity {
   isBoss: boolean;
+}
+
+// A tracked quest's objective area - see main.ts's computeQuestAreaMarkers, which derives this
+// from SPAWN_POINTS (a quest has no location of its own, only an enemy type; this is a bounding
+// circle over wherever that type actually spawns). `number` matches the same quest's badge in
+// the quest log/NPC dialogue (see index.html's .quest-number), so "quest 3" means the same thing
+// everywhere it's shown.
+export interface QuestAreaMarker {
+  x: number;
+  z: number;
+  radius: number;
+  number: number;
 }
 
 export class Minimap {
@@ -107,6 +121,7 @@ export class Minimap {
     others: MinimapEntity[],
     enemies: MinimapEnemy[],
     showOverworldLandmarks: boolean,
+    questAreas: QuestAreaMarker[] = [],
   ) {
     const ctx = this.ctx;
     // Read live off the canvas element rather than a cached field, so resizing it (the big map's
@@ -151,6 +166,24 @@ export class Minimap {
       ctx.arc(arenaX, arenaZ, BOSS_ARENA_RADIUS * this.scale, 0, Math.PI * 2);
       ctx.fillStyle = COLOR_BOSS_ARENA;
       ctx.fill();
+
+      for (const marker of questAreas) {
+        const [mx, my] = this.project(marker.x, marker.z);
+        const radiusPx = marker.radius * this.scale;
+        ctx.beginPath();
+        ctx.arc(mx, my, radiusPx, 0, Math.PI * 2);
+        ctx.fillStyle = COLOR_QUEST_AREA;
+        ctx.fill();
+        ctx.strokeStyle = COLOR_QUEST_AREA_BORDER;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = COLOR_QUEST_AREA_BORDER;
+        ctx.font = `700 ${12 * dotScale}px -apple-system, system-ui, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(marker.number), mx, my);
+      }
 
       for (const s of STRUCTURES) this.dot(s.x, s.z, COLOR_STRUCTURE, 3 * dotScale);
       for (const n of Object.values(NPCS)) {

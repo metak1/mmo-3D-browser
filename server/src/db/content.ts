@@ -15,6 +15,8 @@ import {
   SpellDef,
   StructureDef,
   TalentDef,
+  WaypointDef,
+  FurnitureDef,
 } from "@mmo/shared";
 import { ClassRole } from "@mmo/shared";
 import { prisma } from "./client.js";
@@ -37,6 +39,8 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     spawnRows,
     dungeonRows,
     structureRows,
+    waypointRows,
+    furnitureRows,
   ] = await Promise.all([
     prisma.gameClass.findMany(),
     prisma.spell.findMany(),
@@ -50,6 +54,8 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     prisma.enemySpawn.findMany(),
     prisma.dungeon.findMany(),
     prisma.structure.findMany(),
+    prisma.waypoint.findMany(),
+    prisma.furniture.findMany(),
   ]);
 
   const vendorItemIdsByNpc = new Map<string, string[]>();
@@ -181,7 +187,27 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     yOffset: s.y_offset,
   }));
 
-  return { classes, spells, items, talents, enemyTypes, npcs, quests, maps, dungeons, spawns, structures };
+  const waypoints: WaypointDef[] = waypointRows.map((w) => ({
+    id: w.id,
+    name: w.name,
+    mapId: w.map_id,
+    x: w.x,
+    z: w.z,
+  }));
+
+  const furniture: FurnitureDef[] = furnitureRows.map((f) => ({
+    id: f.id,
+    name: f.name,
+    mapId: f.map_id,
+    kind: f.kind as FurnitureDef["kind"],
+    x: f.x,
+    z: f.z,
+    rotationY: f.rotation_y,
+    color: f.color,
+    yOffset: f.y_offset,
+  }));
+
+  return { classes, spells, items, talents, enemyTypes, npcs, quests, maps, dungeons, spawns, structures, waypoints, furniture };
 }
 
 // The single function both server boot and every admin CRUD mutation call - see

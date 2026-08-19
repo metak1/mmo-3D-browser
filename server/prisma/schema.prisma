@@ -149,9 +149,43 @@ model GameMap {
   npcs              Npc[]
   spawns            EnemySpawn[]
   structures        Structure[]
+  waypoints         Waypoint[]
+  furniture         Furniture[]
   dungeons          Dungeon[]
 
   @@map("game_maps")
+}
+
+// A fast-travel point (see shared's WAYPOINT_INTERACT_RADIUS/WaypointTravelMessage and
+// WorldRoom.handleWaypointTravel) - a player standing within range of any waypoint on the map can
+// teleport to any other. No "discovery"/unlock state per character; every waypoint on the active
+// map is usable by anyone from the moment they're close enough to one.
+model Waypoint {
+  id       String  @id @db.VarChar(32)
+  name     String  @db.VarChar(64)
+  map_id   String  @db.VarChar(32)
+  x        Float
+  z        Float
+  game_map GameMap @relation(fields: [map_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("waypoints")
+}
+
+// Purely decorative dressing for a room's interior (see shared's FurnitureKind/client/src/game/
+// Furniture.ts) - never collides, has no server-side meaning at all, unlike Structure/Waypoint.
+model Furniture {
+  id         String  @id @db.VarChar(32)
+  name       String  @db.VarChar(64)
+  map_id     String  @db.VarChar(32)
+  kind       String  @db.VarChar(16) // "table" | "chair" | "barrel" | "crate" | "bookshelf"
+  x          Float
+  z          Float
+  rotation_y Float   @default(0)
+  color      String  @db.VarChar(16) // hex, e.g. "#8a6d4b"
+  y_offset   Float   @default(0) // added on top of the auto-computed terrain height
+  game_map   GameMap @relation(fields: [map_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("furniture")
 }
 
 model EnemySpawn {
@@ -176,7 +210,7 @@ model Structure {
   id         String  @id @db.VarChar(32)
   name       String  @db.VarChar(64)
   map_id     String  @db.VarChar(32)
-  kind       String  @db.VarChar(16) // "house" | "shop" | "wall" | "tower" | "gate"
+  kind       String  @db.VarChar(16) // "wall" | "door" | "tower" | "gate"
   x          Float
   z          Float
   rotation_y Float   @default(0)
