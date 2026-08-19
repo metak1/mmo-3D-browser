@@ -48,6 +48,8 @@ export class Enemy extends Schema {
   @type("string") behavior = "melee"; // fixed AI archetype ("melee"|"caster"|"boss"), copied from EnemyTypeDef at spawn
   @type("number") x = 0;
   @type("number") z = 0;
+  @type("number") homeX = 0; // spawn position - the center an idle enemy wanders around and leashes back to
+  @type("number") homeZ = 0;
   @type("number") hp = 0;
   @type("number") maxHp = 0;
   @type("boolean") isCasting = false;

@@ -221,7 +221,7 @@ export const ENTITIES: EntitySchema[] = [
       { key: "map_id", label: "Map", type: "reference", referenceEntity: "maps" },
       { key: "party_size", label: "Party Size", type: "number" },
       { key: "composition", label: "Composition (Record<role, count>)", type: "json" },
-      { key: "encounters", label: "Encounters (ordered waves)", type: "json" },
+      { key: "spawns", label: "Spawns (fixed spawn points; one boss-behavior entry ends the run)", type: "json" },
     ],
   },
 ];

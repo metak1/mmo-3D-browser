@@ -118,6 +118,10 @@ export interface MeleeStats {
   damage: number;
   range: number;
   intervalMs: number;
+  // Passive (undefined/0, the default - shown yellow) never engages until a player attacks it
+  // first; aggressive (>0, shown red) auto-engages the nearest player within this many meters -
+  // see CombatEngine.tickEnemyMovement.
+  aggroRange?: number;
 }
 
 export interface CasterStats {
@@ -127,6 +131,7 @@ export interface CasterStats {
   cooldownMs: number;
   projectileSpeed: number;
   castTimeMs: number;
+  aggroRange?: number; // same passive/aggressive contract as MeleeStats.aggroRange
 }
 
 // A boss runs the melee pattern always, and gains the aoe (caster-shaped) pattern once it
@@ -186,6 +191,18 @@ export const BOSS_PHASE_2_HP_FRACTION = 0.5;
 export const BOSS_ENRAGE_DAMAGE_MULTIPLIER = 2;
 export let BOSS_ARENA_CENTER = { x: 0, z: 28 };
 export let BOSS_ARENA_RADIUS = 10;
+
+// Overworld-only (see CombatEngineConfig.enemiesWander) - melee/caster enemies idle-wander a
+// short loop around their spawn point, and chase whoever they're engaged with (via threat, same
+// as before - only *acquiring* that engagement can now also happen proactively, for aggressive
+// types, via aggroRange above) until either the target dies/leaves or the chase pulls the enemy
+// this far from its spawn, at which point it gives up and returns to idle-wandering.
+export const ENEMY_WANDER_RADIUS = 6; // meters from spawn
+export const ENEMY_WANDER_SPEED = 1.2; // meters/second
+export const ENEMY_WANDER_PAUSE_MS = 1500; // minimum pause between wander legs
+export const ENEMY_WANDER_PAUSE_JITTER_MS = 2000; // extra random pause on top of the minimum
+export const ENEMY_CHASE_SPEED = 3.4; // meters/second - a bit under PLAYER_SPEED, so kiting works
+export const ENEMY_LEASH_RANGE = 18; // meters from spawn before a chase is abandoned
 
 export const PROJECTILE_MAX_LIFETIME_MS = 4000;
 
@@ -1158,10 +1175,17 @@ export interface GameMapDef {
 
 export let ACTIVE_MAP: GameMapDef | null = null;
 
-export interface DungeonEncounterSpec {
+// A fixed point in the dungeon a mob stands at from the moment the instance is created - same
+// shape/contract as the overworld's EnemySpawnDef (id doubles as the live Enemy's key in state,
+// respawnMs governs how long after death it reappears there). The one entry whose enemyTypeId
+// resolves to a "boss"-behavior EnemyTypeDef is what the run is building toward - see
+// DungeonRoom.handleEnemyKilled, which sets `cleared` and skips respawn once it dies.
+export interface DungeonSpawnDef {
+  id: string;
   enemyTypeId: EnemyTypeId;
   x: number;
   z: number;
+  respawnMs?: number;
 }
 
 export interface DungeonDef {
@@ -1171,7 +1195,7 @@ export interface DungeonDef {
   isActive: boolean;
   partySize: number;
   composition: Record<ClassRole, number>;
-  encounters: DungeonEncounterSpec[][]; // ordered waves
+  spawns: DungeonSpawnDef[];
 }
 
 export let ACTIVE_DUNGEON: DungeonDef | null = null;

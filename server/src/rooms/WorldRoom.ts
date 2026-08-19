@@ -87,6 +87,7 @@ export class WorldRoom extends Room<WorldState> {
       onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
       onCombatText: (event) => this.broadcast("combat_text", event),
       collidableStructures: true,
+      enemiesWander: true,
     });
     this.trade = new TradeManager(this);
 
@@ -280,6 +281,8 @@ export class WorldRoom extends Room<WorldState> {
     enemy.behavior = enemyType.behavior;
     enemy.x = point.x;
     enemy.z = point.z;
+    enemy.homeX = point.x;
+    enemy.homeZ = point.z;
     enemy.hp = enemyType.stats.maxHp;
     enemy.maxHp = enemyType.stats.maxHp;
     this.state.enemies.set(point.id, enemy);

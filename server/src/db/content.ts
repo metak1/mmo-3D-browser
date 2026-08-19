@@ -2,7 +2,7 @@ import {
   ClassDef,
   ContentSnapshot,
   DungeonDef,
-  DungeonEncounterSpec,
+  DungeonSpawnDef,
   EnemySpawnDef,
   EnemyStats,
   EnemyTypeDef,
@@ -133,7 +133,7 @@ interface DungeonRow {
   is_active: boolean;
   party_size: number;
   composition: unknown;
-  encounters: unknown;
+  spawns: unknown;
 }
 
 interface StructureRow {
@@ -315,7 +315,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     isActive: d.is_active,
     partySize: d.party_size,
     composition: d.composition as Record<ClassRole, number>,
-    encounters: d.encounters as unknown as DungeonEncounterSpec[][],
+    spawns: d.spawns as unknown as DungeonSpawnDef[],
   }));
 
   const structures: StructureDef[] = structureRows.map((s) => ({

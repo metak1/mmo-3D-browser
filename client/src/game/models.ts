@@ -69,6 +69,17 @@ export interface SpawnedModel {
 export async function spawnModel(path: string, clipNames: { idle: string; walk: string }): Promise<SpawnedModel> {
   const { scene, animations } = await loadModel(path);
   const object = cloneSkeleton(scene) as THREE.Object3D;
+  // cloneSkeleton (like a plain Object3D.clone()) shares material *instances* with the cached
+  // source scene and every other clone of it - harmless as long as every instance of a given
+  // model always gets tinted identically (true for Player's per-class color and Npc's fixed
+  // color), but not once different instances of the *same* model need independent colors (see
+  // Enemy.ts's per-instance aggressive/passive tint) - mutating a shared material there would
+  // silently recolor every other spawned copy using it too. Cloning each mesh's own material here
+  // gives every instance something it can safely tint on its own.
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.material = Array.isArray(child.material) ? child.material.map((m) => m.clone()) : child.material.clone();
+  });
   const mixer = new THREE.AnimationMixer(object);
   const idleClip = THREE.AnimationClip.findByName(animations, clipNames.idle) ?? undefined;
   const walkClip = THREE.AnimationClip.findByName(animations, clipNames.walk) ?? undefined;

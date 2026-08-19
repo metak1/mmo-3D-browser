@@ -3,6 +3,8 @@ import {
   ACTIVE_DUNGEON,
   CastMessage,
   ChatMessage,
+  DungeonSpawnDef,
+  ENEMY_RESPAWN_MS,
   ENEMY_TYPES,
   INVENTORY_SIZE,
   InputMessage,
@@ -25,14 +27,11 @@ import { CombatEngine } from "./combat/CombatEngine.js";
 import { DungeonState, Enemy, LootBag, Player } from "./schema/DungeonState.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
-const ENCOUNTER_CHECK_INTERVAL_MS = 1000;
-const ENCOUNTER_GAP_MS = 3000; // pause between one cleared encounter and the next spawning
 const BOSS_GUARANTEED_DROPS = 3;
 
 export class DungeonRoom extends Room<DungeonState> {
   private combat!: CombatEngine;
   private characterIdBySession = new Map<string, number>();
-  private currentEncounterEnemyIds = new Set<string>();
   private lootBagSeq = 0;
 
   onCreate() {
@@ -44,9 +43,16 @@ export class DungeonRoom extends Room<DungeonState> {
         this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
       onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
       onCombatText: (event) => this.broadcast("combat_text", event),
+      // No collidableStructures - a dungeon has none of its own, and STRUCTURES is the overworld's
+      // global list at unrelated overworld coordinates (see WorldRoom's own comment on this flag).
+      enemiesWander: true,
     });
 
-    this.spawnEncounter(0);
+    // Every DungeonSpawnDef is live for the whole run from the moment it's created - no wave
+    // gating, so the whole dungeon reads as one real space to fight through rather than a box that
+    // dispenses enemies as you clear it. See spawnDungeonEnemy/handleEnemyKilled for how a killed
+    // trash spawn respawns in place, and the boss (the one "boss"-behavior entry) doesn't.
+    for (const point of ACTIVE_DUNGEON?.spawns ?? []) this.spawnDungeonEnemy(point);
 
     this.onMessage("input", (client, message: InputMessage) => this.combat.handleInput(client.sessionId, message));
     this.onMessage("cast", (client, message: CastMessage) => this.combat.handleCast(client, message));
@@ -54,7 +60,6 @@ export class DungeonRoom extends Room<DungeonState> {
     this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
-    this.clock.setInterval(() => this.checkEncounterProgress(), ENCOUNTER_CHECK_INTERVAL_MS);
   }
 
   async onJoin(client: Client, options?: { token?: string; characterId?: number; partyId?: string }) {
@@ -141,48 +146,24 @@ export class DungeonRoom extends Room<DungeonState> {
     this.characterIdBySession.delete(client.sessionId);
   }
 
-  private spawnEncounter(index: number) {
-    const encounter = ACTIVE_DUNGEON?.encounters[index];
-    this.currentEncounterEnemyIds.clear();
-    if (!encounter) return; // no active dungeon content configured - nothing to spawn
+  private spawnDungeonEnemy(point: DungeonSpawnDef) {
+    const enemyType = ENEMY_TYPES[point.enemyTypeId];
+    if (!enemyType) return; // admin deleted/renamed this enemy type after the spawn point was authored
 
-    encounter.forEach((spec, i) => {
-      const enemyType = ENEMY_TYPES[spec.enemyTypeId];
-      if (!enemyType) return; // admin deleted/renamed this enemy type after the wave was authored
-
-      const enemy = new Enemy();
-      enemy.enemyTypeId = spec.enemyTypeId;
-      enemy.behavior = enemyType.behavior;
-      enemy.x = spec.x;
-      enemy.z = spec.z;
-      enemy.hp = enemyType.stats.maxHp;
-      enemy.maxHp = enemyType.stats.maxHp;
-
-      const id = `encounter-${index}-${i}`;
-      this.state.enemies.set(id, enemy);
-      this.currentEncounterEnemyIds.add(id);
-    });
-  }
-
-  private checkEncounterProgress() {
-    if (this.state.cleared) return;
-    if (this.currentEncounterEnemyIds.size === 0) return; // waiting on the gap timer already
-
-    const allDead = [...this.currentEncounterEnemyIds].every((id) => !this.state.enemies.has(id));
-    if (!allDead) return;
-
-    this.currentEncounterEnemyIds.clear(); // stop this check from re-firing during the gap
-    const nextIndex = this.state.encounterIndex + 1;
-    if (nextIndex >= (ACTIVE_DUNGEON?.encounters.length ?? 0)) return; // that was the boss - handleEnemyKilled already set cleared
-
-    this.clock.setTimeout(() => {
-      this.state.encounterIndex = nextIndex;
-      this.spawnEncounter(nextIndex);
-    }, ENCOUNTER_GAP_MS);
+    const enemy = new Enemy();
+    enemy.enemyTypeId = point.enemyTypeId;
+    enemy.behavior = enemyType.behavior;
+    enemy.x = point.x;
+    enemy.z = point.z;
+    enemy.homeX = point.x;
+    enemy.homeZ = point.z;
+    enemy.hp = enemyType.stats.maxHp;
+    enemy.maxHp = enemyType.stats.maxHp;
+    this.state.enemies.set(point.id, enemy);
   }
 
   // CombatEngine hook: called once an enemy's hp hits 0 (already removed from state by then).
-  private handleEnemyKilled(_enemyId: string, enemyTypeId: string, _killerSessionId: string, x: number, z: number) {
+  private handleEnemyKilled(enemyId: string, enemyTypeId: string, _killerSessionId: string, x: number, z: number) {
     const enemyType = ENEMY_TYPES[enemyTypeId];
     if (!enemyType) return;
 
@@ -196,6 +177,11 @@ export class DungeonRoom extends Room<DungeonState> {
       this.state.cleared = true;
     } else {
       this.maybeDropLoot(x, z, false);
+      // Same respawn-in-place contract as the overworld's SPAWN_POINTS (WorldRoom.spawnEnemy) -
+      // doesn't match anything for a boss's own add spawns (their ids are `add-...`, never a
+      // DungeonSpawnDef id), so those correctly never respawn either.
+      const point = ACTIVE_DUNGEON?.spawns.find((p) => p.id === enemyId);
+      if (point) this.clock.setTimeout(() => this.spawnDungeonEnemy(point), point.respawnMs ?? ENEMY_RESPAWN_MS);
     }
   }
 

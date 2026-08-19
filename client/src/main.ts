@@ -586,10 +586,18 @@ function hpColor(fraction: number): string {
   return fraction > 0.5 ? "#4fd166" : fraction > 0.25 ? "#e0b23c" : "#e0503c";
 }
 
-// Same red/yellow already meaningful elsewhere (low HP / mid HP) - reused so enemy target-panel
-// bars match the in-world HealthBar's aggro cue (see HealthBar.setAggroColor).
-function aggroColor(hasAggro: boolean): string {
-  return hasAggro ? "#e0503c" : "#e0b23c";
+// True for an enemy type that auto-engages any player within its aggroRange (red hp bar); false
+// (the default) for one that only fights back once actually attacked (yellow) - see
+// MeleeStats/CasterStats.aggroRange and HealthBar.setTypeColor.
+function isAggressiveEnemyType(enemyTypeId: string): boolean {
+  const stats = ENEMY_TYPES[enemyTypeId]?.stats;
+  return !!(stats && "aggroRange" in stats && stats.aggroRange);
+}
+
+// Same red/yellow already meaningful elsewhere (low HP / mid HP) - reused so the target-panel
+// bar matches the in-world HealthBar's passive/aggressive cue (see HealthBar.setTypeColor).
+function typeColor(aggressive: boolean): string {
+  return aggressive ? "#e0503c" : "#e0b23c";
 }
 
 function updateHpBar(fillEl: HTMLElement, labelEl: HTMLElement, hp: number, maxHp: number, colorOverride?: string) {
@@ -641,11 +649,16 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const lootBagSchemaById = new Map<string, { x: number; z: number; items: Iterable<string> }>();
   const dungeonListingSchemaById = new Map<string, { partyId: string; leaderSessionId: string; createdAt: number }>();
 
-  // NPCs are static shared data (no hp, never move), so they're spawned once from NPCS
-  // rather than synced through room state like enemies/players/loot bags.
+  // NPCs are static shared data (no hp, no server-synced position), so they're spawned once
+  // from NPCS rather than synced through room state like enemies/players/loot bags. One with
+  // no quest and no vendor catalog has no reason for a player to seek it out by a fixed spot,
+  // so it wanders a little near its authored position instead of just standing there - purely
+  // cosmetic (see NpcAvatar's `wander` flag), the interact/vendor logic still keys off NPCS[id]'s
+  // authored x/z, unaffected by wherever the avatar has currently wandered to.
   const npcs = new Map<string, NpcAvatar>();
   for (const def of Object.values(NPCS)) {
-    const avatar = new NpcAvatar();
+    const wander = !def.vendorItemIds?.length && !(NPC_QUEST_IDS[def.id]?.length);
+    const avatar = new NpcAvatar(wander);
     avatar.group.userData.npcId = def.id;
     avatar.setPosition(def.x, def.z, def.yOffset);
     avatar.setVendorIndicator(!!def.vendorItemIds);
@@ -1002,12 +1015,14 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       enemies.get(id)?.setSelected(true);
       targetPanel.hidden = false;
       targetNameEl.textContent = ENEMY_TYPES[enemySchema.enemyTypeId]?.name ?? enemySchema.enemyTypeId;
+      // Bosses have no passive/aggressive type to show (see Enemy.ts's setHp) - omitting the
+      // override falls back to updateHpBar's normal HP-fraction gradient for them.
       updateHpBar(
         targetHpFill,
         targetHpLabel,
         enemySchema.hp,
         enemySchema.maxHp,
-        aggroColor(enemySchema.aggroTargetId === "" || enemySchema.aggroTargetId === localSessionId),
+        enemySchema.behavior === "boss" ? undefined : typeColor(isAggressiveEnemyType(enemySchema.enemyTypeId)),
       );
       if (enemySchema.isCasting) {
         targetCastActive = true;
@@ -1315,6 +1330,16 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       if (!npc) continue;
       avatar.setQuestIndicator(npcQuestIndicatorState(npc));
     }
+  }
+
+  // Same per-NPC state as updateNpcQuestIndicators (the 3D in-world "!"/"?"), just handed to the
+  // minimap/big map instead of an NpcAvatar - see Minimap.ts's questIcon.
+  function computeNpcQuestStates(): Map<string, QuestIndicatorState> {
+    const states = new Map<string, QuestIndicatorState>();
+    for (const npc of Object.values(NPCS)) {
+      states.set(npc.id, npcQuestIndicatorState(npc));
+    }
+    return states;
   }
 
   function renderNpcDialogue() {
@@ -1860,10 +1885,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     dungeonStatusPanel.hidden = !isDungeon;
     if (isDungeon) {
       const updateDungeonStatusPanel = () => {
-        const dungeonState = room!.state as unknown as { encounterIndex: number; cleared: boolean };
-        dungeonEncounterLabelEl.textContent = dungeonState.cleared
-          ? "Cleared!"
-          : `Encounter ${dungeonState.encounterIndex + 1} / 3`;
+        const dungeonState = room!.state as unknown as { cleared: boolean };
+        dungeonEncounterLabelEl.textContent = dungeonState.cleared ? "Cleared!" : "Fight your way to the boss.";
         leaveDungeonBtn.hidden = !dungeonState.cleared;
       };
       $(room.state).onChange(updateDungeonStatusPanel);
@@ -1998,13 +2021,14 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     });
 
     $(room.state).enemies.onAdd((enemy, enemyId) => {
-      const enemyName = ENEMY_TYPES[enemy.enemyTypeId]?.name ?? enemy.enemyTypeId;
-      const avatar = new EnemyAvatar(enemy.behavior as EnemyBehavior, enemyName);
+      const enemyType = ENEMY_TYPES[enemy.enemyTypeId];
+      const enemyName = enemyType?.name ?? enemy.enemyTypeId;
+      const aggressive = isAggressiveEnemyType(enemy.enemyTypeId);
+      const avatar = new EnemyAvatar(enemy.behavior as EnemyBehavior, enemyName, aggressive);
       avatar.group.userData.enemyId = enemyId;
       avatar.setTarget(enemy.x, enemy.z);
       avatar.snapToTarget();
       avatar.setHp(enemy.hp, enemy.maxHp);
-      avatar.setAggro(enemy.aggroTargetId === "" || enemy.aggroTargetId === localSessionId);
       avatar.addTo(gameScene.scene);
       enemies.set(enemyId, avatar);
       enemySchemaById.set(enemyId, enemy);
@@ -2012,7 +2036,6 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       $(enemy).onChange(() => {
         avatar.setTarget(enemy.x, enemy.z);
         avatar.setHp(enemy.hp, enemy.maxHp);
-        avatar.setAggro(enemy.aggroTargetId === "" || enemy.aggroTargetId === localSessionId);
         if (enemy.behavior === "boss") avatar.setBossPhase(enemy.hp <= enemy.maxHp * BOSS_PHASE_2_HP_FRACTION);
 
         if (enemyId === currentTargetId) {
@@ -2021,7 +2044,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
             targetHpLabel,
             enemy.hp,
             enemy.maxHp,
-            aggroColor(enemy.aggroTargetId === "" || enemy.aggroTargetId === localSessionId),
+            enemy.behavior === "boss" ? undefined : typeColor(aggressive),
           );
 
           if (enemy.isCasting && !targetCastActive) {
@@ -2218,10 +2241,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       }));
       const selfDot = { x: localPredicted.x, z: localPredicted.z, rotationY: localRotationY };
       const questAreas = computeQuestAreaMarkers();
-      minimap.update(selfDot, others, enemyDots, !isDungeon, questAreas);
+      const npcQuestStates = computeNpcQuestStates();
+      minimap.update(selfDot, others, enemyDots, !isDungeon, questAreas, npcQuestStates);
       // Same per-frame data, just at a bigger radius - skip the extra canvas work while the
       // panel is closed instead of redrawing a map nobody can see.
-      if (!bigMapPanel.hidden) bigMap.update(selfDot, others, enemyDots, !isDungeon, questAreas);
+      if (!bigMapPanel.hidden) bigMap.update(selfDot, others, enemyDots, !isDungeon, questAreas, npcQuestStates);
     }
 
     if (localCastActive && localCastSpellId !== "") {

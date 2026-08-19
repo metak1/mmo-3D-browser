@@ -8,6 +8,5 @@ export class DungeonState extends Schema {
   @type({ map: Enemy }) enemies = new MapSchema<Enemy>();
   @type({ map: Projectile }) projectiles = new MapSchema<Projectile>();
   @type({ map: LootBag }) lootBags = new MapSchema<LootBag>();
-  @type("number") encounterIndex = 0;
-  @type("boolean") cleared = false;
+  @type("boolean") cleared = false; // true once the dungeon's boss (see DungeonSpawnDef) has been killed
 }

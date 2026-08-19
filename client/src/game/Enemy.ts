@@ -53,12 +53,19 @@ export class EnemyAvatar {
   private modelObject?: THREE.Object3D;
   private animator?: ModelAnimator;
   private targetPosition = new THREE.Vector3();
+  private desiredRotationY = 0;
 
-  constructor(kind: EnemyBehavior, name: string) {
+  constructor(kind: EnemyBehavior, name: string, aggressive: boolean) {
     this.kind = kind;
     this.isBoss = kind === "boss";
     const healthBarYOffset = this.isBoss ? BOSS_HEALTH_BAR_Y_OFFSET : DEFAULT_Y_OFFSET;
     this.healthBar = new HealthBar(healthBarYOffset);
+    // Fixed for this enemy's whole lifetime (not re-set on aggroTargetId changes - see
+    // HealthBar.setTypeColor) - yellow if it won't engage until attacked, red if it auto-engages
+    // any player within its aggroRange. Bosses are always quest-engaged rather than a
+    // passive/aggressive type, so this doesn't apply to them (aggressive is always false there -
+    // see main.ts's isAggressiveEnemyType).
+    if (!this.isBoss) this.healthBar.setTypeColor(aggressive);
     this.nameLabel = new NameLabel(name, healthBarYOffset + NAME_LABEL_GAP);
 
     spawnModel(MODEL_PATH, MODEL_CLIPS).then(({ object, animator }) => {
@@ -90,19 +97,22 @@ export class EnemyAvatar {
     tintModel(this.modelObject, identityTint(isPhase2 ? BOSS_PHASE_2_COLOR : KIND_COLOR.boss));
   }
 
+  // Enemies never had a synced rotation field (there was no reason to, before they could move) -
+  // facing is derived client-side from the direction of each incoming position update instead,
+  // same atan2(dx, dz) convention the server uses for players.
   setTarget(x: number, z: number) {
+    const dx = x - this.targetPosition.x;
+    const dz = z - this.targetPosition.z;
+    if (Math.hypot(dx, dz) > 0.01) this.desiredRotationY = Math.atan2(dx, dz);
     this.targetPosition.set(x, getTerrainHeight(x, z), z);
   }
 
+  // Bosses have no passive/aggressive type to show, so their bar falls back to the normal
+  // HP-fraction gradient instead (more useful for a boss fight anyway - a read on remaining HP%,
+  // not just a static color); every other kind keeps its fixed type color from the constructor
+  // (see HealthBar.setTypeColor) regardless of current HP fraction.
   setHp(hp: number, maxHp: number) {
-    this.healthBar.setFraction(maxHp > 0 ? hp / maxHp : 0, false);
-  }
-
-  // Enemy bars trade the usual HP-fraction color gradient for an aggro cue instead (see
-  // HealthBar.setAggroColor) - red if aggro is on the local player (or not engaged yet), yellow
-  // if it's on someone else. Called alongside setHp whenever aggroTargetId changes.
-  setAggro(hasAggro: boolean) {
-    this.healthBar.setAggroColor(hasAggro);
+    this.healthBar.setFraction(maxHp > 0 ? hp / maxHp : 0, this.isBoss);
   }
 
   // Marks the ground area this enemy is about to hit while winding up an AoE ability - not
@@ -142,6 +152,7 @@ export class EnemyAvatar {
   update(dt: number) {
     const distance = this.group.position.distanceTo(this.targetPosition);
     this.group.position.lerp(this.targetPosition, INTERPOLATION_LERP);
+    this.group.rotation.y = this.desiredRotationY;
     this.syncOverlayPositions();
     this.animator?.setMoving(distance > MOVING_THRESHOLD);
     this.animator?.update(dt);

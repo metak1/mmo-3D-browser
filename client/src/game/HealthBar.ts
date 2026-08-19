@@ -9,11 +9,11 @@ const COLOR_HIGH = 0x4fd166;
 const COLOR_MID = 0xe0b23c;
 const COLOR_LOW = 0xe0503c;
 
-// Reused by setAggroColor - enemy bars trade the usual HP-fraction gradient for an aggro cue
-// instead (see EnemyAvatar.setAggro), reusing the same red/yellow already meaningful elsewhere
-// (low HP / mid HP) so the palette stays consistent even though the meaning shifts for enemies.
-const COLOR_AGGRO_ON_ME = COLOR_LOW;
-const COLOR_AGGRO_ELSEWHERE = COLOR_MID;
+// Reused by setTypeColor - enemy bars trade the usual HP-fraction gradient for a fixed
+// passive/aggressive cue instead (see EnemyAvatar's constructor), reusing the same red/yellow
+// already meaningful elsewhere (low HP / mid HP) so the palette stays consistent.
+const COLOR_PASSIVE = COLOR_MID; // yellow - won't engage until attacked
+const COLOR_AGGRESSIVE = COLOR_LOW; // red - auto-engages within its aggroRange
 
 // Not parented to the character mesh on purpose: the character group yaws to face
 // its movement direction, and a child would inherit that yaw, rotating the bar out
@@ -47,9 +47,8 @@ export class HealthBar {
     this.group.position.set(x, y + this.yOffset, z);
   }
 
-  // `colorByFraction` lets enemy avatars skip the HP-fraction gradient and drive the fill color
-  // via setAggroColor instead (still calling this every HP change, for the width) - see
-  // EnemyAvatar.setAggro.
+  // `colorByFraction` lets enemy avatars skip the HP-fraction gradient - their bar's color is
+  // fixed at spawn instead, via setTypeColor (still calling this every HP change, for the width).
   setFraction(fraction: number, colorByFraction = true) {
     const clamped = Math.max(0, Math.min(1, fraction));
     this.fill.scale.x = clamped || 0.0001;
@@ -59,7 +58,10 @@ export class HealthBar {
     }
   }
 
-  setAggroColor(hasAggro: boolean) {
-    this.fillMaterial.color.setHex(hasAggro ? COLOR_AGGRO_ON_ME : COLOR_AGGRO_ELSEWHERE);
+  // A fixed per-enemy-type cue, not a dynamic one - set once at spawn (see EnemyAvatar's
+  // constructor) and never touched again, since setFraction never overwrites the color when
+  // colorByFraction is false.
+  setTypeColor(aggressive: boolean) {
+    this.fillMaterial.color.setHex(aggressive ? COLOR_AGGRESSIVE : COLOR_PASSIVE);
   }
 }

@@ -761,13 +761,17 @@ async function main() {
     },
     // --- Leveling-path enemies (see the quest chain below) - roughly one tier per new city,
     // each meaningfully tougher than the last so the path's difficulty tracks its reward xp.
+    // From here on (wolf onward) every type is aggressive (aggroRange set) - matches each one's
+    // own flavor text ("shadowing travelers", "raiding the trade road", etc.) and ramps up the
+    // danger of venturing further from town, on top of the starting melee/caster pair (and boss)
+    // staying passive so a brand-new player isn't ambushed near spawn.
     {
       id: "wolf",
       name: "Dire Wolf",
       behavior: "melee",
       xp_reward: 25,
       gold_reward: 6,
-      stats: { maxHp: 55, damage: 9, range: 1.6, intervalMs: 1300 },
+      stats: { maxHp: 55, damage: 9, range: 1.6, intervalMs: 1300, aggroRange: 7 },
     },
     {
       id: "bandit",
@@ -775,7 +779,7 @@ async function main() {
       behavior: "melee",
       xp_reward: 55,
       gold_reward: 15,
-      stats: { maxHp: 90, damage: 14, range: 1.8, intervalMs: 1400 },
+      stats: { maxHp: 90, damage: 14, range: 1.8, intervalMs: 1400, aggroRange: 8 },
     },
     {
       id: "bandit_archer",
@@ -783,7 +787,7 @@ async function main() {
       behavior: "caster",
       xp_reward: 65,
       gold_reward: 18,
-      stats: { maxHp: 60, damage: 12, range: 12, cooldownMs: 2000, projectileSpeed: 7, castTimeMs: 900 },
+      stats: { maxHp: 60, damage: 12, range: 12, cooldownMs: 2000, projectileSpeed: 7, castTimeMs: 900, aggroRange: 10 },
     },
     {
       id: "troll",
@@ -791,7 +795,7 @@ async function main() {
       behavior: "melee",
       xp_reward: 120,
       gold_reward: 35,
-      stats: { maxHp: 180, damage: 22, range: 2, intervalMs: 1500 },
+      stats: { maxHp: 180, damage: 22, range: 2, intervalMs: 1500, aggroRange: 8 },
     },
     {
       id: "dark_mage",
@@ -799,7 +803,7 @@ async function main() {
       behavior: "caster",
       xp_reward: 140,
       gold_reward: 40,
-      stats: { maxHp: 130, damage: 20, range: 11, cooldownMs: 1800, projectileSpeed: 8, castTimeMs: 950 },
+      stats: { maxHp: 130, damage: 20, range: 11, cooldownMs: 1800, projectileSpeed: 8, castTimeMs: 950, aggroRange: 9 },
     },
     {
       id: "frost_giant",
@@ -807,7 +811,7 @@ async function main() {
       behavior: "melee",
       xp_reward: 220,
       gold_reward: 70,
-      stats: { maxHp: 320, damage: 30, range: 2.2, intervalMs: 1600 },
+      stats: { maxHp: 320, damage: 30, range: 2.2, intervalMs: 1600, aggroRange: 9 },
     },
   ];
   for (const e of enemyTypes) {
@@ -829,7 +833,7 @@ async function main() {
   };
   await upsert("game_maps", overworld);
 
-  const dungeonGround = { id: "dungeon_ground", name: "Dungeon Ground", kind: "dungeon", half_extent: 16, is_active: false };
+  const dungeonGround = { id: "dungeon_ground", name: "Dungeon Ground", kind: "dungeon", half_extent: 70, is_active: false };
   await upsert("game_maps", dungeonGround);
 
   // --- NPCs ---
@@ -846,6 +850,17 @@ async function main() {
     { id: "ashford_quartermaster", name: "Keep Quartermaster", x: 140, z: 53, map_id: "overworld" },
     { id: "frostbeard", name: "Elder Frostbeard", x: -150, z: 93, map_id: "overworld" },
     { id: "frosthold_trader", name: "Frosthold Trader", x: -150, z: 103, map_id: "overworld" },
+    // --- Flavor NPCs - no quest, no vendor catalog, just bodies standing around so each city
+    // doesn't read as two or three lonely quest-givers in an empty lot. Paired with the new
+    // buildings below (each new building gets an NPC standing near/inside it).
+    { id: "blacksmith", name: "Town Blacksmith", x: 20, z: -14, map_id: "overworld" },
+    { id: "town_villager", name: "Local Villager", x: -9, z: -13, map_id: "overworld" },
+    { id: "millbrook_innkeeper", name: "Millbrook Innkeeper", x: 58, z: -9, map_id: "overworld" },
+    { id: "millbrook_stablehand", name: "Stable Hand", x: 73, z: -16, map_id: "overworld" },
+    { id: "ashford_guard", name: "Barracks Guard", x: 126, z: 48, map_id: "overworld" },
+    { id: "ashford_squire", name: "Keep Squire", x: 140, z: 42, map_id: "overworld" },
+    { id: "frosthold_trapper", name: "Grizzled Trapper", x: -150, z: 110, map_id: "overworld" },
+    { id: "frosthold_apprentice", name: "Frostbeard's Apprentice", x: -153, z: 100, map_id: "overworld" },
   ];
   for (const n of npcs) {
     await upsert("npcs", n);
@@ -1050,6 +1065,14 @@ async function main() {
     { id: "town_wall", name: "Town Wall", map_id: "overworld", kind: "wall", x: -3, z: -19, rotation_y: 0, width: 22, depth: 1.2, height: 4, color: "#7d7d7d" },
     { id: "town_gate", name: "Town Gate", map_id: "overworld", kind: "gate", x: -3, z: -9, rotation_y: 0, width: 6, depth: 1.2, height: 5.5, color: "#6b6b6b" },
     { id: "watch_tower", name: "Sentinel's Watchtower", map_id: "overworld", kind: "tower", x: 6, z: 22, rotation_y: 0, width: 4, depth: 4, height: 12, color: "#6e6a63" },
+    // Blacksmith's Forge (6x6, center 20,-13, door facing -z) - east of Quartermaster's House,
+    // clear of the caster spawns at (+-8,-8).
+    { id: "blacksmith_wall_front_l", name: "Blacksmith's Forge (front-left)", map_id: "overworld", kind: "wall", x: 18.1, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#6b4a3a" },
+    { id: "blacksmith_door", name: "Blacksmith's Forge (door)", map_id: "overworld", kind: "door", x: 20, z: -16, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
+    { id: "blacksmith_wall_front_r", name: "Blacksmith's Forge (front-right)", map_id: "overworld", kind: "wall", x: 21.9, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#6b4a3a" },
+    { id: "blacksmith_wall_back", name: "Blacksmith's Forge (back)", map_id: "overworld", kind: "wall", x: 20, z: -10, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
+    { id: "blacksmith_wall_left", name: "Blacksmith's Forge (left)", map_id: "overworld", kind: "wall", x: 17, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
+    { id: "blacksmith_wall_right", name: "Blacksmith's Forge (right)", map_id: "overworld", kind: "wall", x: 23, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
     // --- Millbrook (trading outpost, x~70/z~-10) - one room, no perimeter, matches its role as
     // a small waystation rather than a fortified city. ---
     { id: "millbrook_hall_wall_front_l", name: "Millbrook Trading Hall (front-left)", map_id: "overworld", kind: "wall", x: 67.85, z: -13.5, rotation_y: 0, width: 2.7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
@@ -1058,6 +1081,14 @@ async function main() {
     { id: "millbrook_hall_wall_back", name: "Millbrook Trading Hall (back)", map_id: "overworld", kind: "wall", x: 70, z: -6.5, rotation_y: 0, width: 7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
     { id: "millbrook_hall_wall_left", name: "Millbrook Trading Hall (left)", map_id: "overworld", kind: "wall", x: 66.5, z: -10, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
     { id: "millbrook_hall_wall_right", name: "Millbrook Trading Hall (right)", map_id: "overworld", kind: "wall", x: 73.5, z: -10, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
+    // Millbrook Inn (6x6, center 58,-10, door facing -z) - west of the Trading Hall, a second
+    // building so the outpost doesn't read as a single room in a field.
+    { id: "millbrook_inn_wall_front_l", name: "Millbrook Inn (front-left)", map_id: "overworld", kind: "wall", x: 56.1, z: -13, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#8a6b4f" },
+    { id: "millbrook_inn_door", name: "Millbrook Inn (door)", map_id: "overworld", kind: "door", x: 58, z: -13, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#8a6b4f" },
+    { id: "millbrook_inn_wall_front_r", name: "Millbrook Inn (front-right)", map_id: "overworld", kind: "wall", x: 59.9, z: -13, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#8a6b4f" },
+    { id: "millbrook_inn_wall_back", name: "Millbrook Inn (back)", map_id: "overworld", kind: "wall", x: 58, z: -7, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#8a6b4f" },
+    { id: "millbrook_inn_wall_left", name: "Millbrook Inn (left)", map_id: "overworld", kind: "wall", x: 55, z: -10, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#8a6b4f" },
+    { id: "millbrook_inn_wall_right", name: "Millbrook Inn (right)", map_id: "overworld", kind: "wall", x: 61, z: -10, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#8a6b4f" },
     // --- Ashford Keep (fortified city, x~140/z~50) - hall plus a tower and a gate marking the
     // approach, reads as more military than Millbrook's single trading hall. ---
     { id: "ashford_hall_wall_front_l", name: "Ashford Keep Hall (front-left)", map_id: "overworld", kind: "wall", x: 137.6, z: 46, rotation_y: 0, width: 3.2, depth: 0.2, height: 3.5, color: "#5a5a68" },
@@ -1068,6 +1099,14 @@ async function main() {
     { id: "ashford_hall_wall_right", name: "Ashford Keep Hall (right)", map_id: "overworld", kind: "wall", x: 144, z: 50, rotation_y: 1.5708, width: 8, depth: 0.2, height: 3.5, color: "#5a5a68" },
     { id: "ashford_tower", name: "Ashford Watchtower", map_id: "overworld", kind: "tower", x: 150, z: 50, rotation_y: 0, width: 4, depth: 4, height: 11, color: "#5a5a68" },
     { id: "ashford_gate", name: "Ashford Gate", map_id: "overworld", kind: "gate", x: 140, z: 38, rotation_y: 0, width: 6, depth: 1.2, height: 5.5, color: "#5a5a68" },
+    // Ashford Barracks (6x6, center 126,50, door facing -z) - west of the Hall, inside the same
+    // walled footprint the Keep's gate/tower already imply.
+    { id: "ashford_barracks_wall_front_l", name: "Ashford Barracks (front-left)", map_id: "overworld", kind: "wall", x: 124.1, z: 47, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.5, color: "#4a4a55" },
+    { id: "ashford_barracks_door", name: "Ashford Barracks (door)", map_id: "overworld", kind: "door", x: 126, z: 47, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.5, color: "#4a4a55" },
+    { id: "ashford_barracks_wall_front_r", name: "Ashford Barracks (front-right)", map_id: "overworld", kind: "wall", x: 127.9, z: 47, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.5, color: "#4a4a55" },
+    { id: "ashford_barracks_wall_back", name: "Ashford Barracks (back)", map_id: "overworld", kind: "wall", x: 126, z: 53, rotation_y: 0, width: 6, depth: 0.2, height: 3.5, color: "#4a4a55" },
+    { id: "ashford_barracks_wall_left", name: "Ashford Barracks (left)", map_id: "overworld", kind: "wall", x: 123, z: 50, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.5, color: "#4a4a55" },
+    { id: "ashford_barracks_wall_right", name: "Ashford Barracks (right)", map_id: "overworld", kind: "wall", x: 129, z: 50, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.5, color: "#4a4a55" },
     // --- Frosthold (northern outpost, x~-150/z~100) - hall plus its own watchtower. ---
     { id: "frosthold_hall_wall_front_l", name: "Frosthold Lodge (front-left)", map_id: "overworld", kind: "wall", x: -152.15, z: 96.5, rotation_y: 0, width: 2.7, depth: 0.2, height: 3.15, color: "#7d97a8" },
     { id: "frosthold_hall_door", name: "Frosthold Lodge (door)", map_id: "overworld", kind: "door", x: -150, z: 96.5, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#7d97a8" },
@@ -1076,6 +1115,14 @@ async function main() {
     { id: "frosthold_hall_wall_left", name: "Frosthold Lodge (left)", map_id: "overworld", kind: "wall", x: -153.5, z: 100, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#7d97a8" },
     { id: "frosthold_hall_wall_right", name: "Frosthold Lodge (right)", map_id: "overworld", kind: "wall", x: -146.5, z: 100, rotation_y: 1.5708, width: 7, depth: 0.2, height: 3.15, color: "#7d97a8" },
     { id: "frosthold_tower", name: "Frosthold Watchtower", map_id: "overworld", kind: "tower", x: -140, z: 100, rotation_y: 0, width: 4, depth: 4, height: 10, color: "#7d97a8" },
+    // Trapper's Cabin (6x6, center -150,112, door facing -z, i.e. south toward the Lodge) - a
+    // second building north of the Lodge, clear of the frost giant spawns ringing the outpost.
+    { id: "frosthold_cabin_wall_front_l", name: "Trapper's Cabin (front-left)", map_id: "overworld", kind: "wall", x: -151.9, z: 109, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#6b7d8a" },
+    { id: "frosthold_cabin_door", name: "Trapper's Cabin (door)", map_id: "overworld", kind: "door", x: -150, z: 109, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#6b7d8a" },
+    { id: "frosthold_cabin_wall_front_r", name: "Trapper's Cabin (front-right)", map_id: "overworld", kind: "wall", x: -148.1, z: 109, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#6b7d8a" },
+    { id: "frosthold_cabin_wall_back", name: "Trapper's Cabin (back)", map_id: "overworld", kind: "wall", x: -150, z: 115, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#6b7d8a" },
+    { id: "frosthold_cabin_wall_left", name: "Trapper's Cabin (left)", map_id: "overworld", kind: "wall", x: -153, z: 112, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#6b7d8a" },
+    { id: "frosthold_cabin_wall_right", name: "Trapper's Cabin (right)", map_id: "overworld", kind: "wall", x: -147, z: 112, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#6b7d8a" },
   ];
   for (const s of structures) {
     await upsert("structures", s);
@@ -1110,6 +1157,11 @@ async function main() {
     { id: "furn_house2_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -15, z: -11.7, rotation_y: 3.1416, color: "#9c7a52" },
     { id: "furn_house2_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -15, z: -14.3, rotation_y: 0, color: "#9c7a52" },
     { id: "furn_house2_crate", name: "Crate", map_id: "overworld", kind: "crate", x: -13, z: -10.8, rotation_y: 0, color: "#9c7a52" },
+    // Blacksmith's Forge (6x6, center 20,-13)
+    { id: "furn_blacksmith_table", name: "Table", map_id: "overworld", kind: "table", x: 20, z: -13, rotation_y: 0, color: "#6b4a3a" },
+    { id: "furn_blacksmith_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 20, z: -11.7, rotation_y: 3.1416, color: "#6b4a3a" },
+    { id: "furn_blacksmith_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 20, z: -14.3, rotation_y: 0, color: "#6b4a3a" },
+    { id: "furn_blacksmith_crate", name: "Crate", map_id: "overworld", kind: "crate", x: 22, z: -10.8, rotation_y: 0, color: "#6b4a3a" },
     // Traveling Merchant's Shop (8x6, center -14,1)
     { id: "furn_shop_table", name: "Table", map_id: "overworld", kind: "table", x: -14, z: 1, rotation_y: 0, color: "#5c7a99" },
     { id: "furn_shop_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -14, z: 2.3, rotation_y: 3.1416, color: "#5c7a99" },
@@ -1121,23 +1173,43 @@ async function main() {
     { id: "furn_millbrook_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 70, z: -8.7, rotation_y: 3.1416, color: "#6b8a5c" },
     { id: "furn_millbrook_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 70, z: -11.3, rotation_y: 0, color: "#6b8a5c" },
     { id: "furn_millbrook_crate", name: "Crate", map_id: "overworld", kind: "crate", x: 72, z: -7.2, rotation_y: 0, color: "#6b8a5c" },
+    // Millbrook Inn (6x6, center 58,-10)
+    { id: "furn_inn_table", name: "Table", map_id: "overworld", kind: "table", x: 58, z: -10, rotation_y: 0, color: "#8a6b4f" },
+    { id: "furn_inn_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 58, z: -8.7, rotation_y: 3.1416, color: "#8a6b4f" },
+    { id: "furn_inn_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 58, z: -11.3, rotation_y: 0, color: "#8a6b4f" },
+    { id: "furn_inn_barrel", name: "Barrel", map_id: "overworld", kind: "barrel", x: 60, z: -7.2, rotation_y: 0, color: "#8a6b4f" },
     // Ashford Keep Hall (8x8, center 140,50)
     { id: "furn_ashford_table", name: "Table", map_id: "overworld", kind: "table", x: 140, z: 50, rotation_y: 0, color: "#5a5a68" },
     { id: "furn_ashford_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 140, z: 51.5, rotation_y: 3.1416, color: "#5a5a68" },
     { id: "furn_ashford_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 140, z: 48.5, rotation_y: 0, color: "#5a5a68" },
     { id: "furn_ashford_barrel", name: "Barrel", map_id: "overworld", kind: "barrel", x: 142.5, z: 52.5, rotation_y: 0, color: "#5a5a68" },
     { id: "furn_ashford_bookshelf", name: "Bookshelf", map_id: "overworld", kind: "bookshelf", x: 137.3, z: 50, rotation_y: 1.5708, color: "#5a5a68" },
+    // Ashford Barracks (6x6, center 126,50)
+    { id: "furn_barracks_table", name: "Table", map_id: "overworld", kind: "table", x: 126, z: 50, rotation_y: 0, color: "#4a4a55" },
+    { id: "furn_barracks_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 126, z: 51.5, rotation_y: 3.1416, color: "#4a4a55" },
+    { id: "furn_barracks_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 126, z: 48.5, rotation_y: 0, color: "#4a4a55" },
+    { id: "furn_barracks_crate", name: "Crate", map_id: "overworld", kind: "crate", x: 128.5, z: 52.5, rotation_y: 0, color: "#4a4a55" },
     // Frosthold Lodge (7x7, center -150,100)
     { id: "furn_frosthold_table", name: "Table", map_id: "overworld", kind: "table", x: -150, z: 100, rotation_y: 0, color: "#7d97a8" },
     { id: "furn_frosthold_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -150, z: 101.3, rotation_y: 3.1416, color: "#7d97a8" },
     { id: "furn_frosthold_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -150, z: 98.7, rotation_y: 0, color: "#7d97a8" },
     { id: "furn_frosthold_crate", name: "Crate", map_id: "overworld", kind: "crate", x: -148, z: 102.8, rotation_y: 0, color: "#7d97a8" },
+    // Trapper's Cabin (6x6, center -150,112)
+    { id: "furn_cabin_table", name: "Table", map_id: "overworld", kind: "table", x: -150, z: 112, rotation_y: 0, color: "#6b7d8a" },
+    { id: "furn_cabin_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -150, z: 113.3, rotation_y: 3.1416, color: "#6b7d8a" },
+    { id: "furn_cabin_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -150, z: 110.7, rotation_y: 0, color: "#6b7d8a" },
+    { id: "furn_cabin_crate", name: "Crate", map_id: "overworld", kind: "crate", x: -148, z: 114.8, rotation_y: 0, color: "#6b7d8a" },
   ];
   for (const f of furniture) {
     await upsert("furniture", f);
   }
 
-  // --- Dungeon ---
+  // --- Dungeon (a real space to run through, not a box that dispenses waves - every entry below
+  // is a fixed spawn point, live for the whole run from the moment the party enters (see
+  // DungeonRoom.spawnDungeonEnemy); trash respawns in place on a timer, the boss doesn't. Laid out
+  // in a rough line from the entrance (0,0) out to the boss at the far end, so clearing a path
+  // through the trash is what "reaching the boss" actually means, rather than a location that's
+  // just decorative.) ---
   const dungeon = {
     id: "ashen_ruins",
     name: "The Ashen Ruins",
@@ -1145,19 +1217,19 @@ async function main() {
     is_active: true,
     party_size: 4,
     composition: { tank: 1, healer: 1, dps: 2 },
-    encounters: [
-      [
-        { enemyTypeId: "melee", x: -1.5, z: 8 },
-        { enemyTypeId: "melee", x: 1.5, z: 8 },
-      ],
-      [
-        { enemyTypeId: "melee", x: -1.5, z: 8 },
-        { enemyTypeId: "caster", x: 1.5, z: 8 },
-      ],
-      [{ enemyTypeId: "dungeon_boss", x: 0, z: 8 }],
+    spawns: [
+      { id: "trash-1", enemyTypeId: "melee", x: -6, z: 12 },
+      { id: "trash-2", enemyTypeId: "melee", x: 6, z: 12 },
+      { id: "trash-3", enemyTypeId: "caster", x: 0, z: 22 },
+      { id: "trash-4", enemyTypeId: "melee", x: -8, z: 30 },
+      { id: "trash-5", enemyTypeId: "caster", x: 8, z: 30 },
+      { id: "trash-6", enemyTypeId: "melee", x: -5, z: 42 },
+      { id: "trash-7", enemyTypeId: "melee", x: 5, z: 42 },
+      { id: "trash-8", enemyTypeId: "caster", x: 0, z: 50 },
+      { id: "dungeon-boss", enemyTypeId: "dungeon_boss", x: 0, z: 62 },
     ],
   };
-  await upsert("dungeons", dungeon, ["composition", "encounters"]);
+  await upsert("dungeons", dungeon, ["composition", "spawns"]);
 
   console.log("Seed complete.");
 }

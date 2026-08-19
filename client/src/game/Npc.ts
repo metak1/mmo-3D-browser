@@ -23,6 +23,17 @@ const VENDOR_INDICATOR_SIZE = 0.65;
 const VENDOR_INDICATOR_X_OFFSET = 0.55; // offset from the quest indicator so a future NPC could show both at once
 const VENDOR_COLOR = 0x4fd166; // green "$", visually distinct from the yellow/grey quest states
 
+// Client-only cosmetic wander for NPCs nobody has a reason to walk up to (see main.ts's `wander`
+// computation: no quest, no vendor catalog) - purely visual life for a city, not synced state.
+// NPC_QUEST_IDS/vendor interactions are all keyed by the NPC's authored home position (NPCS[id]),
+// never by where its avatar is currently rendered, so a wandering NPC never breaks anything - it's
+// just a good deal smaller/slower than an enemy's wander (NPCs are people milling around a plaza,
+// not creatures patrolling territory) and each client runs its own independent, unsynced timer.
+const NPC_WANDER_RADIUS = 3; // meters from home
+const NPC_WANDER_SPEED = 0.9; // meters/second
+const NPC_WANDER_PAUSE_MS = 2000; // minimum pause between wander legs
+const NPC_WANDER_PAUSE_JITTER_MS = 2500; // extra random pause on top of the minimum
+
 // Drawn once and reused across every NpcAvatar instance - only the plane's material color
 // changes per-instance, not the glyph texture itself.
 function makeGlyphTexture(glyph: string): THREE.CanvasTexture {
@@ -55,11 +66,16 @@ export class NpcAvatar {
   private readonly indicatorMaterial: THREE.MeshBasicMaterial;
   private readonly vendorIndicator: THREE.Mesh;
   private animator?: ModelAnimator;
+  private homeX = 0;
+  private homeZ = 0;
+  private yOffset = 0;
+  private wanderTarget: { x: number; z: number } | null = null;
+  private wanderPauseUntil = 0;
 
-  constructor() {
-    // Async-loaded (see models.ts) - same shared model as PlayerAvatar, just never told to
-    // walk (NPCs are static, spawned once from NPCS and never repositioned), so it stays on
-    // its Idle clip forever.
+  constructor(private readonly wander = false) {
+    // Async-loaded (see models.ts) - same shared model as PlayerAvatar. Non-wandering NPCs are
+    // spawned once from NPCS and never repositioned, so they stay on their Idle clip forever;
+    // wandering ones (see the `wander` flag) toggle between Idle and Walk in tickWander below.
     spawnModel(MODEL_PATH, MODEL_CLIPS).then(({ object, animator }) => {
       fitHeight(object, MODEL_HEIGHT);
       tintModel(object, identityTint(NPC_COLOR));
@@ -119,12 +135,45 @@ export class NpcAvatar {
   }
 
   setPosition(x: number, z: number, yOffset = 0) {
+    this.homeX = x;
+    this.homeZ = z;
+    this.yOffset = yOffset;
     this.group.position.set(x, getTerrainHeight(x, z) + yOffset, z);
   }
 
-  // NPCs never move, so this exists purely to keep the Idle clip's mixer advancing.
+  // Non-wandering NPCs never move, so this exists purely to keep the Idle clip's mixer
+  // advancing; wandering ones also step toward/pause at a randomized point near home each frame.
   update(dt: number) {
+    if (this.wander) this.tickWander(dt);
     this.animator?.update(dt);
+  }
+
+  private tickWander(dt: number) {
+    const now = performance.now();
+
+    if (!this.wanderTarget) {
+      if (now < this.wanderPauseUntil) return;
+      const angle = Math.random() * Math.PI * 2;
+      const radius = Math.random() * NPC_WANDER_RADIUS;
+      this.wanderTarget = { x: this.homeX + Math.cos(angle) * radius, z: this.homeZ + Math.sin(angle) * radius };
+    }
+
+    const dx = this.wanderTarget.x - this.group.position.x;
+    const dz = this.wanderTarget.z - this.group.position.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.1) {
+      this.wanderTarget = null;
+      this.wanderPauseUntil = now + NPC_WANDER_PAUSE_MS + Math.random() * NPC_WANDER_PAUSE_JITTER_MS;
+      this.animator?.setMoving(false);
+      return;
+    }
+
+    this.group.rotation.y = Math.atan2(dx, dz);
+    const step = Math.min(NPC_WANDER_SPEED * dt, dist);
+    const nextX = this.group.position.x + (dx / dist) * step;
+    const nextZ = this.group.position.z + (dz / dist) * step;
+    this.group.position.set(nextX, getTerrainHeight(nextX, nextZ) + this.yOffset, nextZ);
+    this.animator?.setMoving(true);
   }
 
   addTo(scene: THREE.Scene) {

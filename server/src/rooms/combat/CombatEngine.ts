@@ -15,7 +15,13 @@ import {
   ClassRole,
   CombatTextEvent,
   DAMAGE_STAT_FACTOR,
+  ENEMY_CHASE_SPEED,
+  ENEMY_LEASH_RANGE,
   ENEMY_TYPES,
+  ENEMY_WANDER_PAUSE_JITTER_MS,
+  ENEMY_WANDER_PAUSE_MS,
+  ENEMY_WANDER_RADIUS,
+  ENEMY_WANDER_SPEED,
   INTERRUPT_LOCKOUT_MS,
   InputMessage,
   MAIN_STAT_PER_LEVEL,
@@ -116,6 +122,12 @@ export interface CombatEngineConfig {
   // could otherwise collide with/be blocked by unrelated overworld buildings) - WorldRoom passes
   // true, DungeonRoom leaves this unset.
   collidableStructures?: boolean;
+  // Enables tickEnemyMovement (idle wander + threat-target chase + proximity aggro for
+  // "aggressive" enemy types). Dungeon encounters are small, hand-placed wave fights where an
+  // enemy wandering off its spot would fight the encounter design, so only WorldRoom sets this;
+  // DungeonRoom leaves it unset and enemies there behave exactly as before (stationary, purely
+  // threat-driven, gated by tickEnemyAttacks' own range checks).
+  enemiesWander?: boolean;
 }
 
 // One generic radius-scan reused by every AoE spell (enemies-near-point for damage,
@@ -165,6 +177,9 @@ export class CombatEngine {
   private addSeq = 0;
   private lastSpecialCastAt = new Map<string, number>(); // key: boss enemyId
   private specialRotationIndex = new Map<string, number>(); // key: boss enemyId -> next index into specialAbilities
+  // key: enemyId -> current wander leg's destination, cleared once reached (see tickWander).
+  private wanderTarget = new Map<string, { x: number; z: number }>();
+  private wanderPauseUntil = new Map<string, number>(); // key: enemyId -> epoch ms, standing still between legs
 
   constructor(private config: CombatEngineConfig) {}
 
@@ -581,6 +596,8 @@ export class CombatEngine {
     this.activeAddIds.delete(enemyId);
     this.lastSpecialCastAt.delete(enemyId);
     this.specialRotationIndex.delete(enemyId);
+    this.wanderTarget.delete(enemyId);
+    this.wanderPauseUntil.delete(enemyId);
   }
 
   // --- Boss phase/enrage (derived from already-synced fields, not a separate synced flag -
@@ -599,6 +616,7 @@ export class CombatEngine {
   tick(dt: number) {
     this.tickPlayerMovement(dt);
     this.tickPlayerCasts();
+    if (this.config.enemiesWander) this.tickEnemyMovement(dt);
     this.tickEnemyAttacks();
     this.tickPendingEnemyCasts();
     this.tickBossAddSpawns();
@@ -662,6 +680,115 @@ export class CombatEngine {
         this.resolveSpellEffect(player, sessionId, spell, pending.target);
       }
     }
+  }
+
+  // Idle enemies wander a short loop around their spawn point; engaged ones (see
+  // currentChaseTarget) chase whoever has the most threat on them, independent of that target's
+  // distance - a melee enemy has to physically close the gap on a ranged attacker before it can
+  // ever land a counter-hit and set aggroTargetId itself via tickEnemyAttacks, so movement can't
+  // wait for that. A chase that pulls the enemy too far from home (ENEMY_LEASH_RANGE) is
+  // abandoned - threat is wiped and it wanders back toward home on its own next tick, same as a
+  // target simply dying or disconnecting.
+  private tickEnemyMovement(dt: number) {
+    for (const [enemyId, enemy] of this.state.enemies) {
+      if (enemy.hp <= 0 || enemy.behavior === "boss") continue; // bosses stay stationary/purely threat-driven, unchanged from before
+      const enemyType = ENEMY_TYPES[enemy.enemyTypeId];
+      if (!enemyType) continue;
+
+      this.maybeAcquireProximityAggro(enemyId, enemy, enemyType.stats as MeleeStats | CasterStats);
+
+      const chaseTargetId = this.currentChaseTarget(enemyId);
+      const chaseTarget = chaseTargetId ? this.state.players.get(chaseTargetId) : undefined;
+      const distFromHome = Math.hypot(enemy.x - enemy.homeX, enemy.z - enemy.homeZ);
+
+      if (chaseTarget && chaseTarget.hp > 0 && distFromHome <= ENEMY_LEASH_RANGE) {
+        this.stepToward(enemy, chaseTarget.x, chaseTarget.z, ENEMY_CHASE_SPEED, dt);
+      } else {
+        if (chaseTargetId) {
+          enemy.aggroTargetId = "";
+          this.threatTables.delete(enemyId);
+        }
+        this.tickWander(enemyId, enemy, dt);
+      }
+    }
+  }
+
+  // Aggressive types (aggroRange > 0) auto-engage the nearest player within range once they have
+  // nobody else's attention yet; passive types (the default) never do this - see aggroRange's own
+  // doc comment. Seeds a token amount of threat so currentChaseTarget has something to pick up
+  // immediately (real damage will quickly outweigh it once the enemy is actually in attack range).
+  private maybeAcquireProximityAggro(enemyId: string, enemy: Enemy, stats: MeleeStats | CasterStats) {
+    if (this.threatTables.get(enemyId)?.size) return; // already engaged with someone
+    const aggroRange = stats.aggroRange ?? 0;
+    if (aggroRange <= 0) return;
+
+    let nearestId: string | undefined;
+    let nearestDist = Infinity;
+    for (const [sessionId, player] of this.state.players) {
+      if (player.hp <= 0) continue;
+      const dist = Math.hypot(player.x - enemy.x, player.z - enemy.z);
+      if (dist <= aggroRange && dist < nearestDist) {
+        nearestId = sessionId;
+        nearestDist = dist;
+      }
+    }
+    if (nearestId) {
+      this.addThreat(enemyId, nearestId, 1);
+      enemy.aggroTargetId = nearestId;
+    }
+  }
+
+  // Whoever currently has the most threat on this enemy - independent of pickThreatTarget's usual
+  // candidate list (which tickEnemyAttacks restricts to players already in attack range), since a
+  // chase target needs to be tracked well before it's back in range.
+  private currentChaseTarget(enemyId: string): string | undefined {
+    const table = this.threatTables.get(enemyId);
+    if (!table || table.size === 0) return undefined;
+    return this.pickThreatTarget(enemyId, [...table.keys()]);
+  }
+
+  private stepToward(enemy: Enemy, targetX: number, targetZ: number, speed: number, dt: number) {
+    const dx = targetX - enemy.x;
+    const dz = targetZ - enemy.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.05) return;
+
+    const step = Math.min(speed * dt, dist);
+    let nextX = clamp(enemy.x + (dx / dist) * step, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+    let nextZ = clamp(enemy.z + (dz / dist) * step, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+
+    if (this.config.collidableStructures) {
+      const resolved = resolveStructureCollisions(nextX, nextZ, STRUCTURES);
+      nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+    }
+
+    enemy.x = nextX;
+    enemy.z = nextZ;
+  }
+
+  private tickWander(enemyId: string, enemy: Enemy, dt: number) {
+    const now = Date.now();
+    if (now < (this.wanderPauseUntil.get(enemyId) ?? 0)) return;
+
+    let target = this.wanderTarget.get(enemyId);
+    if (!target) {
+      const angle = Math.random() * Math.PI * 2;
+      const radius = Math.random() * ENEMY_WANDER_RADIUS;
+      target = {
+        x: clamp(enemy.homeX + Math.cos(angle) * radius, -MAP_HALF_EXTENT, MAP_HALF_EXTENT),
+        z: clamp(enemy.homeZ + Math.sin(angle) * radius, -MAP_HALF_EXTENT, MAP_HALF_EXTENT),
+      };
+      this.wanderTarget.set(enemyId, target);
+    }
+
+    if (Math.hypot(enemy.x - target.x, enemy.z - target.z) < 0.15) {
+      this.wanderTarget.delete(enemyId);
+      this.wanderPauseUntil.set(enemyId, now + ENEMY_WANDER_PAUSE_MS + Math.random() * ENEMY_WANDER_PAUSE_JITTER_MS);
+      return;
+    }
+
+    this.stepToward(enemy, target.x, target.z, ENEMY_WANDER_SPEED, dt);
   }
 
   private tickEnemyAttacks() {
@@ -832,6 +959,8 @@ export class CombatEngine {
         add.behavior = addType.behavior;
         add.x = boss.x + (Math.random() * 4 - 2);
         add.z = boss.z + (Math.random() * 4 - 2);
+        add.homeX = boss.x;
+        add.homeZ = boss.z;
         add.hp = addType.stats.maxHp;
         add.maxHp = addType.stats.maxHp;
 

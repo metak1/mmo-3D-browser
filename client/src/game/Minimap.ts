@@ -1,4 +1,5 @@
 import { BOSS_ARENA_CENTER, BOSS_ARENA_RADIUS, DUNGEON_HALF_EXTENT, MAP_HALF_EXTENT, NPCS, PORTAL_POSITION, STRUCTURES } from "@mmo/shared";
+import { QuestIndicatorState } from "./Npc";
 
 // World-unit radius shown from the player (center) to the edge of the small radar - independent
 // of MAP_HALF_EXTENT, since a player-centered view (not a full static map) is what stays readable
@@ -29,6 +30,11 @@ const COLOR_BOSS_ARENA = "rgba(224, 90, 78, 0.25)";
 const COLOR_RING = "#4a5578";
 const COLOR_QUEST_AREA = "rgba(255, 210, 63, 0.18)";
 const COLOR_QUEST_AREA_BORDER = "#ffd23f";
+// Matches NpcAvatar's in-world "!"/"?" indicator palette (Npc.ts's COLOR_AVAILABLE/ACTIVE/READY)
+// so a quest giver reads the same way on the map as it does when you're standing next to them.
+const COLOR_QUEST_AVAILABLE = "#ffd200";
+const COLOR_QUEST_ACTIVE = "#9099ab";
+const COLOR_QUEST_READY = "#ffd200";
 
 export interface MinimapEntity {
   x: number;
@@ -114,6 +120,28 @@ export class Minimap {
     this.ctx.fill();
   }
 
+  // Drawn above the NPC's own dot (see the caller) rather than replacing it, so the dot still
+  // marks the NPC's exact position underneath. "ready" and "available" share a glyph ("!"/"?" is
+  // the giver's own concern, not the map's - see Npc.ts's setQuestIndicator) but this only needs
+  // the color to distinguish them, since ready always implies the player already has this quest.
+  private questIcon(worldX: number, worldZ: number, state: QuestIndicatorState, dotRadius: number, dotScale: number) {
+    if (state === "none") return;
+    const [px, py] = this.project(worldX, worldZ);
+    const glyph = state === "available" ? "!" : "?";
+    const color = state === "available" ? COLOR_QUEST_AVAILABLE : state === "ready" ? COLOR_QUEST_READY : COLOR_QUEST_ACTIVE;
+    const iconY = py - dotRadius - 5 * dotScale;
+
+    const ctx = this.ctx;
+    ctx.font = `800 ${13 * dotScale}px -apple-system, system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = 3 * dotScale;
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+    ctx.strokeText(glyph, px, iconY);
+    ctx.fillStyle = color;
+    ctx.fillText(glyph, px, iconY);
+  }
+
   // showOverworldLandmarks is false inside a dungeon - NPCs/structures/portal/boss arena are
   // all overworld-only content, per STRUCTURES/NPCS/PORTAL_POSITION's own contracts.
   update(
@@ -122,6 +150,7 @@ export class Minimap {
     enemies: MinimapEnemy[],
     showOverworldLandmarks: boolean,
     questAreas: QuestAreaMarker[] = [],
+    npcQuestStates: Map<string, QuestIndicatorState> = new Map(),
   ) {
     const ctx = this.ctx;
     // Read live off the canvas element rather than a cached field, so resizing it (the big map's
@@ -187,7 +216,10 @@ export class Minimap {
 
       for (const s of STRUCTURES) this.dot(s.x, s.z, COLOR_STRUCTURE, 3 * dotScale);
       for (const n of Object.values(NPCS)) {
-        this.dot(n.x, n.z, n.vendorItemIds ? COLOR_VENDOR_NPC : COLOR_NPC, 2.5 * dotScale);
+        const npcDotRadius = 2.5 * dotScale;
+        this.dot(n.x, n.z, n.vendorItemIds ? COLOR_VENDOR_NPC : COLOR_NPC, npcDotRadius);
+        const questState = npcQuestStates.get(n.id);
+        if (questState) this.questIcon(n.x, n.z, questState, npcDotRadius, dotScale);
       }
       this.dot(PORTAL_POSITION.x, PORTAL_POSITION.z, COLOR_PORTAL, 3 * dotScale);
     }
