@@ -1,16 +1,20 @@
 import * as THREE from "three";
-import { getTerrainHeight } from "@mmo/shared";
+import { getTerrainHeight, PLAYER_SPEED } from "@mmo/shared";
 import { CAMERA_PITCH } from "./Scene";
-import { fitHeight, ModelAnimator, spawnModel, tintModel } from "./models";
+import { fitHeight, ModelAnimator, spawnRiggedModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
 
 const NPC_COLOR = 0xf5d76e;
-const MODEL_PATH = "/models/man.glb";
-const MODEL_CLIPS = { idle: "HumanArmature|Man_Idle", walk: "HumanArmature|Man_Walk" };
+// KayKit's Barbarian (kaylousberg.com, "Adventurers Character Pack" v2 export) - a generic
+// townsperson stand-in from the same asset family the player classes use, replacing the earlier
+// mismatched-style Quaternius man.glb. Like Player.ts's Ranger, this v2 model has no baked
+// animations of its own - Idle_A/Walking_A are retargeted from the shared Rig_Medium library
+// (see spawnRiggedModel).
+const MODEL_PATH = "/models/npc_barbarian.glb";
+const IDLE_SOURCE = { path: "/models/animations/Rig_Medium_General.glb", clip: "Idle_A" };
+const WALK_SOURCE = { path: "/models/animations/Rig_Medium_MovementBasic.glb", clip: "Walking_A" };
 // Matches the original CapsuleGeometry(0.4, 0.9) avatar this whole model system replaced
-// (0.9 + 2*0.4 = 1.7) - man.glb's own native height (~4.8) was never scaled down to this until
-// now, which is why NPCs (and, until the class-model change, players) rendered nearly as tall as
-// the map's houses.
+// (0.9 + 2*0.4 = 1.7).
 const MODEL_HEIGHT = 1.7;
 
 const INDICATOR_SIZE = 0.9;
@@ -33,6 +37,12 @@ const NPC_WANDER_RADIUS = 3; // meters from home
 const NPC_WANDER_SPEED = 0.9; // meters/second
 const NPC_WANDER_PAUSE_MS = 2000; // minimum pause between wander legs
 const NPC_WANDER_PAUSE_JITTER_MS = 2500; // extra random pause on top of the minimum
+// The Walk clip's authored pace looks right at PLAYER_SPEED (the only speed this shared man.glb
+// model ever moved at before NPC wander existed) - a fixed ratio works here (unlike Enemy.ts's
+// measured-per-tick approach) since NPC_WANDER_SPEED, unlike an enemy's, is the only speed an NPC
+// ever moves at. Without this the legs would cycle through a full stride far faster than the body
+// is actually covering ground at this much slower amble.
+const NPC_WALK_ANIMATION_SPEED_SCALE = NPC_WANDER_SPEED / PLAYER_SPEED;
 
 // Drawn once and reused across every NpcAvatar instance - only the plane's material color
 // changes per-instance, not the glyph texture itself.
@@ -73,10 +83,10 @@ export class NpcAvatar {
   private wanderPauseUntil = 0;
 
   constructor(private readonly wander = false) {
-    // Async-loaded (see models.ts) - same shared model as PlayerAvatar. Non-wandering NPCs are
+    // Async-loaded (see models.ts) - same asset family as PlayerAvatar. Non-wandering NPCs are
     // spawned once from NPCS and never repositioned, so they stay on their Idle clip forever;
     // wandering ones (see the `wander` flag) toggle between Idle and Walk in tickWander below.
-    spawnModel(MODEL_PATH, MODEL_CLIPS).then(({ object, animator }) => {
+    spawnRiggedModel(MODEL_PATH, IDLE_SOURCE, WALK_SOURCE).then(({ object, animator }) => {
       fitHeight(object, MODEL_HEIGHT);
       tintModel(object, identityTint(NPC_COLOR));
       this.group.add(object);
@@ -173,7 +183,7 @@ export class NpcAvatar {
     const nextX = this.group.position.x + (dx / dist) * step;
     const nextZ = this.group.position.z + (dz / dist) * step;
     this.group.position.set(nextX, getTerrainHeight(nextX, nextZ) + this.yOffset, nextZ);
-    this.animator?.setMoving(true);
+    this.animator?.setMoving(true, NPC_WALK_ANIMATION_SPEED_SCALE);
   }
 
   addTo(scene: THREE.Scene) {

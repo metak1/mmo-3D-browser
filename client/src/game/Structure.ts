@@ -5,6 +5,7 @@ import {
   StructureLoop,
   getTerrainHeight,
 } from "@mmo/shared";
+import { fitHeight, spawnStaticModel } from "./models";
 import { stoneTexture } from "./textures";
 import { softTint } from "./textureTint";
 
@@ -12,6 +13,19 @@ import { softTint } from "./textureTint";
 // against whatever color an admin picks for the walls.
 const ROOF_COLOR = 0x4a3626;
 const FLOOR_COLOR = 0x6b4a30;
+
+// KayKit's Medieval Hexagon Pack (kaylousberg.com) - whole pre-made exterior buildings, unlike
+// wall/door/tower/gate's procedural shapes (see StructureKind's doc comment). Each model's native
+// export scale is tiny (a "home" is under a meter tall - built for a tabletop-hex-tile scale, not
+// this game's ~1-unit-per-meter convention), hence targetHeight/fitHeight, same reasoning as every
+// other real model in this codebase (see models.ts's fitHeight comment).
+const BUILDING_MODELS: Record<string, { path: string; targetHeight: number }> = {
+  building_home_A_blue: { path: "/models/hexagon/building_home_A_blue.gltf", targetHeight: 3.4 },
+  building_home_B_blue: { path: "/models/hexagon/building_home_B_blue.gltf", targetHeight: 4 },
+  building_market_blue: { path: "/models/hexagon/building_market_blue.gltf", targetHeight: 3.4 },
+  building_blacksmith_blue: { path: "/models/hexagon/building_blacksmith_blue.gltf", targetHeight: 3.6 },
+  building_tower_A_blue: { path: "/models/hexagon/building_tower_A_blue.gltf", targetHeight: 6.5 },
+};
 
 // How translucent an enclosed room's roof gets once the player is well inside its footprint, and
 // how many world units beyond the footprint the fade transitions over (WoW-style "walk under the
@@ -111,35 +125,51 @@ function buildGate(def: StructureDef): BuiltStructure {
   return { object: group };
 }
 
-// Every existing avatar in this codebase (Player/Npc/Enemy) is simple procedural Three.js
-// geometry with no asset loading - structures follow the same convention. kind selects one of
-// these hardcoded shape builders; everything else (position/size/color/rotation) is admin content.
+// Every other kind here is simple procedural Three.js geometry with no asset loading (matching
+// Player/Npc/Enemy's own convention) - kind selects one of these hardcoded shape builders;
+// everything else (position/size/color/rotation) is admin content. "building" is the exception
+// (see BUILDING_MODELS/StructureKind's doc comment), loaded asynchronously like every other real
+// model in this codebase - the group starts empty and gets the model added once it resolves.
 // Walls/pillars are solid and actually block the player server-side (see shared's
-// getStructureColliders/resolveStructureCollisions) - a door never blocks. A room's floor/roof
-// aren't part of any single StructureDef/StructureAvatar - see StructureEnclosureAvatar below,
-// built separately from findStructureLoops over the whole structure list.
+// getStructureColliders/resolveStructureCollisions) - a door never blocks, and neither does a
+// building (no colliders defined for that kind - see getStructureColliders' own comment). A room's
+// floor/roof aren't part of any single StructureDef/StructureAvatar - see StructureEnclosureAvatar
+// below, built separately from findStructureLoops over the whole structure list (which "building"
+// never participates in either).
 export class StructureAvatar {
   readonly group = new THREE.Group();
 
   constructor(def: StructureDef) {
-    let built: BuiltStructure;
-    switch (def.kind) {
-      case "wall":
-        built = buildWall(def);
-        break;
-      case "door":
-        built = buildDoor(def);
-        break;
-      case "tower":
-        built = buildTower(def);
-        break;
-      case "gate":
-        built = buildGate(def);
-        break;
-      default:
-        built = { object: new THREE.Group() }; // unrecognized kind (e.g. stale data) - render nothing rather than crash
+    if (def.kind === "building") {
+      const model = def.modelId ? BUILDING_MODELS[def.modelId] : undefined;
+      // Unrecognized/missing modelId (e.g. stale data, or an admin hasn't set one yet) - render
+      // nothing rather than crash, same fallback the switch below uses for its own default case.
+      if (model) {
+        spawnStaticModel(model.path).then((object) => {
+          fitHeight(object, model.targetHeight);
+          this.group.add(object);
+        });
+      }
+    } else {
+      let built: BuiltStructure;
+      switch (def.kind) {
+        case "wall":
+          built = buildWall(def);
+          break;
+        case "door":
+          built = buildDoor(def);
+          break;
+        case "tower":
+          built = buildTower(def);
+          break;
+        case "gate":
+          built = buildGate(def);
+          break;
+        default:
+          built = { object: new THREE.Group() }; // unrecognized kind (e.g. stale data) - render nothing rather than crash
+      }
+      this.group.add(built.object);
     }
-    this.group.add(built.object);
     // getTerrainHeight flattens the ground under every structure's own footprint (see
     // shared/src/types.ts), so this always lands the structure on level ground by default -
     // yOffset lets an admin deliberately raise/sink it from there (e.g. a platform, a sunken

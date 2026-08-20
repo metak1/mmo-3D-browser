@@ -1,27 +1,36 @@
 import * as THREE from "three";
 import { ChatBubble } from "./ChatBubble";
 import { HealthBar } from "./HealthBar";
-import { fitHeight, hideMeshesByName, ModelAnimator, spawnModel, tintModel } from "./models";
+import { fitHeight, hideMeshesByName, ModelAnimator, spawnModel, spawnRiggedModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
 
 const INTERPOLATION_LERP = 0.25;
 const SELECTION_RING_COLOR = 0x6ee7ff;
 const MOVING_THRESHOLD = 0.02; // group.position-to-target distance above which the walk clip plays
 
-// One CC0 KayKit character (kaylousberg.com, "Adventurers Character Pack", via GitHub) per class -
-// each ships its own Idle/Walking_A animations, so unlike the earlier Quaternius outfit attempt,
-// no retargeting is needed. Oracle has no dedicated healer model in the pack, so it reuses Mage
-// (both robed casters) - CLASS_COLOR below is what keeps mage/oracle visually distinct from each
-// other despite sharing a mesh.
+// One CC0 KayKit character (kaylousberg.com, "Adventurers Character Pack") per class. Warrior/
+// Rogue/Mage/Oracle use the older v1 export, which ships its own baked Idle/Walking_A per file -
+// no retargeting needed. Ranger uses the newer v2 export instead (the only one of these classes
+// with a model actually built for it - v1 had no ranger model at all, which is why it used to
+// reuse Rogue_Hooded); v2 character meshes carry no baked animations of their own, so Ranger's
+// come from the shared Rig_Medium animation library instead - see RIGGED_CLASSES/spawnRiggedModel.
 const CLASS_MODEL_PATH: Record<string, string> = {
   warrior: "/models/classes/Knight.glb",
   rogue: "/models/classes/Rogue.glb",
-  ranger: "/models/classes/Rogue_Hooded.glb",
-  oracle: "/models/classes/Mage.glb",
+  ranger: "/models/classes/Ranger.glb",
+  // No dedicated healer model exists in either export - previously reused Mage (both robed
+  // casters, indistinguishable in silhouette, needing CLASS_COLOR to tell them apart at all).
+  // Rogue_Hooded's cowled robe reads as a distinct priest/oracle look instead, freeing Ranger to
+  // stop reusing it too.
+  oracle: "/models/classes/Rogue_Hooded.glb",
   mage: "/models/classes/Mage.glb",
 };
 const DEFAULT_MODEL_PATH = CLASS_MODEL_PATH.warrior;
 const MODEL_CLIPS = { idle: "Idle", walk: "Walking_A" };
+
+const RIGGED_CLASSES = new Set(["ranger"]);
+const RIG_MEDIUM_IDLE = { path: "/models/animations/Rig_Medium_General.glb", clip: "Idle_A" };
+const RIG_MEDIUM_WALK = { path: "/models/animations/Rig_Medium_MovementBasic.glb", clip: "Walking_A" };
 
 // Tinted by class rather than local/remote identity - the camera already follows the local player
 // and their HUD shows their own name/HP, so there's no ambiguity about "which one is me" that a
@@ -36,17 +45,16 @@ const CLASS_COLOR: Record<string, number> = {
 };
 const DEFAULT_COLOR = CLASS_COLOR.warrior;
 
-// Each KayKit character ships with every weapon/accessory option it was ever posed with (a rogue
-// carries a crossbow, a throwable, AND a dagger, all attached to the same hand bone at once) as
-// separate mesh nodes - an unmodified load renders all of them simultaneously (a dagger and a
-// crossbow sharing one hand). Pick one weapon set per class and hide the rest. Oracle and Mage
-// share the Mage model but get different accessories (staff vs. spellbook) as a second visual cue
-// alongside their different tint.
+// Each v1 KayKit character ships with every weapon/accessory option it was ever posed with (a
+// rogue carries a crossbow, a throwable, AND a dagger, all attached to the same hand bone at once)
+// as separate mesh nodes - an unmodified load renders all of them simultaneously (a dagger and a
+// crossbow sharing one hand). Pick one weapon set per class and hide the rest. Oracle heals rather
+// than fights, so it hides every weapon Rogue_Hooded ships with rather than picking one. v2 models
+// (Ranger) have no such accessory nodes to begin with - nothing to hide, see RIGGED_CLASSES.
 const CLASS_HIDE_MESHES: Record<string, string[]> = {
   warrior: ["1H_Sword_Offhand", "Badge_Shield", "Rectangle_Shield", "Spike_Shield", "2H_Sword"],
   rogue: ["1H_Crossbow", "2H_Crossbow", "Throwable"],
-  ranger: ["Knife", "Knife_Offhand", "Throwable", "1H_Crossbow"],
-  oracle: ["Spellbook", "1H_Wand", "2H_Staff"],
+  oracle: ["Knife", "Knife_Offhand", "Throwable", "1H_Crossbow", "2H_Crossbow"],
   mage: ["Spellbook", "Spellbook_open", "1H_Wand"],
 };
 
@@ -69,7 +77,10 @@ export class PlayerAvatar {
     // avatar in this game already tolerates before its first setTarget/setPosition call.
     const modelPath = CLASS_MODEL_PATH[classId] ?? DEFAULT_MODEL_PATH;
     const color = CLASS_COLOR[classId] ?? DEFAULT_COLOR;
-    spawnModel(modelPath, MODEL_CLIPS).then(({ object, animator }) => {
+    const spawn = RIGGED_CLASSES.has(classId)
+      ? spawnRiggedModel(modelPath, RIG_MEDIUM_IDLE, RIG_MEDIUM_WALK)
+      : spawnModel(modelPath, MODEL_CLIPS);
+    spawn.then(({ object, animator }) => {
       fitHeight(object, MODEL_HEIGHT);
       tintModel(object, identityTint(color));
       hideMeshesByName(object, CLASS_HIDE_MESHES[classId] ?? []);

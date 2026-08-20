@@ -88,6 +88,7 @@ export class WorldRoom extends Room<WorldState> {
       onCombatText: (event) => this.broadcast("combat_text", event),
       collidableStructures: true,
       enemiesWander: true,
+      blockWaterTerrain: true,
     });
     this.trade = new TradeManager(this);
 

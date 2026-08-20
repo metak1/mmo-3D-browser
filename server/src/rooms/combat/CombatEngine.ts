@@ -32,6 +32,7 @@ import {
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
   hasLineOfSight,
+  isHexPassable,
   PlayerStats,
   resolveStructureCollisions,
   SPELLS,
@@ -128,6 +129,20 @@ export interface CombatEngineConfig {
   // DungeonRoom leaves it unset and enemies there behave exactly as before (stationary, purely
   // threat-driven, gated by tickEnemyAttacks' own range checks).
   enemiesWander?: boolean;
+  // Gates hex-terrain water-blocking (see hex.ts's isHexPassable) against player/enemy movement.
+  // Only the overworld has a hex terrain layer (see HexGround.ts) - WorldRoom passes true,
+  // DungeonRoom leaves this unset (a dungeon has no hex terrain of its own).
+  blockWaterTerrain?: boolean;
+}
+
+// Slides a proposed move along whichever single axis is still passable, rather than freezing dead
+// the instant a straight-line move would enter water - the same "try both axes" trick a rotated-
+// AABB collision resolver would use, kept simple here since water cells are just a binary block.
+function resolveWaterSlide(fromX: number, fromZ: number, nextX: number, nextZ: number): { x: number; z: number } {
+  if (isHexPassable(nextX, nextZ)) return { x: nextX, z: nextZ };
+  if (isHexPassable(nextX, fromZ)) return { x: nextX, z: fromZ };
+  if (isHexPassable(fromX, nextZ)) return { x: fromX, z: nextZ };
+  return { x: fromX, z: fromZ };
 }
 
 // One generic radius-scan reused by every AoE spell (enemies-near-point for damage,
@@ -644,6 +659,12 @@ export class CombatEngine {
         nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
       }
 
+      if (this.config.blockWaterTerrain) {
+        const slid = resolveWaterSlide(player.x, player.z, nextX, nextZ);
+        nextX = slid.x;
+        nextZ = slid.z;
+      }
+
       player.x = nextX;
       player.z = nextZ;
       player.rotationY = Math.atan2(normalizedX, normalizedZ);
@@ -761,6 +782,12 @@ export class CombatEngine {
       const resolved = resolveStructureCollisions(nextX, nextZ, STRUCTURES);
       nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
       nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+    }
+
+    if (this.config.blockWaterTerrain) {
+      const slid = resolveWaterSlide(enemy.x, enemy.z, nextX, nextZ);
+      nextX = slid.x;
+      nextZ = slid.z;
     }
 
     enemy.x = nextX;

@@ -47,6 +47,7 @@ import {
   RARITY_COLOR,
   RARITY_MULTIPLIER,
   RefundTalentMessage,
+  isHexPassable,
   resolveStructureCollisions,
   SPAWN_POINTS,
   SPELLS,
@@ -2187,6 +2188,18 @@ async function main(token: string, characterId: number, connectOverride?: Connec
           const resolved = resolveStructureCollisions(nextX, nextZ, STRUCTURES);
           nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
           nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+
+          // Same story now for the overworld's hex terrain (see HexGround.ts/hex.ts) - water
+          // blocks movement server-side too (CombatEngine's blockWaterTerrain), mirrored here so
+          // prediction doesn't walk onto water for a tick before being corrected.
+          if (!isHexPassable(nextX, nextZ)) {
+            if (isHexPassable(nextX, localPredicted.z)) nextZ = localPredicted.z;
+            else if (isHexPassable(localPredicted.x, nextZ)) nextX = localPredicted.x;
+            else {
+              nextX = localPredicted.x;
+              nextZ = localPredicted.z;
+            }
+          }
         }
         localPredicted.x = nextX;
         localPredicted.z = nextZ;

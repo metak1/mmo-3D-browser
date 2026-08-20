@@ -6,10 +6,10 @@ import {
   getTerrainHeight,
   MAP_HALF_EXTENT,
   setTerrainFlat,
-  terrainSegments,
 } from "@mmo/shared";
-import { groundTexture, stoneTexture } from "./textures";
+import { stoneTexture } from "./textures";
 import { softTint } from "./textureTint";
+import { buildHexGround } from "./HexGround";
 
 const CAMERA_OFFSET = new THREE.Vector3(0, 21, 13.5);
 const CAMERA_LERP = 0.08;
@@ -30,10 +30,12 @@ export class GameScene {
     container: HTMLElement,
     private readonly isDungeon = false,
   ) {
-    // Dungeons have no elevation at all (their floor mesh below stays an undisplaced flat quad) -
-    // this keeps every entity's getTerrainHeight() call in lockstep with that, instead of riding
-    // the overworld's rolling-hill noise while standing on a floor that doesn't actually have any.
-    setTerrainFlat(isDungeon);
+    // Nothing has real elevation anymore: dungeon floors never did (flat quad), and the overworld
+    // floor is now a mosaic of discrete hex tiles (see HexGround.ts) rather than one continuously
+    // deformable mesh - placing each rigid tile at its own noise-sampled height left visible gaps
+    // wherever neighboring tiles landed at different elevations. Keeping every entity's
+    // getTerrainHeight() call in lockstep with the flat floor that's actually drawn.
+    setTerrainFlat(true);
 
     // High-DPI screens (e.g. Retina) report devicePixelRatio 2-3, which multiplies
     // the number of pixels the GPU has to shade every frame. Cap it, and skip MSAA
@@ -81,47 +83,40 @@ export class GameScene {
   }
 
   private setupGround() {
-    const size = (this.isDungeon ? DUNGEON_HALF_EXTENT : MAP_HALF_EXTENT) * 2;
-    const groundColor = this.isDungeon ? 0x241a2e : 0x2b3348;
-    const gridColor = this.isDungeon ? 0x5a3a6e : 0x4a5578;
-    const gridColorDark = this.isDungeon ? 0x432c52 : 0x3a4260;
+    if (!this.isDungeon) {
+      this.setupOverworldGround();
+      return;
+    }
+
+    const size = DUNGEON_HALF_EXTENT * 2;
+    const groundColor = 0x241a2e;
+    const gridColor = 0x5a3a6e;
+    const gridColorDark = 0x432c52;
 
     // Dungeons stay a flat quad (small, enclosed instances - elevation adds nothing there).
-    // The overworld gets real segments so terrain height can displace it into rolling hills.
-    // terrainSegments is the same helper getTerrainHeight uses to snap its own sampling grid, so
-    // the two can never drift apart regardless of map size.
-    const segments = this.isDungeon ? 1 : terrainSegments(MAP_HALF_EXTENT);
-    const groundGeometry = new THREE.PlaneGeometry(size, size, segments, segments);
-    if (!this.isDungeon) {
-      const pos = groundGeometry.attributes.position;
-      for (let i = 0; i < pos.count; i++) {
-        // Pre-rotation local space: local X maps straight to world X, local Y maps to -worldZ
-        // (rotation.x = -PI/2 below), so local Z (currently 0, "height" before rotation) is set
-        // from world coordinates derived the same way.
-        const localX = pos.getX(i);
-        const localY = pos.getY(i);
-        pos.setZ(i, getTerrainHeight(localX, -localY));
-      }
-      pos.needsUpdate = true;
-      groundGeometry.computeVertexNormals();
-    }
+    const groundGeometry = new THREE.PlaneGeometry(size, size, 1, 1);
     // Dungeon floors read better as stone than grass - the same real-texture set from
     // textures.ts, no separate asset needed.
     const groundMaterial = new THREE.MeshStandardMaterial({
       color: softTint(groundColor),
-      map: this.isDungeon ? stoneTexture(size, size) : groundTexture(size),
+      map: stoneTexture(size, size),
     });
     const ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
     this.scene.add(ground);
 
-    if (this.isDungeon) {
-      // A flat reference grid only makes sense over flat ground - the overworld's undulating
-      // terrain drops it entirely rather than draping a grid that would read as a bug.
-      const grid = new THREE.GridHelper(size, size / 2, gridColor, gridColorDark);
-      this.scene.add(grid);
-      return; // no boss arena patch inside the instance - that's overworld-only
-    }
+    // A flat reference grid only makes sense over flat ground - the overworld's hex tiles drop
+    // it entirely rather than draping a grid that would read as a bug.
+    const grid = new THREE.GridHelper(size, size / 2, gridColor, gridColorDark);
+    this.scene.add(grid);
+  }
+
+  // The overworld floor is a THREE.InstancedMesh of KayKit hex tiles (see HexGround.ts) rather
+  // than a plain textured plane. Loading the model is async, so - matching every avatar in this
+  // codebase's "add to scene empty, populate once the model resolves" convention - the ground
+  // simply doesn't exist for the handful of frames before the tile model finishes loading.
+  private setupOverworldGround() {
+    buildHexGround(MAP_HALF_EXTENT).then((ground) => this.scene.add(ground));
 
     // Purely decorative marker for the boss arena - no collision, just tells the player
     // "you've entered a different area" before the boss itself comes into view.

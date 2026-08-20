@@ -149,6 +149,7 @@ interface StructureRow {
   height: number;
   color: string;
   y_offset: number;
+  model_id: string | null;
 }
 
 interface WaypointRow {
@@ -331,6 +332,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     height: s.height,
     color: s.color,
     yOffset: s.y_offset,
+    modelId: nullToUndefined(s.model_id),
   }));
 
   const waypoints: WaypointDef[] = waypointRows.map((w) => ({

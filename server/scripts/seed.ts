@@ -1040,39 +1040,86 @@ async function main() {
   // on it, exactly what an admin would place by hand via the map editor's "+ wall"/"+ door"
   // buttons. Each room below is the axis-aligned wall+door layout findStructureLoops needs to
   // detect it as a closed loop and auto-generate its floor/roof - a worked example to copy. ---
+  // Starting-town buildings below are real KayKit "Medieval Hexagon Pack" models (kind:"building",
+  // see shared's StructureKind/client/src/game/Structure.ts's BUILDING_MODELS) instead of
+  // hand-assembled wall/door loops - a trial run for replacing this game's procedural-box
+  // buildings with off-the-shelf whole-building assets. width/depth/height/color are unused for
+  // this kind (still required by the schema) so every row below just carries nominal placeholder
+  // values. Millbrook/Ashford Keep/Frosthold below are untouched, still the original wall+door
+  // pattern - see that comment further down for how to build a room by hand.
   const structures = [
-    // Quartermaster's House (was a single "house" structure at x:3, z:-13, 6x6, door facing -z)
-    { id: "house_1_wall_front_l", name: "Quartermaster's House (front-left)", map_id: "overworld", kind: "wall", x: 1.1, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#8a6d4b" },
-    { id: "house_1_door", name: "Quartermaster's House (door)", map_id: "overworld", kind: "door", x: 3, z: -16, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
-    { id: "house_1_wall_front_r", name: "Quartermaster's House (front-right)", map_id: "overworld", kind: "wall", x: 4.9, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#8a6d4b" },
-    { id: "house_1_wall_back", name: "Quartermaster's House (back)", map_id: "overworld", kind: "wall", x: 3, z: -10, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
-    { id: "house_1_wall_left", name: "Quartermaster's House (left)", map_id: "overworld", kind: "wall", x: 0, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
-    { id: "house_1_wall_right", name: "Quartermaster's House (right)", map_id: "overworld", kind: "wall", x: 6, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#8a6d4b" },
-    // Traveler's Cottage (was a single "house" structure at x:-15, z:-13, 6x6, door facing -z)
-    { id: "house_2_wall_front_l", name: "Traveler's Cottage (front-left)", map_id: "overworld", kind: "wall", x: -16.9, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#9c7a52" },
-    { id: "house_2_door", name: "Traveler's Cottage (door)", map_id: "overworld", kind: "door", x: -15, z: -16, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#9c7a52" },
-    { id: "house_2_wall_front_r", name: "Traveler's Cottage (front-right)", map_id: "overworld", kind: "wall", x: -13.1, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#9c7a52" },
-    { id: "house_2_wall_back", name: "Traveler's Cottage (back)", map_id: "overworld", kind: "wall", x: -15, z: -10, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#9c7a52" },
-    { id: "house_2_wall_left", name: "Traveler's Cottage (left)", map_id: "overworld", kind: "wall", x: -18, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#9c7a52" },
-    { id: "house_2_wall_right", name: "Traveler's Cottage (right)", map_id: "overworld", kind: "wall", x: -12, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#9c7a52" },
-    // Traveling Merchant's Shop (was a single "shop" structure at x:-14, z:1, 8x6, door facing -z)
-    { id: "merchant_shop_wall_front_l", name: "Traveling Merchant's Shop (front-left)", map_id: "overworld", kind: "wall", x: -16.4, z: -2, rotation_y: 0, width: 3.2, depth: 0.2, height: 3.5, color: "#5c7a99" },
-    { id: "merchant_shop_door", name: "Traveling Merchant's Shop (door)", map_id: "overworld", kind: "door", x: -14, z: -2, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.5, color: "#5c7a99" },
-    { id: "merchant_shop_wall_front_r", name: "Traveling Merchant's Shop (front-right)", map_id: "overworld", kind: "wall", x: -11.6, z: -2, rotation_y: 0, width: 3.2, depth: 0.2, height: 3.5, color: "#5c7a99" },
-    { id: "merchant_shop_wall_back", name: "Traveling Merchant's Shop (back)", map_id: "overworld", kind: "wall", x: -14, z: 4, rotation_y: 0, width: 8, depth: 0.2, height: 3.5, color: "#5c7a99" },
-    { id: "merchant_shop_wall_left", name: "Traveling Merchant's Shop (left)", map_id: "overworld", kind: "wall", x: -18, z: 1, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.5, color: "#5c7a99" },
-    { id: "merchant_shop_wall_right", name: "Traveling Merchant's Shop (right)", map_id: "overworld", kind: "wall", x: -10, z: 1, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.5, color: "#5c7a99" },
+    {
+      id: "house_1",
+      name: "Quartermaster's House",
+      map_id: "overworld",
+      kind: "building",
+      model_id: "building_home_A_blue",
+      x: 3,
+      z: -13,
+      rotation_y: 0,
+      width: 1,
+      depth: 1,
+      height: 1,
+      color: "#ffffff",
+    },
+    {
+      id: "house_2",
+      name: "Traveler's Cottage",
+      map_id: "overworld",
+      kind: "building",
+      model_id: "building_home_B_blue",
+      x: -15,
+      z: -13,
+      rotation_y: 0,
+      width: 1,
+      depth: 1,
+      height: 1,
+      color: "#ffffff",
+    },
+    {
+      id: "merchant_shop",
+      name: "Traveling Merchant's Shop",
+      map_id: "overworld",
+      kind: "building",
+      model_id: "building_market_blue",
+      x: -14,
+      z: 1,
+      rotation_y: 0,
+      width: 1,
+      depth: 1,
+      height: 1,
+      color: "#ffffff",
+    },
     { id: "town_wall", name: "Town Wall", map_id: "overworld", kind: "wall", x: -3, z: -19, rotation_y: 0, width: 22, depth: 1.2, height: 4, color: "#7d7d7d" },
     { id: "town_gate", name: "Town Gate", map_id: "overworld", kind: "gate", x: -3, z: -9, rotation_y: 0, width: 6, depth: 1.2, height: 5.5, color: "#6b6b6b" },
-    { id: "watch_tower", name: "Sentinel's Watchtower", map_id: "overworld", kind: "tower", x: 6, z: 22, rotation_y: 0, width: 4, depth: 4, height: 12, color: "#6e6a63" },
-    // Blacksmith's Forge (6x6, center 20,-13, door facing -z) - east of Quartermaster's House,
-    // clear of the caster spawns at (+-8,-8).
-    { id: "blacksmith_wall_front_l", name: "Blacksmith's Forge (front-left)", map_id: "overworld", kind: "wall", x: 18.1, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#6b4a3a" },
-    { id: "blacksmith_door", name: "Blacksmith's Forge (door)", map_id: "overworld", kind: "door", x: 20, z: -16, rotation_y: 0, width: 1.6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
-    { id: "blacksmith_wall_front_r", name: "Blacksmith's Forge (front-right)", map_id: "overworld", kind: "wall", x: 21.9, z: -16, rotation_y: 0, width: 2.2, depth: 0.2, height: 3.15, color: "#6b4a3a" },
-    { id: "blacksmith_wall_back", name: "Blacksmith's Forge (back)", map_id: "overworld", kind: "wall", x: 20, z: -10, rotation_y: 0, width: 6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
-    { id: "blacksmith_wall_left", name: "Blacksmith's Forge (left)", map_id: "overworld", kind: "wall", x: 17, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
-    { id: "blacksmith_wall_right", name: "Blacksmith's Forge (right)", map_id: "overworld", kind: "wall", x: 23, z: -13, rotation_y: 1.5708, width: 6, depth: 0.2, height: 3.15, color: "#6b4a3a" },
+    {
+      id: "watch_tower",
+      name: "Sentinel's Watchtower",
+      map_id: "overworld",
+      kind: "building",
+      model_id: "building_tower_A_blue",
+      x: 6,
+      z: 22,
+      rotation_y: 0,
+      width: 1,
+      depth: 1,
+      height: 1,
+      color: "#ffffff",
+    },
+    {
+      id: "blacksmith",
+      name: "Blacksmith's Forge",
+      map_id: "overworld",
+      kind: "building",
+      model_id: "building_blacksmith_blue",
+      x: 20,
+      z: -13,
+      rotation_y: 0,
+      width: 1,
+      depth: 1,
+      height: 1,
+      color: "#ffffff",
+    },
     // --- Millbrook (trading outpost, x~70/z~-10) - one room, no perimeter, matches its role as
     // a small waystation rather than a fortified city. ---
     { id: "millbrook_hall_wall_front_l", name: "Millbrook Trading Hall (front-left)", map_id: "overworld", kind: "wall", x: 67.85, z: -13.5, rotation_y: 0, width: 2.7, depth: 0.2, height: 3.15, color: "#6b8a5c" },
@@ -1145,29 +1192,10 @@ async function main() {
   // --- Furniture (dresses every room's interior - a table facing pair of chairs plus a
   // crate/barrel, bookshelf too in the two bigger rooms - so a house doesn't read as an empty
   // box. Colors match each room's own wall color for a cohesive look. See shared's FurnitureKind/
-  // client/src/game/Furniture.ts.) ---
+  // client/src/game/Furniture.ts. Quartermaster's House/Traveler's Cottage/Blacksmith's Forge/
+  // Traveling Merchant's Shop have no furniture of their own anymore - they're real whole-building
+  // models now (kind:"building", see the structures list above), with no interior to dress.) ---
   const furniture = [
-    // Quartermaster's House (6x6, center 3,-13)
-    { id: "furn_house1_table", name: "Table", map_id: "overworld", kind: "table", x: 3, z: -13, rotation_y: 0, color: "#8a6d4b" },
-    { id: "furn_house1_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 3, z: -11.7, rotation_y: 3.1416, color: "#8a6d4b" },
-    { id: "furn_house1_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 3, z: -14.3, rotation_y: 0, color: "#8a6d4b" },
-    { id: "furn_house1_crate", name: "Crate", map_id: "overworld", kind: "crate", x: 5, z: -10.8, rotation_y: 0, color: "#8a6d4b" },
-    // Traveler's Cottage (6x6, center -15,-13)
-    { id: "furn_house2_table", name: "Table", map_id: "overworld", kind: "table", x: -15, z: -13, rotation_y: 0, color: "#9c7a52" },
-    { id: "furn_house2_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -15, z: -11.7, rotation_y: 3.1416, color: "#9c7a52" },
-    { id: "furn_house2_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -15, z: -14.3, rotation_y: 0, color: "#9c7a52" },
-    { id: "furn_house2_crate", name: "Crate", map_id: "overworld", kind: "crate", x: -13, z: -10.8, rotation_y: 0, color: "#9c7a52" },
-    // Blacksmith's Forge (6x6, center 20,-13)
-    { id: "furn_blacksmith_table", name: "Table", map_id: "overworld", kind: "table", x: 20, z: -13, rotation_y: 0, color: "#6b4a3a" },
-    { id: "furn_blacksmith_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 20, z: -11.7, rotation_y: 3.1416, color: "#6b4a3a" },
-    { id: "furn_blacksmith_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: 20, z: -14.3, rotation_y: 0, color: "#6b4a3a" },
-    { id: "furn_blacksmith_crate", name: "Crate", map_id: "overworld", kind: "crate", x: 22, z: -10.8, rotation_y: 0, color: "#6b4a3a" },
-    // Traveling Merchant's Shop (8x6, center -14,1)
-    { id: "furn_shop_table", name: "Table", map_id: "overworld", kind: "table", x: -14, z: 1, rotation_y: 0, color: "#5c7a99" },
-    { id: "furn_shop_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: -14, z: 2.3, rotation_y: 3.1416, color: "#5c7a99" },
-    { id: "furn_shop_chair_b", name: "Chair", map_id: "overworld", kind: "chair", x: -14, z: -0.3, rotation_y: 0, color: "#5c7a99" },
-    { id: "furn_shop_barrel", name: "Barrel", map_id: "overworld", kind: "barrel", x: -16.5, z: 3.2, rotation_y: 0, color: "#5c7a99" },
-    { id: "furn_shop_bookshelf", name: "Bookshelf", map_id: "overworld", kind: "bookshelf", x: -17.3, z: 1, rotation_y: 1.5708, color: "#5c7a99" },
     // Millbrook Trading Hall (7x7, center 70,-10)
     { id: "furn_millbrook_table", name: "Table", map_id: "overworld", kind: "table", x: 70, z: -10, rotation_y: 0, color: "#6b8a5c" },
     { id: "furn_millbrook_chair_a", name: "Chair", map_id: "overworld", kind: "chair", x: 70, z: -8.7, rotation_y: 3.1416, color: "#6b8a5c" },

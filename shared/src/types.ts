@@ -1,3 +1,12 @@
+// hex.ts reads STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/PORTAL_POSITION below, and this
+// file calls resetHexTerrainCache() from loadGameContent - a real module cycle, safe because every
+// actual cross-reference happens inside function bodies invoked after both modules finish loading,
+// never at module top-level. Re-exported (in addition to imported - `export *` alone doesn't create
+// a local binding this file can call) so @mmo/shared consumers (shared/package.json's "main" only
+// resolves this file) see hex.ts's public API too.
+import { resetHexTerrainCache } from "./hex.js";
+export * from "./hex.js";
+
 export const WORLD_ROOM_NAME = "world_room";
 
 export const PLAYER_SPEED = 4; // meters per second, server-authoritative
@@ -659,12 +668,20 @@ export let SPAWN_POINTS: EnemySpawnDef[] = [];
 // solid (see getStructureColliders below) - only players collide with them, blocking movement
 // server-side; a door stays open on both the visual and the collision side.
 //
-// There's no "house"/"shop" prefab kind anymore - a building is just however many "wall"
-// segments an admin freely places (any position/length/rotation) plus one "door" segment where
-// they want the entrance. findStructureLoops below detects when a set of wall/door segments
-// forms a closed loop and auto-generates a floor + roof over it, so authoring a room is placing
-// walls around its perimeter and one door, not picking a single rigid rectangular prefab.
-export type StructureKind = "wall" | "door" | "tower" | "gate";
+// There's no "house"/"shop" prefab kind for wall/door/tower/gate - a building built from those is
+// just however many "wall" segments an admin freely places (any position/length/rotation) plus
+// one "door" segment where they want the entrance. findStructureLoops below detects when a set of
+// wall/door segments forms a closed loop and auto-generates a floor + roof over it, so authoring a
+// room is placing walls around its perimeter and one door, not picking a single rigid rectangular
+// prefab.
+//
+// "building" is the one exception - a single pre-made exterior model (see modelId below and
+// client/src/game/Structure.ts's BUILDING_MODELS) placed and rotated like any other structure, but
+// with no interior to enter and no wall/door pieces of its own, so it never participates in
+// findStructureLoops and (see getStructureColliders' default case) has no collision either -
+// walking through it is an accepted tradeoff of using an off-the-shelf whole-building asset
+// instead of hand-placed walls.
+export type StructureKind = "wall" | "door" | "tower" | "gate" | "building";
 
 export interface StructureDef {
   id: string;
@@ -679,6 +696,7 @@ export interface StructureDef {
   height: number;
   color: string; // hex, e.g. "#8a6d4b"
   yOffset: number; // added on top of the auto-computed terrain height - see getTerrainHeight
+  modelId?: string; // "building" kind only - key into client/src/game/Structure.ts's BUILDING_MODELS
 }
 
 export let STRUCTURES: StructureDef[] = [];
@@ -723,9 +741,10 @@ export interface StructureCollider {
 
 // Solid rectangles for a structure, in local (unrotated) space - one entry per wall/pillar
 // segment, mirroring exactly what buildWall/buildDoor/buildTower/buildGate render as solid.
-// The `default` isn't reachable through the type system (the switch is already exhaustive over
-// StructureKind) - it's a runtime safety net for a stale/unrecognized kind value living in the
-// database mid-rollout of a StructureKind change, so a bad row makes that one structure
+// "building" deliberately falls through to `default` (no collider) - see StructureKind's own doc
+// comment on why a whole-building asset stays walk-through for now. That also covers the original
+// reason this branch existed: a runtime safety net for a stale/unrecognized kind value living in
+// the database mid-rollout of a StructureKind change, so a bad row makes that one structure
 // decoration-only instead of crashing every collision/line-of-sight check on the server.
 export function getStructureColliders(def: StructureDef): StructureCollider[] {
   switch (def.kind) {
@@ -1268,4 +1287,10 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
     DUNGEON_PARTY_SIZE = ACTIVE_DUNGEON.partySize;
     DUNGEON_COMPOSITION = ACTIVE_DUNGEON.composition;
   }
+
+  // The hex terrain classifier (hex.ts) derives everything from the bindings just reassigned
+  // above (STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/PORTAL_POSITION) - its cached road
+  // network and passability answers go stale the moment any of those change, which happens live
+  // on every admin CRUD mutation (reloadGameContent), not just once at boot.
+  resetHexTerrainCache();
 }

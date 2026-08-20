@@ -1,11 +1,11 @@
 import * as THREE from "three";
 
 // Real CC0 (public domain) photographic textures from ambientCG (https://ambientcg.com),
-// downscaled to 256x256 JPGs and bundled in client/public/textures - Grass001 (ground),
-// Planks010 (wood), Bricks061 (stone), Fabric019 (cloth, for players/NPCs), Leather007
-// (for enemy bodies). No attribution required under CC0, but noted here for provenance.
-// These are the only non-procedural assets in this codebase; the geometry itself (Player/
-// Npc/Enemy/Structure) is still plain Three.js primitives, just textured ones now.
+// downscaled to 256x256 JPGs and bundled in client/public/textures - Planks010 (wood),
+// Bricks061 (stone), Fabric019 (cloth, for players/NPCs), Leather007 (for enemy bodies).
+// No attribution required under CC0, but noted here for provenance. The overworld ground
+// itself is no longer one of these (see HexGround.ts's KayKit tile mesh); stone still covers
+// dungeon floors.
 
 const loader = new THREE.TextureLoader();
 
@@ -17,7 +17,6 @@ function loadTexture(path: string): THREE.Texture {
   return texture;
 }
 
-const GROUND_BASE = loadTexture("/textures/ground.jpg");
 const WOOD_BASE = loadTexture("/textures/wood.jpg");
 const STONE_BASE = loadTexture("/textures/stone.jpg");
 const FABRIC_BASE = loadTexture("/textures/fabric.jpg");
@@ -28,12 +27,6 @@ function withRepeat(base: THREE.Texture, repeatX: number, repeatY: number): THRE
   texture.needsUpdate = true;
   texture.repeat.set(repeatX, repeatY);
   return texture;
-}
-
-// One tile every ~4 world units, with a floor so small maps (dungeons) still show visible detail.
-export function groundTexture(worldSize: number): THREE.Texture {
-  const repeat = Math.max(4, Math.round(worldSize / 4));
-  return withRepeat(GROUND_BASE, repeat, repeat);
 }
 
 export function woodTexture(width: number, height: number): THREE.Texture {

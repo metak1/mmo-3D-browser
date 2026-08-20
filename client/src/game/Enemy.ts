@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { EnemyBehavior, getTerrainHeight } from "@mmo/shared";
+import { ENEMY_CHASE_SPEED, EnemyBehavior, getTerrainHeight } from "@mmo/shared";
 import { AoeCircle } from "./AoeCircle";
 import { DEFAULT_Y_OFFSET, HealthBar } from "./HealthBar";
 import { NameLabel } from "./NameLabel";
@@ -7,7 +7,20 @@ import { fitHeight, ModelAnimator, spawnModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
 
 const INTERPOLATION_LERP = 0.25;
+const ROTATION_LERP = 0.15;
 const MOVING_THRESHOLD = 0.02;
+// Every position update this avatar receives while actually moving arrives exactly one server
+// tick apart (Colyseus only patches state that changed, and the server's simulation interval is
+// fixed) - dividing a tick's position delta by this fixed duration gives a real speed measurement
+// without needing to trust wall-clock time between calls, which a wander pause (no updates sent
+// for seconds at a time - see CombatEngine.tickWander) would otherwise badly skew. Matches
+// SIMULATION_INTERVAL_MS in WorldRoom/DungeonRoom.
+const SERVER_TICK_SECONDS = 1 / 30;
+// The walk clip's authored pace looks right at this speed (the only one enemies ever moved at
+// before wander existed - see ENEMY_CHASE_SPEED) - see setTarget/update for how a slower measured
+// speed (wandering) scales the clip's timeScale down so limbs don't outrun the actual footwork.
+const WALK_ANIMATION_REFERENCE_SPEED = ENEMY_CHASE_SPEED;
+const MIN_WALK_SPEED_SCALE = 0.35; // floor so a near-stationary nudge doesn't look like a freeze-frame
 
 const KIND_COLOR: Record<EnemyBehavior, number> = {
   melee: 0xb3423a,
@@ -54,6 +67,8 @@ export class EnemyAvatar {
   private animator?: ModelAnimator;
   private targetPosition = new THREE.Vector3();
   private desiredRotationY = 0;
+  private currentRotationY = 0;
+  private measuredSpeed = 0;
 
   constructor(kind: EnemyBehavior, name: string, aggressive: boolean) {
     this.kind = kind;
@@ -99,11 +114,14 @@ export class EnemyAvatar {
 
   // Enemies never had a synced rotation field (there was no reason to, before they could move) -
   // facing is derived client-side from the direction of each incoming position update instead,
-  // same atan2(dx, dz) convention the server uses for players.
+  // same atan2(dx, dz) convention the server uses for players. Also measures actual speed from
+  // this tick's delta (see SERVER_TICK_SECONDS) for the walk animation's timeScale.
   setTarget(x: number, z: number) {
     const dx = x - this.targetPosition.x;
     const dz = z - this.targetPosition.z;
-    if (Math.hypot(dx, dz) > 0.01) this.desiredRotationY = Math.atan2(dx, dz);
+    const dist = Math.hypot(dx, dz);
+    if (dist > 0.01) this.desiredRotationY = Math.atan2(dx, dz);
+    this.measuredSpeed = dist / SERVER_TICK_SECONDS;
     this.targetPosition.set(x, getTerrainHeight(x, z), z);
   }
 
@@ -146,15 +164,26 @@ export class EnemyAvatar {
 
   snapToTarget() {
     this.group.position.copy(this.targetPosition);
+    this.currentRotationY = this.desiredRotationY;
+    this.group.rotation.y = this.currentRotationY;
     this.syncOverlayPositions();
   }
 
   update(dt: number) {
     const distance = this.group.position.distanceTo(this.targetPosition);
     this.group.position.lerp(this.targetPosition, INTERPOLATION_LERP);
-    this.group.rotation.y = this.desiredRotationY;
+    // Smoothly turn to face the desired heading rather than snapping to it - matters a lot now
+    // that wander (see CombatEngine.tickWander) picks a new random direction every leg; a chasing
+    // enemy or a player's heading changes far more gradually already (continuous small steps
+    // toward a moving target), so an instant snap was never noticeable before wander made abrupt
+    // direction changes common. atan2(sin,cos) of the raw delta always turns the short way around,
+    // never the long way past the back.
+    const delta = Math.atan2(Math.sin(this.desiredRotationY - this.currentRotationY), Math.cos(this.desiredRotationY - this.currentRotationY));
+    this.currentRotationY += delta * ROTATION_LERP;
+    this.group.rotation.y = this.currentRotationY;
     this.syncOverlayPositions();
-    this.animator?.setMoving(distance > MOVING_THRESHOLD);
+    const speedScale = Math.max(MIN_WALK_SPEED_SCALE, Math.min(1, this.measuredSpeed / WALK_ANIMATION_REFERENCE_SPEED));
+    this.animator?.setMoving(distance > MOVING_THRESHOLD, speedScale);
     this.animator?.update(dt);
   }
 

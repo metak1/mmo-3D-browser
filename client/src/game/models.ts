@@ -2,13 +2,16 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 
-// Real CC0 (public domain) rigged/animated low-poly models. "Man" (client/public/models/man.glb,
-// Quaternius's Animated Men Pack, via poly.pizza) is used by Npc.ts; "Goblin" (goblin.glb, also
-// Quaternius) by Enemy.ts; the five files under client/public/models/classes/ (KayKit's
-// "Adventurers Character Pack" by Kay Lousberg, kaylousberg.com, via GitHub) by Player.ts - one
-// self-contained model per class, each already carrying its own Idle/Walking_A animations, no
-// attribution required under CC0. These join the CC0 textures from textures.ts as the only
-// non-procedural assets in this codebase.
+// Real CC0 (public domain) rigged/animated low-poly models, no attribution required. "Goblin"
+// (goblin.glb, Quaternius) is used by Enemy.ts. Player.ts's client/public/models/classes/ and
+// Npc.ts's npc_barbarian.glb are KayKit's "Adventurers Character Pack" (kaylousberg.com) - Knight/
+// Mage/Rogue/Rogue_Hooded are the older v1 export (each self-contained, own baked Idle/Walking_A),
+// Ranger/Barbarian are the newer v2 export, which ships character meshes with *no* baked
+// animations at all (see spawnRiggedModel) - its Idle_A/Walking_A clips instead come from the
+// shared client/public/models/animations/Rig_Medium_*.glb library, also KayKit. Furniture.ts's
+// client/public/models/dungeon/*.gltf pieces are KayKit's "Dungeon Pack", sharing one texture
+// atlas (dungeon_texture.png) the same way every other model in that pack does. These join the
+// CC0 textures from textures.ts as the only non-procedural assets in this codebase.
 
 const loader = new GLTFLoader();
 
@@ -45,7 +48,14 @@ export class ModelAnimator {
     idle?.play();
   }
 
-  setMoving(moving: boolean) {
+  // speedScale lets the walk clip's stride cadence track actual movement speed instead of always
+  // playing at whatever pace it was authored for - without this, anything moving slower than that
+  // pace (e.g. an enemy ambling around while wandering, well under its full chase speed) visibly
+  // moonwalks: limbs cycling through a full stride far faster than the body is actually covering
+  // ground. 1 (the default) means "play at the authored pace" - callers whose movement speed is
+  // always the same one value (Player) never need to pass anything else.
+  setMoving(moving: boolean, speedScale = 1) {
+    if (moving && this.walk) this.walk.timeScale = speedScale;
     const next = moving ? this.walk : this.idle;
     if (!next || next === this.current) return;
     next.reset().fadeIn(0.2).play();
@@ -63,32 +73,82 @@ export interface SpawnedModel {
   animator: ModelAnimator;
 }
 
-// Clones (skeleton-aware, so each instance animates independently - a plain Object3D.clone()
-// shares bones across every clone and animates them all in lockstep) a cached model and wires up
-// its own AnimationMixer/ModelAnimator, ready to add to a scene and animate.
-export async function spawnModel(path: string, clipNames: { idle: string; walk: string }): Promise<SpawnedModel> {
-  const { scene, animations } = await loadModel(path);
+// cloneSkeleton (like a plain Object3D.clone()) shares material *instances* with the cached
+// source scene and every other clone of it - harmless as long as every instance of a given
+// model always gets tinted identically (true for Player's per-class color and Npc's fixed
+// color), but not once different instances of the *same* model need independent colors (see
+// Enemy.ts's per-instance aggressive/passive tint) - mutating a shared material there would
+// silently recolor every other spawned copy using it too. Cloning each mesh's own material here
+// gives every instance something it can safely tint on its own.
+function cloneWithIndependentMaterials(scene: THREE.Group): THREE.Object3D {
   const object = cloneSkeleton(scene) as THREE.Object3D;
-  // cloneSkeleton (like a plain Object3D.clone()) shares material *instances* with the cached
-  // source scene and every other clone of it - harmless as long as every instance of a given
-  // model always gets tinted identically (true for Player's per-class color and Npc's fixed
-  // color), but not once different instances of the *same* model need independent colors (see
-  // Enemy.ts's per-instance aggressive/passive tint) - mutating a shared material there would
-  // silently recolor every other spawned copy using it too. Cloning each mesh's own material here
-  // gives every instance something it can safely tint on its own.
   object.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return;
     child.material = Array.isArray(child.material) ? child.material.map((m) => m.clone()) : child.material.clone();
   });
+  return object;
+}
+
+function buildAnimator(object: THREE.Object3D, idleClip?: THREE.AnimationClip, walkClip?: THREE.AnimationClip): ModelAnimator {
   const mixer = new THREE.AnimationMixer(object);
+  return new ModelAnimator(mixer, idleClip && mixer.clipAction(idleClip), walkClip && mixer.clipAction(walkClip));
+}
+
+// Clones (skeleton-aware, so each instance animates independently - a plain Object3D.clone()
+// shares bones across every clone and animates them all in lockstep) a cached model and wires up
+// its own AnimationMixer/ModelAnimator, ready to add to a scene and animate. For a model whose
+// own file carries its Idle/Walk clips already baked in (every model here except the ones using
+// spawnRiggedModel below).
+export async function spawnModel(path: string, clipNames: { idle: string; walk: string }): Promise<SpawnedModel> {
+  const { scene, animations } = await loadModel(path);
+  const object = cloneWithIndependentMaterials(scene);
   const idleClip = THREE.AnimationClip.findByName(animations, clipNames.idle) ?? undefined;
   const walkClip = THREE.AnimationClip.findByName(animations, clipNames.walk) ?? undefined;
-  const animator = new ModelAnimator(
-    mixer,
-    idleClip && mixer.clipAction(idleClip),
-    walkClip && mixer.clipAction(walkClip),
-  );
-  return { object, animator };
+  return { object, animator: buildAnimator(object, idleClip, walkClip) };
+}
+
+// Some newer packs (e.g. KayKit's v2 "Adventurers" character rig) ship character meshes with no
+// baked animations at all - clips instead live in a separate, shared "rig" animation library
+// meant to be retargeted onto any character built on that same named rig. Retargeting a clip
+// authored against one skeleton onto a *different* skeleton only works because every character
+// sharing that rig has identical bone names - three.js's AnimationMixer binds a clip's tracks to
+// bones by name, not by which file they originally came from.
+export async function spawnRiggedModel(
+  meshPath: string,
+  idleSource: { path: string; clip: string },
+  walkSource: { path: string; clip: string },
+): Promise<SpawnedModel> {
+  const [{ scene }, idleAnim, walkAnim] = await Promise.all([
+    loadModel(meshPath),
+    loadModel(idleSource.path),
+    loadModel(walkSource.path),
+  ]);
+  const object = cloneWithIndependentMaterials(scene);
+  const idleClip = THREE.AnimationClip.findByName(idleAnim.animations, idleSource.clip) ?? undefined;
+  const walkClip = THREE.AnimationClip.findByName(walkAnim.animations, walkSource.clip) ?? undefined;
+  return { object, animator: buildAnimator(object, idleClip, walkClip) };
+}
+
+// For a model with no animations at all (e.g. a dungeon furniture prop) - just the geometry,
+// cloned with independent materials so per-instance tinting (see Furniture.ts) doesn't leak
+// across every other spawned copy of the same prop.
+export async function spawnStaticModel(path: string): Promise<THREE.Object3D> {
+  const { scene } = await loadModel(path);
+  return cloneWithIndependentMaterials(scene);
+}
+
+// Pulls the raw geometry/material straight off the cached scene's first mesh, uncloned - for
+// THREE.InstancedMesh callers (see HexGround.ts) that need one shared geometry/material to draw
+// thousands of copies of, not an independent Object3D per copy the way every avatar above does.
+export async function loadModelGeometry(path: string): Promise<{ geometry: THREE.BufferGeometry; material: THREE.Material }> {
+  const { scene } = await loadModel(path);
+  let mesh: THREE.Mesh | undefined;
+  scene.traverse((child) => {
+    if (!mesh && child instanceof THREE.Mesh) mesh = child;
+  });
+  if (!mesh) throw new Error(`No mesh found in model: ${path}`);
+  const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+  return { geometry: mesh.geometry, material };
 }
 
 // Different packs/exports aren't at a consistent scale - the old "Ultimate Monsters Pack" turned

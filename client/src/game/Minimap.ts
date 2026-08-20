@@ -9,8 +9,8 @@ import { QuestIndicatorState } from "./Npc";
 const VIEW_RADIUS = 70;
 const BIG_MAP_MARGIN = 1.05; // small margin so landmarks right at the map edge aren't clipped
 
-// Same repeat-every-4-world-units convention as the 3D ground itself (see textures.ts's
-// groundTexture), so the minimap's tiling density matches what the ground actually looks like.
+// The minimap draws its own flat grass pattern rather than reflecting the 3D ground's actual hex
+// tiles (see HexGround.ts) - this is just its tiling density for that pattern.
 const TILE_WORLD_SIZE = 4;
 
 interface TilePattern {

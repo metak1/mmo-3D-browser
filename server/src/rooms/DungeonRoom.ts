@@ -45,6 +45,7 @@ export class DungeonRoom extends Room<DungeonState> {
       onCombatText: (event) => this.broadcast("combat_text", event),
       // No collidableStructures - a dungeon has none of its own, and STRUCTURES is the overworld's
       // global list at unrelated overworld coordinates (see WorldRoom's own comment on this flag).
+      // No blockWaterTerrain either - a dungeon has no hex terrain of its own.
       enemiesWander: true,
     });
 
