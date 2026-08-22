@@ -13,6 +13,9 @@ const enemyTypeSchema = z.object({
   // behavior, to keep this one schema simple; CombatEngine casts to the specific shape it
   // expects based on the enemy's behavior at read time.
   stats: z.record(z.string(), z.number()),
+  // Picks a character model (see client/src/game/Enemy.ts's MODEL_CONFIG) - unset/unrecognized
+  // falls back to the original shared goblin, same optionality as structures' model_id.
+  model_id: z.string().max(64).nullable().optional(),
 });
 const updateSchema = enemyTypeSchema.omit({ id: true }).partial();
 

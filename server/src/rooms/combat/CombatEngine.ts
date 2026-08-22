@@ -22,6 +22,7 @@ import {
   ENEMY_WANDER_PAUSE_MS,
   ENEMY_WANDER_RADIUS,
   ENEMY_WANDER_SPEED,
+  FURNITURE,
   INTERRUPT_LOCKOUT_MS,
   InputMessage,
   MAIN_STAT_PER_LEVEL,
@@ -34,6 +35,7 @@ import {
   hasLineOfSight,
   isHexPassable,
   PlayerStats,
+  resolveFurnitureCollisions,
   resolveStructureCollisions,
   SPELLS,
   SpellDef,
@@ -133,6 +135,13 @@ export interface CombatEngineConfig {
   // Only the overworld has a hex terrain layer (see HexGround.ts) - WorldRoom passes true,
   // DungeonRoom leaves this unset (a dungeon has no hex terrain of its own).
   blockWaterTerrain?: boolean;
+  // Gates movement collision against FURNITURE (see shared's FURNITURE_FOOTPRINT/
+  // getFurnitureColliders for which kinds actually have a collider). A separate flag from
+  // collidableStructures since the shared FURNITURE array is itself already overworld-only (see
+  // reloadGameContent's own filter), but kept distinct rather than reusing collidableStructures so
+  // this reads as what it actually gates, not "structures" - WorldRoom passes true, DungeonRoom
+  // leaves this unset.
+  collidableFurniture?: boolean;
 }
 
 // Slides a proposed move along whichever single axis is still passable, rather than freezing dead
@@ -658,6 +667,11 @@ export class CombatEngine {
         nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
         nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
       }
+      if (this.config.collidableFurniture) {
+        const resolved = resolveFurnitureCollisions(nextX, nextZ, FURNITURE);
+        nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      }
 
       if (this.config.blockWaterTerrain) {
         const slid = resolveWaterSlide(player.x, player.z, nextX, nextZ);
@@ -780,6 +794,12 @@ export class CombatEngine {
 
     if (this.config.collidableStructures) {
       const resolved = resolveStructureCollisions(nextX, nextZ, STRUCTURES);
+      nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+    }
+
+    if (this.config.collidableFurniture) {
+      const resolved = resolveFurnitureCollisions(nextX, nextZ, FURNITURE);
       nextX = clamp(resolved.x, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
       nextZ = clamp(resolved.z, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
     }

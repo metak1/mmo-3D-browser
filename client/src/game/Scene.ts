@@ -30,12 +30,11 @@ export class GameScene {
     container: HTMLElement,
     private readonly isDungeon = false,
   ) {
-    // Nothing has real elevation anymore: dungeon floors never did (flat quad), and the overworld
-    // floor is now a mosaic of discrete hex tiles (see HexGround.ts) rather than one continuously
-    // deformable mesh - placing each rigid tile at its own noise-sampled height left visible gaps
-    // wherever neighboring tiles landed at different elevations. Keeping every entity's
-    // getTerrainHeight() call in lockstep with the flat floor that's actually drawn.
-    setTerrainFlat(true);
+    // Dungeon floors have no elevation at all (flat quad) - the overworld's hex ground (see
+    // HexGround.ts) does now, but safely: a discrete integer level per cell with real ramp
+    // geometry bridging the one boundary case, not arbitrary continuous height sampled
+    // independently per rigid tile (which is what used to leave visible gaps between neighbors).
+    setTerrainFlat(isDungeon);
 
     // High-DPI screens (e.g. Retina) report devicePixelRatio 2-3, which multiplies
     // the number of pixels the GPU has to shade every frame. Cap it, and skip MSAA

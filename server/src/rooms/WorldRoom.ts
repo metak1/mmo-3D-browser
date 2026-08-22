@@ -89,6 +89,7 @@ export class WorldRoom extends Room<WorldState> {
       collidableStructures: true,
       enemiesWander: true,
       blockWaterTerrain: true,
+      collidableFurniture: true,
     });
     this.trade = new TradeManager(this);
 

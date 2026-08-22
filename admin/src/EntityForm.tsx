@@ -116,6 +116,24 @@ function renderField(
     case "boolean":
       return <input type="checkbox" checked={Boolean(value)} onChange={(e) => setValue(e.target.checked)} />;
     case "select":
+      if (field.numberOptions) {
+        return (
+          <select
+            value={typeof value === "number" ? String(value) : ""}
+            onChange={(e) => setValue(e.target.value === "" ? undefined : Number(e.target.value))}
+            required={!field.optional}
+          >
+            <option value="" disabled>
+              Select…
+            </option>
+            {field.numberOptions.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        );
+      }
       return (
         <select
           value={typeof value === "string" ? value : ""}

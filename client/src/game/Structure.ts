@@ -18,13 +18,105 @@ const FLOOR_COLOR = 0x6b4a30;
 // wall/door/tower/gate's procedural shapes (see StructureKind's doc comment). Each model's native
 // export scale is tiny (a "home" is under a meter tall - built for a tabletop-hex-tile scale, not
 // this game's ~1-unit-per-meter convention), hence targetHeight/fitHeight, same reasoning as every
-// other real model in this codebase (see models.ts's fitHeight comment).
+// other real model in this codebase (see models.ts's fitHeight comment). Every building/color
+// variant the pack ships (blue/green/red/yellow team colors, plus the neutral bridges/walls/fences/
+// scaffolding/etc.) is registered here - targetHeight is each model's own native bbox height scaled
+// by a category ratio (~3.5x for regular buildings, ~7x for towers, ~2x for wall/fence segments),
+// not hand-tuned per model; the fences/walls here are visual-only (see StructureKind's own wall/
+// door/tower/gate kinds for the ones that actually collide).
 const BUILDING_MODELS: Record<string, { path: string; targetHeight: number }> = {
-  building_home_A_blue: { path: "/models/hexagon/building_home_A_blue.gltf", targetHeight: 3.4 },
-  building_home_B_blue: { path: "/models/hexagon/building_home_B_blue.gltf", targetHeight: 4 },
-  building_market_blue: { path: "/models/hexagon/building_market_blue.gltf", targetHeight: 3.4 },
-  building_blacksmith_blue: { path: "/models/hexagon/building_blacksmith_blue.gltf", targetHeight: 3.6 },
-  building_tower_A_blue: { path: "/models/hexagon/building_tower_A_blue.gltf", targetHeight: 6.5 },
+  building_archeryrange_blue: { path: "/models/hexagon/building_archeryrange_blue.gltf", targetHeight: 6.27 },
+  building_barracks_blue: { path: "/models/hexagon/building_barracks_blue.gltf", targetHeight: 5.74 },
+  building_blacksmith_blue: { path: "/models/hexagon/building_blacksmith_blue.gltf", targetHeight: 3.45 },
+  building_castle_blue: { path: "/models/hexagon/building_castle_blue.gltf", targetHeight: 11.94 },
+  building_church_blue: { path: "/models/hexagon/building_church_blue.gltf", targetHeight: 5.76 },
+  building_home_A_blue: { path: "/models/hexagon/building_home_A_blue.gltf", targetHeight: 3.26 },
+  building_home_B_blue: { path: "/models/hexagon/building_home_B_blue.gltf", targetHeight: 4.48 },
+  building_lumbermill_blue: { path: "/models/hexagon/building_lumbermill_blue.gltf", targetHeight: 1.71 },
+  building_market_blue: { path: "/models/hexagon/building_market_blue.gltf", targetHeight: 3.44 },
+  building_mine_blue: { path: "/models/hexagon/building_mine_blue.gltf", targetHeight: 3.98 },
+  building_tavern_blue: { path: "/models/hexagon/building_tavern_blue.gltf", targetHeight: 4.89 },
+  building_tower_A_blue: { path: "/models/hexagon/building_tower_A_blue.gltf", targetHeight: 6.4 },
+  building_tower_base_blue: { path: "/models/hexagon/building_tower_base_blue.gltf", targetHeight: 10.5 },
+  building_tower_B_blue: { path: "/models/hexagon/building_tower_B_blue.gltf", targetHeight: 8.45 },
+  building_tower_catapult_blue: { path: "/models/hexagon/building_tower_catapult_blue.gltf", targetHeight: 1.62 },
+  building_watermill_blue: { path: "/models/hexagon/building_watermill_blue.gltf", targetHeight: 3.68 },
+  building_well_blue: { path: "/models/hexagon/building_well_blue.gltf", targetHeight: 2.07 },
+  building_windmill_blue: { path: "/models/hexagon/building_windmill_blue.gltf", targetHeight: 3.51 },
+  building_archeryrange_green: { path: "/models/hexagon/building_archeryrange_green.gltf", targetHeight: 6.27 },
+  building_barracks_green: { path: "/models/hexagon/building_barracks_green.gltf", targetHeight: 5.74 },
+  building_blacksmith_green: { path: "/models/hexagon/building_blacksmith_green.gltf", targetHeight: 3.45 },
+  building_castle_green: { path: "/models/hexagon/building_castle_green.gltf", targetHeight: 11.94 },
+  building_church_green: { path: "/models/hexagon/building_church_green.gltf", targetHeight: 5.76 },
+  building_home_A_green: { path: "/models/hexagon/building_home_A_green.gltf", targetHeight: 3.26 },
+  building_home_B_green: { path: "/models/hexagon/building_home_B_green.gltf", targetHeight: 4.48 },
+  building_lumbermill_green: { path: "/models/hexagon/building_lumbermill_green.gltf", targetHeight: 1.71 },
+  building_market_green: { path: "/models/hexagon/building_market_green.gltf", targetHeight: 3.44 },
+  building_mine_green: { path: "/models/hexagon/building_mine_green.gltf", targetHeight: 3.98 },
+  building_tavern_green: { path: "/models/hexagon/building_tavern_green.gltf", targetHeight: 4.89 },
+  building_tower_A_green: { path: "/models/hexagon/building_tower_A_green.gltf", targetHeight: 6.4 },
+  building_tower_base_green: { path: "/models/hexagon/building_tower_base_green.gltf", targetHeight: 10.5 },
+  building_tower_B_green: { path: "/models/hexagon/building_tower_B_green.gltf", targetHeight: 8.45 },
+  building_tower_catapult_green: { path: "/models/hexagon/building_tower_catapult_green.gltf", targetHeight: 1.62 },
+  building_watermill_green: { path: "/models/hexagon/building_watermill_green.gltf", targetHeight: 3.68 },
+  building_well_green: { path: "/models/hexagon/building_well_green.gltf", targetHeight: 2.07 },
+  building_windmill_green: { path: "/models/hexagon/building_windmill_green.gltf", targetHeight: 3.51 },
+  building_archeryrange_red: { path: "/models/hexagon/building_archeryrange_red.gltf", targetHeight: 6.27 },
+  building_barracks_red: { path: "/models/hexagon/building_barracks_red.gltf", targetHeight: 5.74 },
+  building_blacksmith_red: { path: "/models/hexagon/building_blacksmith_red.gltf", targetHeight: 3.45 },
+  building_castle_red: { path: "/models/hexagon/building_castle_red.gltf", targetHeight: 11.94 },
+  building_church_red: { path: "/models/hexagon/building_church_red.gltf", targetHeight: 5.76 },
+  building_home_A_red: { path: "/models/hexagon/building_home_A_red.gltf", targetHeight: 3.26 },
+  building_home_B_red: { path: "/models/hexagon/building_home_B_red.gltf", targetHeight: 4.48 },
+  building_lumbermill_red: { path: "/models/hexagon/building_lumbermill_red.gltf", targetHeight: 1.71 },
+  building_market_red: { path: "/models/hexagon/building_market_red.gltf", targetHeight: 3.44 },
+  building_mine_red: { path: "/models/hexagon/building_mine_red.gltf", targetHeight: 3.98 },
+  building_tavern_red: { path: "/models/hexagon/building_tavern_red.gltf", targetHeight: 4.89 },
+  building_tower_A_red: { path: "/models/hexagon/building_tower_A_red.gltf", targetHeight: 6.4 },
+  building_tower_base_red: { path: "/models/hexagon/building_tower_base_red.gltf", targetHeight: 10.5 },
+  building_tower_B_red: { path: "/models/hexagon/building_tower_B_red.gltf", targetHeight: 8.45 },
+  building_tower_catapult_red: { path: "/models/hexagon/building_tower_catapult_red.gltf", targetHeight: 1.62 },
+  building_watermill_red: { path: "/models/hexagon/building_watermill_red.gltf", targetHeight: 3.68 },
+  building_well_red: { path: "/models/hexagon/building_well_red.gltf", targetHeight: 2.07 },
+  building_windmill_red: { path: "/models/hexagon/building_windmill_red.gltf", targetHeight: 3.51 },
+  building_archeryrange_yellow: { path: "/models/hexagon/building_archeryrange_yellow.gltf", targetHeight: 6.27 },
+  building_barracks_yellow: { path: "/models/hexagon/building_barracks_yellow.gltf", targetHeight: 5.74 },
+  building_blacksmith_yellow: { path: "/models/hexagon/building_blacksmith_yellow.gltf", targetHeight: 3.45 },
+  building_castle_yellow: { path: "/models/hexagon/building_castle_yellow.gltf", targetHeight: 11.94 },
+  building_church_yellow: { path: "/models/hexagon/building_church_yellow.gltf", targetHeight: 5.76 },
+  building_home_A_yellow: { path: "/models/hexagon/building_home_A_yellow.gltf", targetHeight: 3.26 },
+  building_home_B_yellow: { path: "/models/hexagon/building_home_B_yellow.gltf", targetHeight: 4.48 },
+  building_lumbermill_yellow: { path: "/models/hexagon/building_lumbermill_yellow.gltf", targetHeight: 1.71 },
+  building_market_yellow: { path: "/models/hexagon/building_market_yellow.gltf", targetHeight: 3.44 },
+  building_mine_yellow: { path: "/models/hexagon/building_mine_yellow.gltf", targetHeight: 3.98 },
+  building_tavern_yellow: { path: "/models/hexagon/building_tavern_yellow.gltf", targetHeight: 4.89 },
+  building_tower_A_yellow: { path: "/models/hexagon/building_tower_A_yellow.gltf", targetHeight: 6.4 },
+  building_tower_base_yellow: { path: "/models/hexagon/building_tower_base_yellow.gltf", targetHeight: 10.5 },
+  building_tower_B_yellow: { path: "/models/hexagon/building_tower_B_yellow.gltf", targetHeight: 8.45 },
+  building_tower_catapult_yellow: { path: "/models/hexagon/building_tower_catapult_yellow.gltf", targetHeight: 1.62 },
+  building_watermill_yellow: { path: "/models/hexagon/building_watermill_yellow.gltf", targetHeight: 3.68 },
+  building_well_yellow: { path: "/models/hexagon/building_well_yellow.gltf", targetHeight: 2.07 },
+  building_windmill_yellow: { path: "/models/hexagon/building_windmill_yellow.gltf", targetHeight: 3.51 },
+  building_bridge_A: { path: "/models/hexagon/building_bridge_A.gltf", targetHeight: 3.13 },
+  building_bridge_B: { path: "/models/hexagon/building_bridge_B.gltf", targetHeight: 3.13 },
+  building_destroyed: { path: "/models/hexagon/building_destroyed.gltf", targetHeight: 2.48 },
+  building_dirt: { path: "/models/hexagon/building_dirt.gltf", targetHeight: 0.22 },
+  building_grain: { path: "/models/hexagon/building_grain.gltf", targetHeight: 0.98 },
+  building_scaffolding: { path: "/models/hexagon/building_scaffolding.gltf", targetHeight: 3.25 },
+  building_stage_A: { path: "/models/hexagon/building_stage_A.gltf", targetHeight: 0.71 },
+  building_stage_B: { path: "/models/hexagon/building_stage_B.gltf", targetHeight: 1.59 },
+  building_stage_C: { path: "/models/hexagon/building_stage_C.gltf", targetHeight: 2.46 },
+  fence_stone_straight: { path: "/models/hexagon/fence_stone_straight.gltf", targetHeight: 0.54 },
+  fence_stone_straight_gate: { path: "/models/hexagon/fence_stone_straight_gate.gltf", targetHeight: 0.59 },
+  fence_wood_straight: { path: "/models/hexagon/fence_wood_straight.gltf", targetHeight: 1.1 },
+  fence_wood_straight_gate: { path: "/models/hexagon/fence_wood_straight_gate.gltf", targetHeight: 0.89 },
+  wall_corner_A_gate: { path: "/models/hexagon/wall_corner_A_gate.gltf", targetHeight: 1.58 },
+  wall_corner_A_inside: { path: "/models/hexagon/wall_corner_A_inside.gltf", targetHeight: 2.2 },
+  wall_corner_A_outside: { path: "/models/hexagon/wall_corner_A_outside.gltf", targetHeight: 2.2 },
+  wall_corner_B_inside: { path: "/models/hexagon/wall_corner_B_inside.gltf", targetHeight: 2.2 },
+  wall_corner_B_outside: { path: "/models/hexagon/wall_corner_B_outside.gltf", targetHeight: 2.2 },
+  wall_straight: { path: "/models/hexagon/wall_straight.gltf", targetHeight: 2.2 },
+  wall_straight_gate: { path: "/models/hexagon/wall_straight_gate.gltf", targetHeight: 1.58 },
 };
 
 // How translucent an enclosed room's roof gets once the player is well inside its footprint, and
@@ -130,10 +222,12 @@ function buildGate(def: StructureDef): BuiltStructure {
 // everything else (position/size/color/rotation) is admin content. "building" is the exception
 // (see BUILDING_MODELS/StructureKind's doc comment), loaded asynchronously like every other real
 // model in this codebase - the group starts empty and gets the model added once it resolves.
-// Walls/pillars are solid and actually block the player server-side (see shared's
-// getStructureColliders/resolveStructureCollisions) - a door never blocks, and neither does a
-// building (no colliders defined for that kind - see getStructureColliders' own comment). A room's
-// floor/roof aren't part of any single StructureDef/StructureAvatar - see StructureEnclosureAvatar
+// Walls/pillars/buildings are solid and actually block the player server-side (see shared's
+// getStructureColliders/resolveStructureCollisions/BUILDING_FOOTPRINT) - a door never blocks,
+// and neither does a building whose modelId has no BUILDING_FOOTPRINT entry (a bridge, a flat
+// ground decal, or a piece with its own passable gate opening - see BUILDING_FOOTPRINT's own doc
+// comment for the full list). A room's floor/roof aren't part of any single StructureDef/
+// StructureAvatar - see StructureEnclosureAvatar
 // below, built separately from findStructureLoops over the whole structure list (which "building"
 // never participates in either).
 export class StructureAvatar {

@@ -3,7 +3,7 @@ import { ENEMY_CHASE_SPEED, EnemyBehavior, getTerrainHeight } from "@mmo/shared"
 import { AoeCircle } from "./AoeCircle";
 import { DEFAULT_Y_OFFSET, HealthBar } from "./HealthBar";
 import { NameLabel } from "./NameLabel";
-import { fitHeight, ModelAnimator, spawnModel, tintModel } from "./models";
+import { fitHeight, ModelAnimator, spawnModel, spawnRiggedModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
 
 const INTERPOLATION_LERP = 0.25;
@@ -49,6 +49,22 @@ const KIND_HEIGHT: Record<EnemyBehavior, number> = {
   boss: 3,
 };
 
+// An EnemyTypeDef can opt into a specific character model instead of the shared per-behavior
+// goblin above (see shared/types.ts's EnemyTypeDef.modelId) - KayKit's Skeleton pack, whose 4
+// character meshes ship with no baked animations of their own (unlike goblin.glb) and instead
+// retarget the same shared Rig_Medium clip library Player.ts/Npc.ts already use for the v2
+// Adventurers rig (see models.ts's spawnRiggedModel doc comment - this works because every
+// character built on Rig_Medium has identical bone names).
+const RIG_IDLE = { path: "/models/animations/Rig_Medium_General.glb", clip: "Idle_A" };
+const RIG_WALK = { path: "/models/animations/Rig_Medium_MovementBasic.glb", clip: "Walking_A" };
+
+const MODEL_CONFIG: Record<string, { meshPath: string; targetHeight: number }> = {
+  skeletonWarrior: { meshPath: "/models/skeletons/Skeleton_Warrior.glb", targetHeight: 1.8 },
+  skeletonMage: { meshPath: "/models/skeletons/Skeleton_Mage.glb", targetHeight: 1.7 },
+  skeletonRogue: { meshPath: "/models/skeletons/Skeleton_Rogue.glb", targetHeight: 1.75 },
+  skeletonMinion: { meshPath: "/models/skeletons/Skeleton_Minion.glb", targetHeight: 1.4 },
+};
+
 const BOSS_PHASE_2_COLOR = 0xe0503c;
 
 const SELECTION_RING_COLOR = 0xf5d76e;
@@ -70,7 +86,7 @@ export class EnemyAvatar {
   private currentRotationY = 0;
   private measuredSpeed = 0;
 
-  constructor(kind: EnemyBehavior, name: string, aggressive: boolean) {
+  constructor(kind: EnemyBehavior, name: string, aggressive: boolean, modelId?: string) {
     this.kind = kind;
     this.isBoss = kind === "boss";
     const healthBarYOffset = this.isBoss ? BOSS_HEALTH_BAR_Y_OFFSET : DEFAULT_Y_OFFSET;
@@ -83,9 +99,16 @@ export class EnemyAvatar {
     if (!this.isBoss) this.healthBar.setTypeColor(aggressive);
     this.nameLabel = new NameLabel(name, healthBarYOffset + NAME_LABEL_GAP);
 
-    spawnModel(MODEL_PATH, MODEL_CLIPS).then(({ object, animator }) => {
-      fitHeight(object, KIND_HEIGHT[kind]);
-      tintModel(object, identityTint(KIND_COLOR[kind]));
+    // An unrecognized/unset modelId falls back to the original shared goblin exactly as before.
+    // Unlike goblin (one grey mesh, differentiated only by tint), a modelId'd character already
+    // has its own real texture - tinting it would flatten that away, so it's left untouched here.
+    const modelConfig = modelId ? MODEL_CONFIG[modelId] : undefined;
+    const spawn = modelConfig
+      ? spawnRiggedModel(modelConfig.meshPath, RIG_IDLE, RIG_WALK)
+      : spawnModel(MODEL_PATH, MODEL_CLIPS);
+    spawn.then(({ object, animator }) => {
+      fitHeight(object, modelConfig?.targetHeight ?? KIND_HEIGHT[kind]);
+      if (!modelConfig) tintModel(object, identityTint(KIND_COLOR[kind]));
       this.group.add(object);
       this.modelObject = object;
       this.animator = animator;

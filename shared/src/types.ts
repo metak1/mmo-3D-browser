@@ -4,7 +4,7 @@
 // never at module top-level. Re-exported (in addition to imported - `export *` alone doesn't create
 // a local binding this file can call) so @mmo/shared consumers (shared/package.json's "main" only
 // resolves this file) see hex.ts's public API too.
-import { resetHexTerrainCache } from "./hex.js";
+import { resetHexTerrainCache, getHexElevation, HEX_ELEVATION_STEP_WORLD, HexTerrainKind } from "./hex.js";
 export * from "./hex.js";
 
 export const WORLD_ROOM_NAME = "world_room";
@@ -185,6 +185,11 @@ export interface EnemyTypeDef {
   xpReward: number;
   goldReward: number;
   stats: EnemyStats;
+  // Picks a specific character model (see client/src/game/Enemy.ts's MODEL_CONFIG) instead of the
+  // single shared goblin every enemy type used before this existed - mirrors StructureDef.modelId.
+  // Unset (or unrecognized) falls back to the original per-behavior goblin, so every enemy type
+  // that predates this field keeps rendering exactly as it did before.
+  modelId?: string;
 }
 
 export let ENEMY_TYPES: Record<EnemyTypeId, EnemyTypeDef> = {};
@@ -525,6 +530,24 @@ export interface WaypointDef {
 
 export let WAYPOINTS: WaypointDef[] = [];
 
+// A single hand-painted hex cell (admin/src/mapEditor's tile palette) that overrides whatever
+// shared/src/hex.ts's procedural classifier would otherwise compute for that cell - see
+// classify()'s "overrides win first" ordering. Most cells have no row here at all; this only
+// exists for the ones an admin has actually painted.
+export interface HexTileOverrideDef {
+  id: string;
+  mapId: MapId;
+  q: number;
+  r: number;
+  kind: HexTerrainKind;
+  // Only meaningful for the coastCornerLight/coastNarrowEdge/coastHalf/coastMostly kinds - every
+  // other kind ignores it (grass/water are rotationally uniform, road/river compute their own
+  // piece rotation from neighbor connectivity). Defaults to 0 when absent.
+  rotation?: number;
+}
+
+export let HEX_TILE_OVERRIDES: HexTileOverrideDef[] = [];
+
 export interface WaypointTravelMessage {
   targetWaypointId: string;
 }
@@ -678,9 +701,9 @@ export let SPAWN_POINTS: EnemySpawnDef[] = [];
 // "building" is the one exception - a single pre-made exterior model (see modelId below and
 // client/src/game/Structure.ts's BUILDING_MODELS) placed and rotated like any other structure, but
 // with no interior to enter and no wall/door pieces of its own, so it never participates in
-// findStructureLoops and (see getStructureColliders' default case) has no collision either -
-// walking through it is an accepted tradeoff of using an off-the-shelf whole-building asset
-// instead of hand-placed walls.
+// findStructureLoops. It still blocks movement like every other structure kind - see
+// getStructureColliders' "building" case and BUILDING_FOOTPRINT below - just via a single
+// computed-footprint box per model instead of a hand-placed wall/pillar shape.
 export type StructureKind = "wall" | "door" | "tower" | "gate" | "building";
 
 export interface StructureDef {
@@ -701,11 +724,95 @@ export interface StructureDef {
 
 export let STRUCTURES: StructureDef[] = [];
 
-// Purely decorative dressing for a room's interior (client/src/game/Furniture.ts) - unlike a
-// structure, furniture never collides and has no admin-set size, just a position/rotation/color
-// per fixed-shape kind (mirrors how an NPC has no size either). No server-side meaning at all;
-// it exists purely so an enclosed room (see StructureLoop) doesn't read as an empty box.
-export type FurnitureKind = "table" | "chair" | "barrel" | "crate" | "bookshelf";
+// Mostly decorative dressing for a room's interior (client/src/game/Furniture.ts) - unlike a
+// structure, furniture has no admin-set size, just a position/rotation/color per fixed-shape kind
+// (mirrors how an NPC has no size either), and almost every kind has no server-side meaning at
+// all beyond making an enclosed room (see StructureLoop) not read as an empty box.
+// hill/rock*/tree*/mountain*/hills*/clouds/waterlily/waterplant are outdoor nature decoration
+// (KayKit's Medieval Hexagon Pack, not the Dungeon Pack the indoor kinds use) - structurally
+// identical to the indoor kinds (same table/route/placement pipeline), just a different admin
+// palette section and asset source. The hex* and other lowercase-prefixed kinds below (hexBarrel,
+// flagBlue, tent, etc.) are the same pack's own standalone prop set - named distinctly from the
+// Dungeon Pack's "barrel"/"crate" so the two packs' visually different versions of the same object
+// never collide as FurnitureKind values.
+// Every outdoor decoration kind above (rock*/tree*/hill*/mountain* and the KayKit standalone prop
+// set) blocks movement - see FURNITURE_FOOTPRINT/getFurnitureColliders below. The indoor kinds
+// (table/chair/barrel/crate/bookshelf) and the floating sky decoration (cloudBig/cloudSmall) are
+// the exceptions and stay walk-through - see FURNITURE_FOOTPRINT's own doc comment for why.
+export type FurnitureKind =
+  | "table"
+  | "chair"
+  | "barrel"
+  | "crate"
+  | "bookshelf"
+  | "hill"
+  | "hillB"
+  | "hillC"
+  | "hillsA"
+  | "hillsATrees"
+  | "hillsB"
+  | "hillsBTrees"
+  | "hillsC"
+  | "hillsCTrees"
+  | "rock"
+  | "rockB"
+  | "rockC"
+  | "rockD"
+  | "rockE"
+  | "tree"
+  | "treeB"
+  | "treeACut"
+  | "treeBCut"
+  | "treesACut"
+  | "treesALarge"
+  | "treesAMedium"
+  | "treesASmall"
+  | "treesBCut"
+  | "treesBLarge"
+  | "treesBMedium"
+  | "treesBSmall"
+  | "mountainA"
+  | "mountainB"
+  | "mountainC"
+  | "mountainAGrass"
+  | "mountainAGrassTrees"
+  | "mountainBGrass"
+  | "mountainBGrassTrees"
+  | "mountainCGrass"
+  | "mountainCGrassTrees"
+  | "cloudBig"
+  | "cloudSmall"
+  | "waterlilyA"
+  | "waterlilyB"
+  | "waterplantA"
+  | "waterplantB"
+  | "waterplantC"
+  | "hexBarrel"
+  | "bucketArrows"
+  | "bucketEmpty"
+  | "bucketWater"
+  | "hexCrateBigA"
+  | "hexCrateSmallA"
+  | "hexCrateBigB"
+  | "hexCrateSmallB"
+  | "hexCrateLongA"
+  | "hexCrateLongB"
+  | "hexCrateLongC"
+  | "hexCrateLongEmpty"
+  | "hexCrateOpen"
+  | "flagBlue"
+  | "flagGreen"
+  | "flagRed"
+  | "flagYellow"
+  | "ladder"
+  | "pallet"
+  | "resourceLumber"
+  | "resourceStone"
+  | "sack"
+  | "archeryTarget"
+  | "tent"
+  | "weaponrack"
+  | "wheelbarrow";
 
 export interface FurnitureDef {
   id: string;
@@ -739,13 +846,114 @@ export interface StructureCollider {
   halfDepth: number;
 }
 
+// A single AABB per building model, in local (unrotated, pre-scale) space, approximating its real
+// footprint - computed once offline from each GLTF's own native bounding box (same technique as
+// client/src/game/Structure.ts's BUILDING_MODELS targetHeight), scaled by that same
+// targetHeight/nativeHeight ratio fitHeight applies visually, then shrunk 15% (same "kept slightly
+// inside the visual model" fudge shared's FURNITURE_FOOTPRINT below also uses) so the collision
+// edge never reads as bigger than what's drawn. Deliberately missing 8 of the 92 models, which
+// stay walk-through (no entry -> getStructureColliders' building case returns []):
+// building_bridge_A/B (spans a river - meant to be walked over, not around), building_dirt/grain
+// (flat ground decals with no real height, not obstacles), and the 4 "*_gate" pieces
+// (fence_stone_straight_gate, fence_wood_straight_gate, wall_corner_A_gate, wall_straight_gate -
+// each has a real passable opening built into its geometry that a single box can't represent, so
+// this follows the same "a gate/door never blocks" rule the door/gate StructureKinds already use
+// rather than wall off the very opening the piece exists to provide).
+export const BUILDING_FOOTPRINT: Record<string, { halfWidth: number; halfDepth: number }> = {
+  building_archeryrange_blue: { halfWidth: 2.485, halfDepth: 2.306 },
+  building_barracks_blue: { halfWidth: 2.142, halfDepth: 2.329 },
+  building_blacksmith_blue: { halfWidth: 1.916, halfDepth: 1.853 },
+  building_castle_blue: { halfWidth: 2.519, halfDepth: 2.877 },
+  building_church_blue: { halfWidth: 1.531, halfDepth: 1.719 },
+  building_home_A_blue: { halfWidth: 1.18, halfDepth: 1.272 },
+  building_home_B_blue: { halfWidth: 1.301, halfDepth: 1.634 },
+  building_lumbermill_blue: { halfWidth: 0.582, halfDepth: 0.506 },
+  building_market_blue: { halfWidth: 2.68, halfDepth: 1.959 },
+  building_mine_blue: { halfWidth: 2.389, halfDepth: 2.857 },
+  building_tavern_blue: { halfWidth: 1.744, halfDepth: 1.983 },
+  building_tower_A_blue: { halfWidth: 1.233, halfDepth: 1.431 },
+  building_tower_base_blue: { halfWidth: 2.766, halfDepth: 3.306 },
+  building_tower_B_blue: { halfWidth: 1.73, halfDepth: 1.998 },
+  building_tower_catapult_blue: { halfWidth: 0.326, halfDepth: 0.457 },
+  building_watermill_blue: { halfWidth: 1.047, halfDepth: 1.233 },
+  building_well_blue: { halfWidth: 0.694, halfDepth: 0.8 },
+  building_windmill_blue: { halfWidth: 1.152, halfDepth: 0.835 },
+  building_archeryrange_green: { halfWidth: 2.485, halfDepth: 2.306 },
+  building_barracks_green: { halfWidth: 2.142, halfDepth: 2.329 },
+  building_blacksmith_green: { halfWidth: 1.916, halfDepth: 1.853 },
+  building_castle_green: { halfWidth: 2.519, halfDepth: 2.877 },
+  building_church_green: { halfWidth: 1.531, halfDepth: 1.719 },
+  building_home_A_green: { halfWidth: 1.18, halfDepth: 1.272 },
+  building_home_B_green: { halfWidth: 1.301, halfDepth: 1.634 },
+  building_lumbermill_green: { halfWidth: 0.582, halfDepth: 0.506 },
+  building_market_green: { halfWidth: 2.68, halfDepth: 1.959 },
+  building_mine_green: { halfWidth: 2.389, halfDepth: 2.857 },
+  building_tavern_green: { halfWidth: 1.744, halfDepth: 1.983 },
+  building_tower_A_green: { halfWidth: 1.233, halfDepth: 1.431 },
+  building_tower_base_green: { halfWidth: 2.766, halfDepth: 3.306 },
+  building_tower_B_green: { halfWidth: 1.73, halfDepth: 1.998 },
+  building_tower_catapult_green: { halfWidth: 0.326, halfDepth: 0.457 },
+  building_watermill_green: { halfWidth: 1.047, halfDepth: 1.233 },
+  building_well_green: { halfWidth: 0.694, halfDepth: 0.8 },
+  building_windmill_green: { halfWidth: 1.152, halfDepth: 0.835 },
+  building_archeryrange_red: { halfWidth: 2.485, halfDepth: 2.306 },
+  building_barracks_red: { halfWidth: 2.142, halfDepth: 2.329 },
+  building_blacksmith_red: { halfWidth: 1.916, halfDepth: 1.853 },
+  building_castle_red: { halfWidth: 2.519, halfDepth: 2.877 },
+  building_church_red: { halfWidth: 1.531, halfDepth: 1.719 },
+  building_home_A_red: { halfWidth: 1.18, halfDepth: 1.272 },
+  building_home_B_red: { halfWidth: 1.301, halfDepth: 1.634 },
+  building_lumbermill_red: { halfWidth: 0.582, halfDepth: 0.506 },
+  building_market_red: { halfWidth: 2.68, halfDepth: 1.959 },
+  building_mine_red: { halfWidth: 2.389, halfDepth: 2.857 },
+  building_tavern_red: { halfWidth: 1.744, halfDepth: 1.983 },
+  building_tower_A_red: { halfWidth: 1.233, halfDepth: 1.431 },
+  building_tower_base_red: { halfWidth: 2.766, halfDepth: 3.306 },
+  building_tower_B_red: { halfWidth: 1.73, halfDepth: 1.998 },
+  building_tower_catapult_red: { halfWidth: 0.326, halfDepth: 0.457 },
+  building_watermill_red: { halfWidth: 1.047, halfDepth: 1.233 },
+  building_well_red: { halfWidth: 0.694, halfDepth: 0.8 },
+  building_windmill_red: { halfWidth: 1.152, halfDepth: 0.835 },
+  building_archeryrange_yellow: { halfWidth: 2.485, halfDepth: 2.306 },
+  building_barracks_yellow: { halfWidth: 2.142, halfDepth: 2.329 },
+  building_blacksmith_yellow: { halfWidth: 1.916, halfDepth: 1.853 },
+  building_castle_yellow: { halfWidth: 2.519, halfDepth: 2.877 },
+  building_church_yellow: { halfWidth: 1.531, halfDepth: 1.719 },
+  building_home_A_yellow: { halfWidth: 1.18, halfDepth: 1.272 },
+  building_home_B_yellow: { halfWidth: 1.301, halfDepth: 1.634 },
+  building_lumbermill_yellow: { halfWidth: 0.582, halfDepth: 0.506 },
+  building_market_yellow: { halfWidth: 2.68, halfDepth: 1.959 },
+  building_mine_yellow: { halfWidth: 2.389, halfDepth: 2.857 },
+  building_tavern_yellow: { halfWidth: 1.744, halfDepth: 1.983 },
+  building_tower_A_yellow: { halfWidth: 1.233, halfDepth: 1.431 },
+  building_tower_base_yellow: { halfWidth: 2.766, halfDepth: 3.306 },
+  building_tower_B_yellow: { halfWidth: 1.73, halfDepth: 1.998 },
+  building_tower_catapult_yellow: { halfWidth: 0.326, halfDepth: 0.457 },
+  building_watermill_yellow: { halfWidth: 1.047, halfDepth: 1.233 },
+  building_well_yellow: { halfWidth: 0.694, halfDepth: 0.8 },
+  building_windmill_yellow: { halfWidth: 1.152, halfDepth: 0.835 },
+  building_destroyed: { halfWidth: 1.632, halfDepth: 1.385 },
+  building_scaffolding: { halfWidth: 2.021, halfDepth: 2.243 },
+  building_stage_A: { halfWidth: 1.105, halfDepth: 0.924 },
+  building_stage_B: { halfWidth: 1.084, halfDepth: 1.201 },
+  building_stage_C: { halfWidth: 1.23, halfDepth: 1.195 },
+  fence_stone_straight: { halfWidth: 0.171, halfDepth: 0.985 },
+  fence_wood_straight: { halfWidth: 0.085, halfDepth: 0.981 },
+  wall_corner_A_inside: { halfWidth: 1.569, halfDepth: 1.204 },
+  wall_corner_A_outside: { halfWidth: 1.496, halfDepth: 1.217 },
+  wall_corner_B_inside: { halfWidth: 0.818, halfDepth: 1.246 },
+  wall_corner_B_outside: { halfWidth: 0.819, halfDepth: 1.147 },
+  wall_straight: { halfWidth: 1.7, halfDepth: 0.68 },
+};
+
 // Solid rectangles for a structure, in local (unrotated) space - one entry per wall/pillar
 // segment, mirroring exactly what buildWall/buildDoor/buildTower/buildGate render as solid.
-// "building" deliberately falls through to `default` (no collider) - see StructureKind's own doc
-// comment on why a whole-building asset stays walk-through for now. That also covers the original
-// reason this branch existed: a runtime safety net for a stale/unrecognized kind value living in
-// the database mid-rollout of a StructureKind change, so a bad row makes that one structure
-// decoration-only instead of crashing every collision/line-of-sight check on the server.
+// "building" looks up its footprint by modelId in BUILDING_FOOTPRINT above (a whole-building asset
+// isn't a simple wall/pillar shape) - an unrecognized/missing modelId falls through to `default`,
+// which also covers the original reason that branch existed: a runtime safety net for a stale/
+// unrecognized kind value living in the database mid-rollout of a StructureKind change, so a bad
+// row makes that one structure decoration-only instead of crashing every collision/line-of-sight
+// check on the server.
 export function getStructureColliders(def: StructureDef): StructureCollider[] {
   switch (def.kind) {
     case "door":
@@ -763,15 +971,19 @@ export function getStructureColliders(def: StructureDef): StructureCollider[] {
         halfDepth: def.depth / 2,
       }));
     }
+    case "building": {
+      const footprint = def.modelId ? BUILDING_FOOTPRINT[def.modelId] : undefined;
+      return footprint ? [{ localX: 0, localZ: 0, halfWidth: footprint.halfWidth, halfDepth: footprint.halfDepth }] : [];
+    }
     default:
       return [];
   }
 }
 
 // Pushes (x, z) out of any structure it currently overlaps, treating the mover as a circle of
-// PLAYER_COLLISION_RADIUS. Server-authoritative (see CombatEngine.tickPlayerMovement) - purely
-// decorative structure kinds never reach here since getStructureColliders always returns at
-// least one solid rectangle per kind.
+// PLAYER_COLLISION_RADIUS. Server-authoritative (see CombatEngine.tickPlayerMovement) - a
+// structure with no colliders (a door, or a building with no BUILDING_FOOTPRINT entry) just never
+// matches anything in the inner loop below, same as any other structure the player isn't near.
 export function resolveStructureCollisions(x: number, z: number, structures: StructureDef[]): { x: number; z: number } {
   for (const def of structures) {
     const cosT = Math.cos(def.rotationY);
@@ -782,6 +994,125 @@ export function resolveStructureCollisions(x: number, z: number, structures: Str
     let localZ = dx * sinT + dz * cosT;
 
     for (const collider of getStructureColliders(def)) {
+      const closestX = Math.max(collider.localX - collider.halfWidth, Math.min(localX, collider.localX + collider.halfWidth));
+      const closestZ = Math.max(collider.localZ - collider.halfDepth, Math.min(localZ, collider.localZ + collider.halfDepth));
+      const diffX = localX - closestX;
+      const diffZ = localZ - closestZ;
+      const distSq = diffX * diffX + diffZ * diffZ;
+      if (distSq === 0 || distSq >= PLAYER_COLLISION_RADIUS * PLAYER_COLLISION_RADIUS) continue;
+
+      const dist = Math.sqrt(distSq);
+      const push = PLAYER_COLLISION_RADIUS - dist;
+      localX += (diffX / dist) * push;
+      localZ += (diffZ / dist) * push;
+    }
+
+    x = def.x + localX * cosT + localZ * sinT;
+    z = def.z - localX * sinT + localZ * cosT;
+  }
+  return { x, z };
+}
+
+// A single AABB per outdoor decoration kind, in local (unrotated, pre-scale) space - same
+// offline-computed-from-the-real-GLTF-bounding-box technique as BUILDING_FOOTPRINT above (see its
+// own doc comment for the exact method/fudge factor), so the collision box always matches what's
+// actually drawn regardless of how tall/wide/thin a given model is.
+// Deliberately covers only the outdoor Decoration/Nature/Props palette kinds (rock/tree/hill/
+// mountain variants and the KayKit standalone prop set) - table/chair/barrel/crate/bookshelf stay
+// walk-through (they're indoor dungeon-room dressing, where blocking every small prop would hurt
+// combat positioning in tight spaces) and so do cloudBig/cloudSmall (floating sky decoration - a
+// ground-plane collider under something that isn't touching the ground would feel broken). No
+// entry -> getFurnitureColliders' default case returns [], same non-blocking behavior as before.
+export const FURNITURE_FOOTPRINT: Record<string, { halfWidth: number; halfDepth: number }> = {
+  hill: { halfWidth: 1.842, halfDepth: 1.343 },
+  hillB: { halfWidth: 1.212, halfDepth: 1.657 },
+  hillC: { halfWidth: 0.888, halfDepth: 1.148 },
+  hillsA: { halfWidth: 2.442, halfDepth: 2.417 },
+  hillsATrees: { halfWidth: 1.68, halfDepth: 1.663 },
+  hillsB: { halfWidth: 4.107, halfDepth: 4.525 },
+  hillsBTrees: { halfWidth: 1.281, halfDepth: 1.411 },
+  hillsC: { halfWidth: 2.926, halfDepth: 2.823 },
+  hillsCTrees: { halfWidth: 1.614, halfDepth: 1.807 },
+  rock: { halfWidth: 0.914, halfDepth: 0.87 },
+  rockB: { halfWidth: 0.453, halfDepth: 0.394 },
+  rockC: { halfWidth: 0.375, halfDepth: 0.376 },
+  rockD: { halfWidth: 0.374, halfDepth: 0.326 },
+  rockE: { halfWidth: 0.533, halfDepth: 0.379 },
+  tree: { halfWidth: 0.449, halfDepth: 0.427 },
+  treeB: { halfWidth: 0.528, halfDepth: 0.555 },
+  treeACut: { halfWidth: 0.087, halfDepth: 0.083 },
+  treeBCut: { halfWidth: 0.13, halfDepth: 0.137 },
+  treesACut: { halfWidth: 1.349, halfDepth: 1.366 },
+  treesALarge: { halfWidth: 2.856, halfDepth: 2.887 },
+  treesAMedium: { halfWidth: 1.609, halfDepth: 1.667 },
+  treesASmall: { halfWidth: 1.203, halfDepth: 1.21 },
+  treesBCut: { halfWidth: 1.204, halfDepth: 1.255 },
+  treesBLarge: { halfWidth: 2.007, halfDepth: 2.098 },
+  treesBMedium: { halfWidth: 1.754, halfDepth: 1.725 },
+  treesBSmall: { halfWidth: 1.225, halfDepth: 1.05 },
+  mountainA: { halfWidth: 1.289, halfDepth: 1.343 },
+  mountainB: { halfWidth: 1.038, halfDepth: 1.081 },
+  mountainC: { halfWidth: 1.19, halfDepth: 1.368 },
+  mountainAGrass: { halfWidth: 1.224, halfDepth: 1.275 },
+  mountainAGrassTrees: { halfWidth: 0.942, halfDepth: 0.953 },
+  mountainBGrass: { halfWidth: 1, halfDepth: 1.042 },
+  mountainBGrassTrees: { halfWidth: 0.795, halfDepth: 0.828 },
+  mountainCGrass: { halfWidth: 1.154, halfDepth: 1.328 },
+  mountainCGrassTrees: { halfWidth: 0.92, halfDepth: 1.058 },
+  waterlilyA: { halfWidth: 0.54, halfDepth: 0.538 },
+  waterlilyB: { halfWidth: 0.943, halfDepth: 0.94 },
+  waterplantA: { halfWidth: 0.255, halfDepth: 0.277 },
+  waterplantB: { halfWidth: 0.132, halfDepth: 0.086 },
+  waterplantC: { halfWidth: 0.153, halfDepth: 0.167 },
+  hexBarrel: { halfWidth: 0.283, halfDepth: 0.283 },
+  bucketArrows: { halfWidth: 0.196, halfDepth: 0.199 },
+  bucketEmpty: { halfWidth: 0.195, halfDepth: 0.195 },
+  bucketWater: { halfWidth: 0.198, halfDepth: 0.198 },
+  hexCrateBigA: { halfWidth: 0.293, halfDepth: 0.293 },
+  hexCrateSmallA: { halfWidth: 0.195, halfDepth: 0.195 },
+  hexCrateBigB: { halfWidth: 0.293, halfDepth: 0.293 },
+  hexCrateSmallB: { halfWidth: 0.195, halfDepth: 0.195 },
+  hexCrateLongA: { halfWidth: 0.567, halfDepth: 0.283 },
+  hexCrateLongB: { halfWidth: 0.567, halfDepth: 0.283 },
+  hexCrateLongC: { halfWidth: 0.565, halfDepth: 0.283 },
+  hexCrateLongEmpty: { halfWidth: 0.567, halfDepth: 0.283 },
+  hexCrateOpen: { halfWidth: 0.466, halfDepth: 0.281 },
+  flagBlue: { halfWidth: 0.117, halfDepth: 0.562 },
+  flagGreen: { halfWidth: 0.117, halfDepth: 0.562 },
+  flagRed: { halfWidth: 0.117, halfDepth: 0.562 },
+  flagYellow: { halfWidth: 0.117, halfDepth: 0.562 },
+  ladder: { halfWidth: 0.355, halfDepth: 0.071 },
+  pallet: { halfWidth: 0.414, halfDepth: 0.414 },
+  resourceLumber: { halfWidth: 0.958, halfDepth: 0.462 },
+  resourceStone: { halfWidth: 0.588, halfDepth: 0.5 },
+  sack: { halfWidth: 0.147, halfDepth: 0.22 },
+  archeryTarget: { halfWidth: 0.337, halfDepth: 0.2 },
+  tent: { halfWidth: 0.722, halfDepth: 0.722 },
+  weaponrack: { halfWidth: 0.28, halfDepth: 0.182 },
+  wheelbarrow: { halfWidth: 0.333, halfDepth: 0.707 },
+};
+
+// Mirrors getStructureColliders' shape/purpose, but for furniture: looks up a per-kind footprint
+// in FURNITURE_FOOTPRINT above - a kind with no entry there (indoor dungeon furniture, clouds)
+// stays walk-through, same as before this table existed.
+export function getFurnitureColliders(kind: FurnitureKind): StructureCollider[] {
+  const footprint = FURNITURE_FOOTPRINT[kind];
+  return footprint ? [{ localX: 0, localZ: 0, halfWidth: footprint.halfWidth, halfDepth: footprint.halfDepth }] : [];
+}
+
+// Mirrors resolveStructureCollisions exactly, just against FURNITURE instead of STRUCTURES - see
+// that function's own doc comment. Non-blocking furniture kinds never reach the inner loop since
+// getFurnitureColliders returns no colliders for them.
+export function resolveFurnitureCollisions(x: number, z: number, furniture: FurnitureDef[]): { x: number; z: number } {
+  for (const def of furniture) {
+    const cosT = Math.cos(def.rotationY);
+    const sinT = Math.sin(def.rotationY);
+    const dx = x - def.x;
+    const dz = z - def.z;
+    let localX = dx * cosT - dz * sinT;
+    let localZ = dx * sinT + dz * cosT;
+
+    for (const collider of getFurnitureColliders(def.kind)) {
       const closestX = Math.max(collider.localX - collider.halfWidth, Math.min(localX, collider.localX + collider.halfWidth));
       const closestZ = Math.max(collider.localZ - collider.halfDepth, Math.min(localZ, collider.localZ + collider.halfDepth));
       const diffX = localX - closestX;
@@ -1040,138 +1371,37 @@ export function findStructureLoops(
 // ---------------------------------------------------------------------------------------------
 // Terrain elevation - purely a rendering concern (see client/src/game/Scene.ts and the admin
 // map editor). Every distance/collision/line-of-sight calculation in this file works in the x/z
-// plane only and stays that way; nothing here is authoritative game state. A deterministic
-// height function (not authored data) keeps the client's game view and the admin editor's view
-// in perfect agreement with zero content to maintain.
+// plane only and stays that way; nothing here is authoritative game state. Height comes from the
+// discrete, ramp-covered hex elevation system (hex.ts's getHexElevation) rather than continuous
+// noise - a rigid mosaic of tile instances can't be smoothly displaced the way a single deformable
+// mesh could, so elevation has to be a small integer level per cell with real ramp geometry
+// bridging the one boundary case, not an arbitrary analytic height sampled independently per tile.
 // ---------------------------------------------------------------------------------------------
 
-const TERRAIN_BASE_WAVELENGTH = 60;
-const TERRAIN_BASE_AMPLITUDE = 3.5;
-const TERRAIN_DETAIL_WAVELENGTH = 18;
-const TERRAIN_DETAIL_AMPLITUDE = 1;
-const TERRAIN_FLATTEN_RADIUS = 6; // world units of smooth falloff beyond a structure's own footprint
-const TERRAIN_MAX_SEGMENTS = 150; // perf cap on the render mesh - see terrainSegments
-const TERRAIN_TARGET_STEP = 4; // world units between mesh vertices, below the cap
-
-// Deterministic pseudo-random value in [0,1) for an integer grid coordinate - no seed/RNG state,
-// so the exact same terrain is produced every time this is called, in every process.
-function terrainHash(ix: number, iz: number): number {
-  const s = Math.sin(ix * 127.1 + iz * 311.7) * 43758.5453123;
-  return s - Math.floor(s);
-}
-
-function smoothstep(t: number): number {
-  return t * t * (3 - 2 * t);
-}
-
-// Bilinear-interpolated value noise at one frequency, in [0,1).
-function valueNoise2D(x: number, z: number): number {
-  const x0 = Math.floor(x);
-  const z0 = Math.floor(z);
-  const sx = smoothstep(x - x0);
-  const sz = smoothstep(z - z0);
-  const n00 = terrainHash(x0, z0);
-  const n10 = terrainHash(x0 + 1, z0);
-  const n01 = terrainHash(x0, z0 + 1);
-  const n11 = terrainHash(x0 + 1, z0 + 1);
-  const nx0 = n00 + (n10 - n00) * sx;
-  const nx1 = n01 + (n11 - n01) * sx;
-  return nx0 + (nx1 - nx0) * sz;
-}
-
-// Number of segments the render mesh (client/src/game/Scene.ts) and the admin map editor's
-// preview both build for a map of this half-extent - exported so getTerrainHeight's own sampling
-// grid below can stay pixel-exact with whatever actually gets rendered, for any map size.
-export function terrainSegments(regionHalfExtent: number): number {
-  return Math.min(TERRAIN_MAX_SEGMENTS, Math.round((regionHalfExtent * 2) / TERRAIN_TARGET_STEP));
-}
-
-// Smoothly flattens `height` to 0 within `footprint` of some point, falling back off to the
-// unmodified height by `footprint + flattenRadius`. Shared by every "footprint" that gets pulled
-// level regardless of the noise underneath it - a structure's own footprint, and the boss arena's.
-function flattenTowards(height: number, dist: number, footprint: number, flattenRadius: number): number {
-  const flattenEnd = footprint + flattenRadius;
-  if (dist >= flattenEnd) return height;
-  const t = dist <= footprint ? 0 : (dist - footprint) / (flattenEnd - footprint);
-  return height * smoothstep(t);
-}
-
-// Just the noise formula, evaluated at one exact point. getTerrainHeight below never calls this
-// directly with an entity's raw position - see why there.
-function rawTerrainHeight(x: number, z: number, structures: StructureDef[]): number {
-  const base = (valueNoise2D(x / TERRAIN_BASE_WAVELENGTH, z / TERRAIN_BASE_WAVELENGTH) - 0.5) * 2 * TERRAIN_BASE_AMPLITUDE;
-  const detail =
-    (valueNoise2D(x / TERRAIN_DETAIL_WAVELENGTH + 91.3, z / TERRAIN_DETAIL_WAVELENGTH + 91.3) - 0.5) * 2 * TERRAIN_DETAIL_AMPLITUDE;
-  let height = base + detail;
-
-  for (const s of structures) {
-    const footprint = Math.max(s.width, s.depth) / 2;
-    height = flattenTowards(height, Math.hypot(x - s.x, z - s.z), footprint, TERRAIN_FLATTEN_RADIUS);
-  }
-
-  // The boss arena (BOSS_ARENA_CENTER/RADIUS) is drawn client-side as a flat decorative disc
-  // regardless of what the noise underneath it looks like (see client/src/game/Scene.ts) - flatten
-  // the actual terrain to match it, the same way a structure's footprint does, so the boss, its
-  // adds, and any nearby structure all stand on ground that matches what's drawn instead of
-  // floating above or sinking into hills that were never actually leveled.
-  height = flattenTowards(
-    height,
-    Math.hypot(x - BOSS_ARENA_CENTER.x, z - BOSS_ARENA_CENTER.z),
-    BOSS_ARENA_RADIUS,
-    TERRAIN_FLATTEN_RADIUS,
-  );
-
-  return height;
-}
-
 // Set once per client session (client/src/game/Scene.ts, alongside the same isDungeon that
-// already keeps a dungeon's render mesh a flat, undisplaced quad) - dungeons have no elevation
-// at all, so entities there need to sit at a flat 0 instead of riding the overworld's noise, which
-// doesn't know or care that it's being evaluated at "dungeon (3, -2)" instead of "overworld (3,
-// -2)" (the two coordinate spaces overlap numerically, so the function can't tell them apart from
-// x/z alone).
+// already keeps a dungeon's render mesh a flat, undisplaced quad) - dungeons have no elevation at
+// all, so entities there need to sit at a flat 0 instead of riding the overworld's hex elevation,
+// which doesn't know or care that it's being evaluated at "dungeon (3, -2)" instead of "overworld
+// (3, -2)" (the two coordinate spaces overlap numerically, so the function can't tell them apart
+// from x/z alone).
 export let TERRAIN_FLAT = false;
 export function setTerrainFlat(flat: boolean) {
   TERRAIN_FLAT = flat;
 }
 
-// Two octaves of rolling hills, pulled flat under and just beyond every structure's footprint
-// so buildings (rigid boxes) always sit on a level pad instead of a slope. `structures` defaults
-// to the live STRUCTURES binding (populated by loadGameContent) - every client call site can
-// omit it and get correct flattening automatically. The admin map editor never calls
-// loadGameContent (it reads content straight from the REST API, not the live-game snapshot
-// pipeline), so it passes its own fetched structures list explicitly instead of silently getting
-// unflattened terrain under every building.
-//
-// Samples rawTerrainHeight at the render mesh's own grid corners (see terrainSegments) and
-// bilinearly interpolates between them, rather than evaluating the raw noise at the exact x/z
-// given - the mesh only has a vertex every `step` world units, so a moving entity positioned at
-// the "true" analytic height could float above or sink into the coarser triangles between
-// vertices, especially on steeper slopes. This keeps every entity exactly on the surface that's
-// actually drawn, regardless of mesh resolution. `regionHalfExtent` only needs overriding by the
-// admin map editor, which can be previewing a map other than the currently active one.
+// `structures`/`regionHalfExtent` are accepted for source compatibility with existing call sites
+// but no longer used - elevation now comes from hex.ts's live-cached getHexElevation, which reads
+// the full live content (not just structures) on its own. The admin map editor, which previews
+// maps that may not be the currently-active one, calls getHexElevation directly with its own
+// fetched-and-filtered content instead of through this function - see MapEditor.tsx.
 export function getTerrainHeight(
   x: number,
   z: number,
-  structures: StructureDef[] = STRUCTURES,
-  regionHalfExtent: number = MAP_HALF_EXTENT,
+  _structures: StructureDef[] = STRUCTURES,
+  _regionHalfExtent: number = MAP_HALF_EXTENT,
 ): number {
   if (TERRAIN_FLAT) return 0;
-
-  const step = (regionHalfExtent * 2) / terrainSegments(regionHalfExtent);
-  const gx0 = Math.floor(x / step) * step;
-  const gz0 = Math.floor(z / step) * step;
-  const sx = (x - gx0) / step;
-  const sz = (z - gz0) / step;
-
-  const h00 = rawTerrainHeight(gx0, gz0, structures);
-  const h10 = rawTerrainHeight(gx0 + step, gz0, structures);
-  const h01 = rawTerrainHeight(gx0, gz0 + step, structures);
-  const h11 = rawTerrainHeight(gx0 + step, gz0 + step, structures);
-
-  const hx0 = h00 + (h10 - h00) * sx;
-  const hx1 = h01 + (h11 - h01) * sx;
-  return hx0 + (hx1 - hx0) * sz;
+  return getHexElevation(x, z) * HEX_ELEVATION_STEP_WORLD;
 }
 
 export type MapKind = "overworld" | "dungeon";
@@ -1233,6 +1463,7 @@ export interface ContentSnapshot {
   structures: StructureDef[];
   waypoints: WaypointDef[];
   furniture: FurnitureDef[];
+  hexTiles: HexTileOverrideDef[];
 }
 
 // The single entry point that turns a fetched content snapshot into every live table/constant
@@ -1271,6 +1502,7 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_MAP?.id);
   WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_MAP?.id);
   FURNITURE = snapshot.furniture.filter((f) => f.mapId === ACTIVE_MAP?.id);
+  HEX_TILE_OVERRIDES = snapshot.hexTiles.filter((h) => h.mapId === ACTIVE_MAP?.id);
 
   if (ACTIVE_MAP) {
     MAP_HALF_EXTENT = ACTIVE_MAP.halfExtent;

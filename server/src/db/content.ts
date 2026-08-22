@@ -17,6 +17,8 @@ import {
   TalentDef,
   WaypointDef,
   FurnitureDef,
+  HexTileOverrideDef,
+  HexTerrainKind,
 } from "@mmo/shared";
 import { ClassRole } from "@mmo/shared";
 import { pool } from "./client.js";
@@ -77,6 +79,7 @@ interface EnemyTypeRow {
   xp_reward: number;
   gold_reward: number;
   stats: unknown;
+  model_id: string | null;
 }
 
 interface NpcRow {
@@ -172,6 +175,15 @@ interface FurnitureRow {
   y_offset: number;
 }
 
+interface HexTileRow {
+  id: string;
+  map_id: string;
+  q: number;
+  r: number;
+  kind: string;
+  rotation: number | null;
+}
+
 export async function getContentSnapshot(): Promise<ContentSnapshot> {
   const [
     classRows,
@@ -188,6 +200,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     structureRows,
     waypointRows,
     furnitureRows,
+    hexTileRows,
   ] = await Promise.all([
     pool.query<GameClassRow>("SELECT * FROM game_classes").then((r) => r.rows),
     pool.query<SpellRow>("SELECT * FROM spells").then((r) => r.rows),
@@ -203,6 +216,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     pool.query<StructureRow>("SELECT * FROM structures").then((r) => r.rows),
     pool.query<WaypointRow>("SELECT * FROM waypoints").then((r) => r.rows),
     pool.query<FurnitureRow>("SELECT * FROM furniture").then((r) => r.rows),
+    pool.query<HexTileRow>("SELECT * FROM hex_tiles").then((r) => r.rows),
   ]);
 
   const vendorItemIdsByNpc = new Map<string, string[]>();
@@ -264,6 +278,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     xpReward: e.xp_reward,
     goldReward: e.gold_reward,
     stats: e.stats as unknown as EnemyStats,
+    modelId: nullToUndefined(e.model_id),
   }));
 
   const npcs: NpcDef[] = npcRows.map((n) => ({
@@ -355,7 +370,31 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     yOffset: f.y_offset,
   }));
 
-  return { classes, spells, items, talents, enemyTypes, npcs, quests, maps, dungeons, spawns, structures, waypoints, furniture };
+  const hexTiles: HexTileOverrideDef[] = hexTileRows.map((h) => ({
+    id: h.id,
+    mapId: h.map_id,
+    q: h.q,
+    r: h.r,
+    kind: h.kind as HexTerrainKind,
+    rotation: nullToUndefined(h.rotation),
+  }));
+
+  return {
+    classes,
+    spells,
+    items,
+    talents,
+    enemyTypes,
+    npcs,
+    quests,
+    maps,
+    dungeons,
+    spawns,
+    structures,
+    waypoints,
+    furniture,
+    hexTiles,
+  };
 }
 
 // The single function both server boot and every admin CRUD mutation call - see

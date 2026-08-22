@@ -1,121 +1,171 @@
 import * as THREE from "three";
-import { FurnitureDef } from "@mmo/shared";
+import { FurnitureKind } from "@mmo/shared";
+import { fitHeight, loadStaticModel, tintModel } from "./modelLoader";
 
-// Mirrors client/src/game/Furniture.ts exactly (same fixed proportions per kind, same
-// FURNITURE_SCALE) so the editor preview matches what actually renders in-game - kept as a
-// separate file for the same reason as structureGeometry.ts: admin has no other Three.js code
-// today, and shared stays rendering-library-free (the server imports it too).
-const FURNITURE_SCALE = 1.6;
+// Mirrors client/src/game/Furniture.ts exactly (same models + target heights per kind) so the
+// editor preview finally matches what's actually in-game, instead of the procedural box/cylinder
+// shapes this file used before.
+const MODEL_PATH: Record<FurnitureKind, string> = {
+  table: "/models/dungeon/table_medium.gltf",
+  chair: "/models/dungeon/chair.gltf",
+  barrel: "/models/dungeon/barrel_large.gltf",
+  crate: "/models/dungeon/box_large.gltf",
+  bookshelf: "/models/dungeon/shelves.gltf",
+  hill: "/models/nature/hill_single_A.gltf",
+  hillB: "/models/nature/hill_single_B.gltf",
+  hillC: "/models/nature/hill_single_C.gltf",
+  hillsA: "/models/nature/hills_A.gltf",
+  hillsATrees: "/models/nature/hills_A_trees.gltf",
+  hillsB: "/models/nature/hills_B.gltf",
+  hillsBTrees: "/models/nature/hills_B_trees.gltf",
+  hillsC: "/models/nature/hills_C.gltf",
+  hillsCTrees: "/models/nature/hills_C_trees.gltf",
+  rock: "/models/nature/rock_single_A.gltf",
+  rockB: "/models/nature/rock_single_B.gltf",
+  rockC: "/models/nature/rock_single_C.gltf",
+  rockD: "/models/nature/rock_single_D.gltf",
+  rockE: "/models/nature/rock_single_E.gltf",
+  tree: "/models/nature/tree_single_A.gltf",
+  treeB: "/models/nature/tree_single_B.gltf",
+  treeACut: "/models/nature/tree_single_A_cut.gltf",
+  treeBCut: "/models/nature/tree_single_B_cut.gltf",
+  treesACut: "/models/nature/trees_A_cut.gltf",
+  treesALarge: "/models/nature/trees_A_large.gltf",
+  treesAMedium: "/models/nature/trees_A_medium.gltf",
+  treesASmall: "/models/nature/trees_A_small.gltf",
+  treesBCut: "/models/nature/trees_B_cut.gltf",
+  treesBLarge: "/models/nature/trees_B_large.gltf",
+  treesBMedium: "/models/nature/trees_B_medium.gltf",
+  treesBSmall: "/models/nature/trees_B_small.gltf",
+  mountainA: "/models/nature/mountain_A.gltf",
+  mountainB: "/models/nature/mountain_B.gltf",
+  mountainC: "/models/nature/mountain_C.gltf",
+  mountainAGrass: "/models/nature/mountain_A_grass.gltf",
+  mountainAGrassTrees: "/models/nature/mountain_A_grass_trees.gltf",
+  mountainBGrass: "/models/nature/mountain_B_grass.gltf",
+  mountainBGrassTrees: "/models/nature/mountain_B_grass_trees.gltf",
+  mountainCGrass: "/models/nature/mountain_C_grass.gltf",
+  mountainCGrassTrees: "/models/nature/mountain_C_grass_trees.gltf",
+  cloudBig: "/models/nature/cloud_big.gltf",
+  cloudSmall: "/models/nature/cloud_small.gltf",
+  waterlilyA: "/models/nature/waterlily_A.gltf",
+  waterlilyB: "/models/nature/waterlily_B.gltf",
+  waterplantA: "/models/nature/waterplant_A.gltf",
+  waterplantB: "/models/nature/waterplant_B.gltf",
+  waterplantC: "/models/nature/waterplant_C.gltf",
+  hexBarrel: "/models/hexprops/barrel.gltf",
+  bucketArrows: "/models/hexprops/bucket_arrows.gltf",
+  bucketEmpty: "/models/hexprops/bucket_empty.gltf",
+  bucketWater: "/models/hexprops/bucket_water.gltf",
+  hexCrateBigA: "/models/hexprops/crate_A_big.gltf",
+  hexCrateSmallA: "/models/hexprops/crate_A_small.gltf",
+  hexCrateBigB: "/models/hexprops/crate_B_big.gltf",
+  hexCrateSmallB: "/models/hexprops/crate_B_small.gltf",
+  hexCrateLongA: "/models/hexprops/crate_long_A.gltf",
+  hexCrateLongB: "/models/hexprops/crate_long_B.gltf",
+  hexCrateLongC: "/models/hexprops/crate_long_C.gltf",
+  hexCrateLongEmpty: "/models/hexprops/crate_long_empty.gltf",
+  hexCrateOpen: "/models/hexprops/crate_open.gltf",
+  flagBlue: "/models/hexprops/flag_blue.gltf",
+  flagGreen: "/models/hexprops/flag_green.gltf",
+  flagRed: "/models/hexprops/flag_red.gltf",
+  flagYellow: "/models/hexprops/flag_yellow.gltf",
+  ladder: "/models/hexprops/ladder.gltf",
+  pallet: "/models/hexprops/pallet.gltf",
+  resourceLumber: "/models/hexprops/resource_lumber.gltf",
+  resourceStone: "/models/hexprops/resource_stone.gltf",
+  sack: "/models/hexprops/sack.gltf",
+  archeryTarget: "/models/hexprops/target.gltf",
+  tent: "/models/hexprops/tent.gltf",
+  weaponrack: "/models/hexprops/weaponrack.gltf",
+  wheelbarrow: "/models/hexprops/wheelbarrow.gltf",
+};
 
-function woodMaterial(color: string): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({ color });
-}
+const MODEL_TARGET_HEIGHT: Record<FurnitureKind, number> = {
+  table: 0.85,
+  chair: 0.85,
+  barrel: 0.85,
+  crate: 0.7,
+  bookshelf: 1.8,
+  hill: 1.2,
+  hillB: 1.2,
+  hillC: 1.2,
+  hillsA: 2.6,
+  hillsATrees: 3,
+  hillsB: 2.4,
+  hillsBTrees: 2.8,
+  hillsC: 2.5,
+  hillsCTrees: 2.9,
+  rock: 0.5,
+  rockB: 0.5,
+  rockC: 0.5,
+  rockD: 0.5,
+  rockE: 0.5,
+  tree: 2.2,
+  treeB: 2.2,
+  treeACut: 0.4,
+  treeBCut: 0.4,
+  treesACut: 0.4,
+  treesALarge: 3.2,
+  treesAMedium: 2.8,
+  treesASmall: 2.2,
+  treesBCut: 0.35,
+  treesBLarge: 3,
+  treesBMedium: 2.6,
+  treesBSmall: 2,
+  mountainA: 2.4,
+  mountainB: 2.4,
+  mountainC: 2.4,
+  mountainAGrass: 2.4,
+  mountainAGrassTrees: 2.6,
+  mountainBGrass: 2.4,
+  mountainBGrassTrees: 2.6,
+  mountainCGrass: 2.4,
+  mountainCGrassTrees: 2.6,
+  cloudBig: 2.8,
+  cloudSmall: 2,
+  waterlilyA: 0.15,
+  waterlilyB: 0.18,
+  waterplantA: 0.4,
+  waterplantB: 0.5,
+  waterplantC: 0.45,
+  hexBarrel: 0.7,
+  bucketArrows: 0.76,
+  bucketEmpty: 0.41,
+  bucketWater: 0.35,
+  hexCrateBigA: 0.69,
+  hexCrateSmallA: 0.46,
+  hexCrateBigB: 0.69,
+  hexCrateSmallB: 0.46,
+  hexCrateLongA: 0.5,
+  hexCrateLongB: 0.5,
+  hexCrateLongC: 0.66,
+  hexCrateLongEmpty: 0.5,
+  hexCrateOpen: 0.68,
+  flagBlue: 1.39,
+  flagGreen: 1.39,
+  flagRed: 1.39,
+  flagYellow: 1.39,
+  ladder: 2.54,
+  pallet: 0.26,
+  resourceLumber: 0.69,
+  resourceStone: 0.92,
+  sack: 0.21,
+  archeryTarget: 1,
+  tent: 1.7,
+  weaponrack: 0.79,
+  wheelbarrow: 0.62,
+};
 
-function buildTable(color: string): THREE.Object3D {
-  const group = new THREE.Group();
-  const material = woodMaterial(color);
-
-  const top = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 0.8), material);
-  top.position.y = 0.75;
-  group.add(top);
-
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.72, 0.08), material);
-      leg.position.set(sx * 0.52, 0.36, sz * 0.32);
-      group.add(leg);
-    }
-  }
-  return group;
-}
-
-function buildChair(color: string): THREE.Object3D {
-  const group = new THREE.Group();
-  const material = woodMaterial(color);
-
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.07, 0.42), material);
-  seat.position.y = 0.45;
-  group.add(seat);
-
-  const back = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.5, 0.06), material);
-  back.position.set(0, 0.7, -0.18);
-  group.add(back);
-
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.45, 0.06), material);
-      leg.position.set(sx * 0.17, 0.225, sz * 0.17);
-      group.add(leg);
-    }
-  }
-  return group;
-}
-
-function buildBarrel(color: string): THREE.Object3D {
-  const group = new THREE.Group();
-  const bodyMaterial = woodMaterial(color);
-  const bandMaterial = new THREE.MeshStandardMaterial({ color: 0x2a2117 });
-
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.65, 12), bodyMaterial);
-  body.position.y = 0.325;
-  group.add(body);
-
-  for (const y of [0.15, 0.5]) {
-    const band = new THREE.Mesh(new THREE.TorusGeometry(0.325, 0.025, 6, 16), bandMaterial);
-    band.rotation.x = Math.PI / 2;
-    band.position.y = y;
-    group.add(band);
-  }
-  return group;
-}
-
-function buildCrate(color: string): THREE.Object3D {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), woodMaterial(color));
-  mesh.position.y = 0.3;
-  return mesh;
-}
-
-function buildBookshelf(color: string): THREE.Object3D {
-  const group = new THREE.Group();
-  const material = woodMaterial(color);
-
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.6, 0.3), material);
-  body.position.y = 0.8;
-  group.add(body);
-
-  const shelfMaterial = new THREE.MeshStandardMaterial({ color: 0x2a2117 });
-  for (const y of [0.5, 0.9, 1.3]) {
-    const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.04, 0.28), shelfMaterial);
-    shelf.position.set(0, y, 0.01);
-    group.add(shelf);
-  }
-  return group;
-}
-
-// Builds just the piece's own shape, unpositioned/unrotated - the caller positions/rotates the
-// returned group from the FurnitureDef's x/z/rotationY, same division of responsibility as
-// structureGeometry.ts's buildStructureShape.
-export function buildFurnitureShape(def: FurnitureDef): THREE.Object3D {
-  let object: THREE.Object3D;
-  switch (def.kind) {
-    case "table":
-      object = buildTable(def.color);
-      break;
-    case "chair":
-      object = buildChair(def.color);
-      break;
-    case "barrel":
-      object = buildBarrel(def.color);
-      break;
-    case "crate":
-      object = buildCrate(def.color);
-      break;
-    case "bookshelf":
-      object = buildBookshelf(def.color);
-      break;
-    default:
-      object = new THREE.Group(); // unrecognized kind (e.g. stale data) - render nothing rather than crash
-  }
-  object.scale.setScalar(FURNITURE_SCALE);
-  return object;
+// Populates `group` (already positioned/rotated by the caller) with the real model for `kind`
+// once it resolves - the same "empty until real content arrives" pattern every avatar in the live
+// game already tolerates, since loading is inherently async. Safe to call on a group that later
+// gets removed from the scene (e.g. the map editor re-syncing before this resolves) - adding a
+// child to an already-detached group is a harmless no-op, not an error.
+export function populateFurnitureShape(group: THREE.Group, kind: FurnitureKind, color: string): void {
+  loadStaticModel(MODEL_PATH[kind]).then((object) => {
+    fitHeight(object, MODEL_TARGET_HEIGHT[kind]);
+    tintModel(object, color);
+    group.add(object);
+  });
 }

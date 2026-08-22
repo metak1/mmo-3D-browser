@@ -1828,6 +1828,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     activeRoom = room;
     const $ = connection.$;
     localSessionId = room.sessionId;
+    (window as any).__debugRoom = room; // TEMP: collision QA probe, remove after testing
 
     // Room transitions (overworld <-> dungeon) are a reservation + full page reload rather
     // than an in-place scene rebuild - main() only ever fully sets up one room connection
@@ -2025,7 +2026,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       const enemyType = ENEMY_TYPES[enemy.enemyTypeId];
       const enemyName = enemyType?.name ?? enemy.enemyTypeId;
       const aggressive = isAggressiveEnemyType(enemy.enemyTypeId);
-      const avatar = new EnemyAvatar(enemy.behavior as EnemyBehavior, enemyName, aggressive);
+      const avatar = new EnemyAvatar(enemy.behavior as EnemyBehavior, enemyName, aggressive, enemyType?.modelId);
       avatar.group.userData.enemyId = enemyId;
       avatar.setTarget(enemy.x, enemy.z);
       avatar.snapToTarget();

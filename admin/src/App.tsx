@@ -53,7 +53,7 @@ export function App() {
         >
           Map Editor
         </button>
-        {ENTITIES.map((e) => (
+        {ENTITIES.filter((e) => !e.hidden).map((e) => (
           <button
             key={e.key}
             className={e.key === activeEntity ? "nav-item active" : "nav-item"}
