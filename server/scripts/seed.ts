@@ -688,8 +688,54 @@ async function main() {
   // cycled in order every specialCooldownMs, independent of the phase-2 aoe/enrage/add-spawn
   // mechanics already on BossStats.
   const bossSpecialAbilities = [
-    { id: "ashen_nova", name: "Ashen Nova", kind: "raidNova", damage: 14, radius: 6, castTimeMs: 1500 },
-    { id: "wardens_judgment", name: "Warden's Judgment", kind: "singleTargetBurst", damage: 40, castTimeMs: 1800 },
+    {
+      id: "ashen_nova",
+      name: "Ashen Nova",
+      castTimeMs: 1500,
+      effect: { shape: { kind: "circle", radius: 6, centeredOn: "caster" }, actions: [{ kind: "damage", amount: 14 }] },
+    },
+    {
+      id: "wardens_judgment",
+      name: "Warden's Judgment",
+      castTimeMs: 1800,
+      effect: { shape: { kind: "singleTarget" }, actions: [{ kind: "damage", amount: 40 }] },
+    },
+    // Three new techniques added purely to exercise the composable system across every shape/
+    // action kind it supports - a live demonstration that a boss's kit is no longer bottlenecked
+    // on new TypeScript variants (see BossAbilityDef's doc comment).
+    {
+      id: "cinder_breath",
+      name: "Cinder Breath",
+      castTimeMs: 1300,
+      effect: {
+        shape: { kind: "cone", radius: 8, angleDeg: 60 },
+        actions: [
+          { kind: "damage", amount: 18 },
+          { kind: "dot", amount: 4, tickIntervalMs: 1000, durationMs: 4000 },
+        ],
+      },
+    },
+    {
+      id: "wardens_sweep",
+      name: "Warden's Sweep",
+      castTimeMs: 1400,
+      effect: {
+        shape: { kind: "line", length: 10, width: 3 },
+        actions: [
+          { kind: "damage", amount: 22 },
+          { kind: "knockback", distance: 4 },
+        ],
+      },
+    },
+    {
+      id: "meteor_storm",
+      name: "Meteor Storm",
+      castTimeMs: 2000,
+      effect: {
+        shape: { kind: "randomPoints", count: 5, spreadRadius: 8, pointRadius: 2 },
+        actions: [{ kind: "damage", amount: 16 }],
+      },
+    },
   ];
 
   const enemyTypes = [
