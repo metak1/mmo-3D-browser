@@ -538,3 +538,72 @@ td {
   align-self: flex-start;
   font-size: 12px;
 }
+
+.enemy-editor {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.enemy-editor-list {
+  width: 220px;
+  flex-shrink: 0;
+  padding: 16px;
+  overflow-y: auto;
+  border-right: 2px solid #4a5578;
+  background: rgba(20, 22, 32, 0.85);
+}
+.enemy-editor-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.enemy-editor-rows .nav-item {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+.enemy-editor-row-id {
+  font-size: 10px;
+  color: #6b7492;
+}
+.enemy-editor-viewport {
+  flex: 1;
+  min-width: 0;
+}
+.enemy-editor-viewport canvas {
+  display: block;
+}
+.enemy-editor-panel {
+  width: 380px;
+  flex-shrink: 0;
+  padding: 16px;
+  overflow-y: auto;
+  border-left: 2px solid #4a5578;
+  background: rgba(20, 22, 32, 0.85);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.stats-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.stats-panel h4 {
+  margin: 4px 0 -4px;
+  color: #a7b0c8;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ability-card {
+  cursor: pointer;
+}
+.ability-card-focused {
+  border-color: #c9a63c;
+}

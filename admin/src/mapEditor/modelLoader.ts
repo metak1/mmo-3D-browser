@@ -1,20 +1,21 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 
-// A small mirror of client/src/game/models.ts's loading/scaling/tinting helpers - admin has no
-// other real-model rendering anywhere else (structureGeometry.ts/furnitureGeometry.ts's remaining
-// procedural shapes, and this file's own tile preview, are the only 3D content it builds), and
-// isn't part of the same Vite app as client, so it can't just import that file directly. Kept to
-// exactly the subset the map editor's tile/furniture palettes actually need - no animation
-// support, unlike client's version, since nothing here ever moves.
+// A small mirror of client/src/game/models.ts's loading/scaling/tinting helpers - admin isn't
+// part of the same Vite app as client, so it can't just import that file directly. Originally
+// kept to exactly the subset the map editor's tile/furniture palettes need (no animation, since
+// nothing there ever moves); spawnIdleRiggedModel below is the enemy editor's addition for a
+// skinned, animated preview model - trimmed to idle-only (a static preview never walks), unlike
+// client's full spawnRiggedModel which also crossfades into a walk clip.
 
 const loader = new GLTFLoader();
-const cache = new Map<string, Promise<THREE.Group>>();
+const cache = new Map<string, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
-function loadScene(path: string): Promise<THREE.Group> {
+function loadScene(path: string): Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> {
   let entry = cache.get(path);
   if (!entry) {
-    entry = loader.loadAsync(path).then((gltf) => gltf.scene);
+    entry = loader.loadAsync(path).then((gltf) => ({ scene: gltf.scene, animations: gltf.animations }));
     cache.set(path, entry);
   }
   return entry;
@@ -35,7 +36,7 @@ function cloneWithIndependentMaterials(scene: THREE.Group): THREE.Object3D {
 // Raw geometry/material off a cached scene's first mesh, uncloned - for THREE.InstancedMesh
 // callers (the tile preview) that need one shared geometry/material to draw many copies of.
 export async function loadModelGeometry(path: string): Promise<{ geometry: THREE.BufferGeometry; material: THREE.Material }> {
-  const scene = await loadScene(path);
+  const { scene } = await loadScene(path);
   let mesh: THREE.Mesh | undefined;
   scene.traverse((child) => {
     if (!mesh && child instanceof THREE.Mesh) mesh = child;
@@ -48,8 +49,32 @@ export async function loadModelGeometry(path: string): Promise<{ geometry: THREE
 // A full independent-materials clone, for furniture placement (one Object3D per placed instance,
 // individually tintable/positionable) rather than instancing.
 export async function loadStaticModel(path: string): Promise<THREE.Object3D> {
-  const scene = await loadScene(path);
+  const { scene } = await loadScene(path);
   return cloneWithIndependentMaterials(scene);
+}
+
+export interface SpawnedIdleModel {
+  object: THREE.Object3D;
+  mixer: THREE.AnimationMixer;
+}
+
+// Skeleton-aware clone (a plain Object3D.clone() shares bones across every clone and animates
+// them in lockstep) of a rigged-but-unanimated mesh (e.g. KayKit's Skeleton pack), playing one
+// looping clip retargeted from a separate shared rig library - works because every character
+// built on that rig has identical bone names, so AnimationMixer's name-based track binding just
+// works across files. See client/src/game/models.ts's spawnRiggedModel for the full (idle+walk)
+// version this mirrors.
+export async function spawnIdleRiggedModel(meshPath: string, rigPath: string, clipName: string): Promise<SpawnedIdleModel> {
+  const [{ scene }, rig] = await Promise.all([loadScene(meshPath), loadScene(rigPath)]);
+  const object = cloneSkeleton(scene) as THREE.Object3D;
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.material = Array.isArray(child.material) ? child.material.map((m) => m.clone()) : child.material.clone();
+  });
+  const mixer = new THREE.AnimationMixer(object);
+  const clip = THREE.AnimationClip.findByName(rig.animations, clipName);
+  if (clip) mixer.clipAction(clip).play();
+  return { object, mixer };
 }
 
 // Different packs/exports aren't at a consistent native scale - see models.ts's own doc comment

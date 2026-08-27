@@ -8,12 +8,12 @@ import { AilmentKind, BuffKind, EffectAction, EffectDef, EffectShape } from "@mm
 // render below them, so an admin picks kinds and fills in numbers instead of hand-writing JSON
 // matching an internal TypeScript union from memory.
 
-const SHAPE_KINDS: EffectShape["kind"][] = ["singleTarget", "circle", "cone", "line", "randomPoints"];
-const ACTION_KINDS: EffectAction["kind"][] = ["damage", "heal", "dot", "ailment", "buff", "knockback", "dispel", "interrupt", "summon"];
-const AILMENT_KINDS: AilmentKind[] = ["weaken"];
-const BUFF_KINDS: BuffKind[] = ["battleFury", "shadowStep", "huntersFocus", "divineFavor", "arcaneSurge"];
+export const SHAPE_KINDS: EffectShape["kind"][] = ["singleTarget", "circle", "cone", "line", "randomPoints"];
+export const ACTION_KINDS: EffectAction["kind"][] = ["damage", "heal", "dot", "ailment", "buff", "knockback", "dispel", "interrupt", "summon"];
+export const AILMENT_KINDS: AilmentKind[] = ["weaken"];
+export const BUFF_KINDS: BuffKind[] = ["battleFury", "shadowStep", "huntersFocus", "divineFavor", "arcaneSurge"];
 
-function defaultShape(kind: EffectShape["kind"]): EffectShape {
+export function defaultShape(kind: EffectShape["kind"]): EffectShape {
   switch (kind) {
     case "singleTarget":
       return { kind };
@@ -28,7 +28,7 @@ function defaultShape(kind: EffectShape["kind"]): EffectShape {
   }
 }
 
-function defaultAction(kind: EffectAction["kind"]): EffectAction {
+export function defaultAction(kind: EffectAction["kind"]): EffectAction {
   switch (kind) {
     case "damage":
       return { kind, amount: 10 };
@@ -51,7 +51,7 @@ function defaultAction(kind: EffectAction["kind"]): EffectAction {
   }
 }
 
-function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+export function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
   return (
     <label>
       {label}
@@ -60,7 +60,7 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   );
 }
 
-function ShapeFields({ shape, onChange }: { shape: EffectShape; onChange: (s: EffectShape) => void }) {
+export function ShapeFields({ shape, onChange }: { shape: EffectShape; onChange: (s: EffectShape) => void }) {
   if (shape.kind === "singleTarget") return null;
   if (shape.kind === "circle") {
     return (
@@ -102,7 +102,7 @@ function ShapeFields({ shape, onChange }: { shape: EffectShape; onChange: (s: Ef
   );
 }
 
-function ActionFields({ action, onChange }: { action: EffectAction; onChange: (a: EffectAction) => void }) {
+export function ActionFields({ action, onChange }: { action: EffectAction; onChange: (a: EffectAction) => void }) {
   switch (action.kind) {
     case "damage":
     case "heal":
