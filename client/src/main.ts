@@ -2,11 +2,15 @@ import * as THREE from "three";
 import type { Room, SeatReservation } from "colyseus.js";
 import {
   AcceptQuestMessage,
+  ActionFailedMessage,
+  ActionFailReason,
   BOSS_PHASE_2_HP_FRACTION,
   BossStats,
   BUFFS,
   BuffKind,
   BuyItemMessage,
+  CastFailedMessage,
+  CastFailReason,
   CastMessage,
   CasterStats,
   CHAT_MAX_LENGTH,
@@ -22,18 +26,32 @@ import {
   DUNGEON_PARTY_SIZE,
   DungeonJoinListingMessage,
   ENEMY_TYPES,
+  EffectShape,
   EnemyBehavior,
   EquipMessage,
   EquipSlot,
+  EQUIP_SLOT_LABEL,
+  FriendRemoveMessage,
+  FriendRequestMessage,
+  FriendRespondMessage,
   FURNITURE,
+  GuildCreateMessage,
+  GuildInviteMessage,
+  GuildKickMessage,
+  GuildPromoteMessage,
+  GuildRespondMessage,
+  GuildRosterSnapshot,
+  GUILD_NAME_MAX_LENGTH,
   InputMessage,
   INVENTORY_SIZE,
   ITEMS,
   loadGameContent,
+  LOOT_PICKUP_RADIUS,
   LootTakeMessage,
   MAP_HALF_EXTENT,
   MainStat,
   NPCS,
+  NPC_INTERACT_RADIUS,
   NPC_QUEST_IDS,
   NpcDef,
   PARTY_MAX_SIZE,
@@ -49,6 +67,7 @@ import {
   RefundTalentMessage,
   isHexPassable,
   resolveStructureCollisions,
+  SetTimeOfDayMessage,
   SPAWN_POINTS,
   SPELLS,
   SellItemMessage,
@@ -57,6 +76,7 @@ import {
   STRUCTURES,
   TALENTS,
   TalentDef,
+  TimeOfDaySetBroadcast,
   TradeOfferMessage,
   TradeRequestMessage,
   TradeRespondMessage,
@@ -77,9 +97,10 @@ import {
   xpForNextLevel,
 } from "@mmo/shared";
 import { GameScene } from "./game/Scene";
-import { AoeCircle } from "./game/AoeCircle";
+import { Telegraph } from "./game/Telegraph";
 import { FloatingCombatText } from "./game/FloatingCombatText";
-import { playHitSound, playHealSound } from "./game/sfx";
+import { playHitSound, playHealSound, playErrorSound } from "./game/sfx";
+import { DEFAULT_Y_OFFSET as HEALTH_BAR_DEFAULT_Y_OFFSET } from "./game/HealthBar";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
 import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
@@ -105,9 +126,23 @@ const RECONCILE_SNAP_DISTANCE = 3; // large corrections (e.g. death/respawn tele
 const HOTBAR_SLOT_COUNT = 3;
 const AILMENT_LABELS: Record<string, string> = { weaken: "Weakened" };
 
+// Renders a DayNightCycle fraction (0..1, 0/1 = midnight, 0.5 = noon - see that class's own doc
+// comment) as a 12-hour clock for the minimap readout. Matches the "/time" chat command's own
+// hour<->fraction mapping (handleSlashCommand below) so a value the sun icon shows here is the
+// same one an admin would type to get back to it.
+function formatTimeOfDay(fraction: number): string {
+  const totalMinutes = Math.round(fraction * 24 * 60) % (24 * 60);
+  const hours24 = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const hours12 = hours24 % 12 === 0 ? 12 : hours24 % 12;
+  const icon = hours24 >= 6 && hours24 < 18 ? "☀" : "🌙";
+  return `${icon} ${hours12}:${String(minutes).padStart(2, "0")} ${hours24 < 12 ? "AM" : "PM"}`;
+}
+
 const hud = document.getElementById("hud")!;
 const container = document.getElementById("app")!;
 const minimap = new Minimap(document.getElementById("minimap") as HTMLCanvasElement);
+const minimapClockEl = document.getElementById("minimap-clock")!;
 const bigMapPanel = document.getElementById("big-map-panel")!;
 const bigMapCanvas = document.getElementById("big-map") as HTMLCanvasElement;
 const bigMap = new Minimap(bigMapCanvas, true);
@@ -127,10 +162,58 @@ const bigMapResizeObserver = new ResizeObserver((entries) => {
 });
 bigMapResizeObserver.observe(bigMapCanvas);
 
+// canvas.width/height are the backing-resolution pixels Minimap.project()/pan()/zoomBy() all work
+// in (see bigMapResizeObserver above - scaled by devicePixelRatio), but mouse events report
+// CSS pixels against the element's on-screen (getBoundingClientRect) size - this converts one to
+// the other so a drag/scroll feels 1:1 with the cursor regardless of that ratio.
+function toBigMapBackingPixels(dxCss: number, dyCss: number): { x: number; y: number } {
+  const rect = bigMapCanvas.getBoundingClientRect();
+  return {
+    x: dxCss * (rect.width > 0 ? bigMapCanvas.width / rect.width : 1),
+    y: dyCss * (rect.height > 0 ? bigMapCanvas.height / rect.height : 1),
+  };
+}
+
+const BIG_MAP_ZOOM_STEP = 1.2;
+let bigMapPanning = false;
+let bigMapPanLastX = 0;
+let bigMapPanLastY = 0;
+
+bigMapCanvas.addEventListener("mousedown", (event) => {
+  bigMapPanning = true;
+  bigMapPanLastX = event.clientX;
+  bigMapPanLastY = event.clientY;
+  bigMapCanvas.style.cursor = "grabbing";
+  event.preventDefault(); // don't let a drag starting here also select page text
+});
+window.addEventListener("mousemove", (event) => {
+  if (!bigMapPanning) return;
+  const delta = toBigMapBackingPixels(event.clientX - bigMapPanLastX, event.clientY - bigMapPanLastY);
+  bigMap.pan(delta.x, delta.y);
+  bigMapPanLastX = event.clientX;
+  bigMapPanLastY = event.clientY;
+});
+window.addEventListener("mouseup", () => {
+  if (!bigMapPanning) return;
+  bigMapPanning = false;
+  bigMapCanvas.style.cursor = "grab";
+});
+
+bigMapCanvas.addEventListener(
+  "wheel",
+  (event) => {
+    event.preventDefault(); // don't also scroll the page underneath the panel
+    const cursor = toBigMapBackingPixels(event.offsetX, event.offsetY);
+    bigMap.zoomBy(event.deltaY < 0 ? BIG_MAP_ZOOM_STEP : 1 / BIG_MAP_ZOOM_STEP, cursor.x, cursor.y);
+  },
+  { passive: false },
+);
+
 const playerHpFill = document.querySelector<HTMLElement>("[data-player-hp-fill]")!;
 const playerHpLabel = document.querySelector<HTMLElement>("[data-player-hp-label]")!;
 const playerAilmentsEl = document.querySelector<HTMLElement>("[data-player-ailments]")!;
 const playerBuffsEl = document.querySelector<HTMLElement>("[data-player-buffs]")!;
+const playerDotsEl = document.querySelector<HTMLElement>("[data-player-dots]")!;
 const playerCastBarEl = document.querySelector<HTMLElement>("[data-player-cast-bar]")!;
 const playerCastFill = document.querySelector<HTMLElement>("[data-player-cast-fill]")!;
 const playerCastLabel = document.querySelector<HTMLElement>("[data-player-cast-label]")!;
@@ -145,9 +228,29 @@ const targetCastNameEl = document.querySelector<HTMLElement>("[data-target-cast-
 const targetEnrageEl = document.querySelector<HTMLElement>("[data-target-enrage]")!;
 
 const partyPanel = document.getElementById("party-panel")!;
+const partyCountEl = document.querySelector<HTMLElement>("[data-party-count]")!;
 const partyMemberListEl = document.getElementById("party-member-list")!;
 const partyInvitePromptEl = document.getElementById("party-invite-prompt")!;
 const partyInviteTextEl = document.querySelector<HTMLElement>("[data-party-invite-text]")!;
+
+const friendsPanel = document.getElementById("friends-panel")!;
+const friendRequestListEl = document.getElementById("friend-request-list")!;
+const friendListEl = document.getElementById("friend-list")!;
+const friendAddInput = document.getElementById("friend-add-input") as HTMLInputElement;
+
+const guildPanel = document.getElementById("guild-panel")!;
+const guildNoGuildSectionEl = document.getElementById("guild-no-guild-section")!;
+const guildRosterSectionEl = document.getElementById("guild-roster-section")!;
+const guildInvitesSectionEl = document.getElementById("guild-invites-section")!;
+const guildEmptyStateEl = document.getElementById("guild-empty-state")!;
+const guildInviteListEl = document.getElementById("guild-invite-list")!;
+const guildNameInput = document.getElementById("guild-name-input") as HTMLInputElement;
+const guildNameLabelEl = document.querySelector<HTMLElement>("[data-guild-name-label]")!;
+const guildMemberCountEl = document.querySelector<HTMLElement>("[data-guild-member-count]")!;
+const guildInviteSectionEl = document.getElementById("guild-invite-section")!;
+const guildInviteInput = document.getElementById("guild-invite-input") as HTMLInputElement;
+const guildMemberListEl = document.getElementById("guild-member-list")!;
+const guildDisbandBtn = document.querySelector<HTMLButtonElement>("[data-guild-disband]")!;
 
 const tradeInvitePromptEl = document.getElementById("trade-invite-prompt")!;
 const tradeInviteTextEl = document.querySelector<HTMLElement>("[data-trade-invite-text]")!;
@@ -193,18 +296,29 @@ const mainStatLabelEl = document.querySelector<HTMLElement>("[data-stat-main-lab
 
 const equipRowEls: Record<EquipSlot, HTMLElement> = {
   weapon: document.querySelector<HTMLElement>('[data-equip-row="weapon"]')!,
+  offHand: document.querySelector<HTMLElement>('[data-equip-row="offHand"]')!,
+  head: document.querySelector<HTMLElement>('[data-equip-row="head"]')!,
+  neck: document.querySelector<HTMLElement>('[data-equip-row="neck"]')!,
+  shoulders: document.querySelector<HTMLElement>('[data-equip-row="shoulders"]')!,
   armor: document.querySelector<HTMLElement>('[data-equip-row="armor"]')!,
+  hands: document.querySelector<HTMLElement>('[data-equip-row="hands"]')!,
+  waist: document.querySelector<HTMLElement>('[data-equip-row="waist"]')!,
+  legs: document.querySelector<HTMLElement>('[data-equip-row="legs"]')!,
+  feet: document.querySelector<HTMLElement>('[data-equip-row="feet"]')!,
+  ring: document.querySelector<HTMLElement>('[data-equip-row="ring"]')!,
   trinket: document.querySelector<HTMLElement>('[data-equip-row="trinket"]')!,
 };
 
 const inventoryPanel = document.getElementById("inventory-panel")!;
 const inventoryListEl = document.getElementById("inventory-list")!;
+const inventoryCountEl = document.querySelector<HTMLElement>("[data-inventory-count]")!;
 
 const lootWindow = document.getElementById("loot-window")!;
 const lootListEl = document.getElementById("loot-list")!;
 
 const waypointPanel = document.getElementById("waypoint-panel")!;
-const waypointListEl = document.getElementById("waypoint-list")!;
+const waypointMapCanvas = document.getElementById("waypoint-map") as HTMLCanvasElement;
+const waypointMap = new Minimap(waypointMapCanvas, true);
 
 const talentPanel = document.getElementById("talent-panel")!;
 const talentListEl = document.getElementById("talent-list")!;
@@ -219,6 +333,8 @@ const npcDialogueSellLabelEl = document.querySelector<HTMLElement>("[data-npc-di
 const npcDialogueSellListEl = document.getElementById("npc-dialogue-sell-list")!;
 const questLogPanel = document.getElementById("quest-log-panel")!;
 const questLogListEl = document.getElementById("quest-log-list")!;
+
+const actionFeedbackEl = document.getElementById("action-feedback")!;
 
 const itemTooltipEl = document.getElementById("item-tooltip")!;
 const itemTooltipNameEl = document.querySelector<HTMLElement>("[data-tooltip-name]")!;
@@ -314,7 +430,7 @@ function showItemTooltip(token: string, event: MouseEvent) {
   const multiplier = RARITY_MULTIPLIER[rarity];
   itemTooltipNameEl.textContent = item.name;
   itemTooltipNameEl.style.color = RARITY_COLOR[rarity];
-  itemTooltipSlotEl.textContent = capitalize(item.slot);
+  itemTooltipSlotEl.textContent = EQUIP_SLOT_LABEL[item.slot];
   itemTooltipStatsEl.innerHTML = Object.entries(item.bonuses)
     .map(([stat, value]) => `<span>+${Math.round((value ?? 0) * multiplier)} ${labelForStat(stat as keyof PlayerStats)}</span>`)
     .join("");
@@ -393,6 +509,8 @@ makeDraggable(talentPanel, "talents");
 makeDraggable(npcDialoguePanel, "npc-dialogue");
 makeDraggable(questLogPanel, "quest-log");
 makeDraggable(partyPanel, "party");
+makeDraggable(friendsPanel, "friends");
+makeDraggable(guildPanel, "guild");
 makeDraggable(dungeonFinderPanel, "dungeon-finder");
 makeDraggable(dungeonStatusPanel, "dungeon-status");
 makeDraggable(chatPanel, "chat");
@@ -421,7 +539,16 @@ interface PlayerStatsSnapshot {
   armor: number;
   gold: number;
   equippedWeapon: string;
+  equippedOffHand: string;
+  equippedHead: string;
+  equippedNeck: string;
+  equippedShoulders: string;
   equippedArmor: string;
+  equippedHands: string;
+  equippedWaist: string;
+  equippedLegs: string;
+  equippedFeet: string;
+  equippedRing: string;
   equippedTrinket: string;
   inventory: Iterable<string>;
   talentPoints: number;
@@ -429,12 +556,27 @@ interface PlayerStatsSnapshot {
   questProgress: Iterable<[string, number]>;
   questCompleted: Iterable<[string, number]>;
   partyId: string;
+  friends: Iterable<[string, { characterId: number; name: string; level: number; classId: string; online: boolean }]>;
+  pendingFriendRequests: Iterable<{ requestId: number; fromCharacterId: number; fromName: string }>;
+  guildId: number;
+  guildName: string;
+  guildRole: string;
+  pendingGuildInvites: Iterable<{ inviteId: number; guildId: number; guildName: string; invitedByName: string }>;
 }
 
 function renderEquipment(player: PlayerStatsSnapshot) {
   const equipped: Record<EquipSlot, string> = {
     weapon: player.equippedWeapon,
+    offHand: player.equippedOffHand,
+    head: player.equippedHead,
+    neck: player.equippedNeck,
+    shoulders: player.equippedShoulders,
     armor: player.equippedArmor,
+    hands: player.equippedHands,
+    waist: player.equippedWaist,
+    legs: player.equippedLegs,
+    feet: player.equippedFeet,
+    ring: player.equippedRing,
     trinket: player.equippedTrinket,
   };
 
@@ -454,6 +596,7 @@ function renderEquipment(player: PlayerStatsSnapshot) {
 function renderInventory(player: PlayerStatsSnapshot) {
   inventoryListEl.innerHTML = "";
   const tokens = [...player.inventory];
+  inventoryCountEl.textContent = `(${tokens.length} / ${INVENTORY_SIZE})`;
   for (let i = 0; i < INVENTORY_SIZE; i++) {
     const token = tokens[i];
     const decoded = token ? decodeItemToken(token) : undefined;
@@ -568,11 +711,24 @@ function updateCharacterPanel(player: PlayerStatsSnapshot) {
       luck: player.luck,
       armor: player.armor,
     },
-    { weapon: player.equippedWeapon, armor: player.equippedArmor, trinket: player.equippedTrinket },
+    {
+      weapon: player.equippedWeapon,
+      offHand: player.equippedOffHand,
+      head: player.equippedHead,
+      neck: player.equippedNeck,
+      shoulders: player.equippedShoulders,
+      armor: player.equippedArmor,
+      hands: player.equippedHands,
+      waist: player.equippedWaist,
+      legs: player.equippedLegs,
+      feet: player.equippedFeet,
+      ring: player.equippedRing,
+      trinket: player.equippedTrinket,
+    },
   );
 
   const mainStat = CLASSES[player.classId as ClassId]?.mainStat;
-  mainStatLabelEl.textContent = mainStat ? MAIN_STAT_NAME[mainStat] : "Main Stat";
+  mainStatLabelEl.textContent = `⚡ ${mainStat ? MAIN_STAT_NAME[mainStat] : "Main Stat"}`;
   statEls.mainStat.textContent = `${effective.mainStat}`;
   statEls.vitality.textContent = `${effective.vitality}`;
   statEls.luck.textContent = `${effective.luck}`;
@@ -659,7 +815,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const npcs = new Map<string, NpcAvatar>();
   for (const def of Object.values(NPCS)) {
     const wander = !def.vendorItemIds?.length && !(NPC_QUEST_IDS[def.id]?.length);
-    const avatar = new NpcAvatar(wander);
+    const avatar = new NpcAvatar(def.name, wander);
     avatar.group.userData.npcId = def.id;
     avatar.setPosition(def.x, def.z, def.yOffset);
     avatar.setVendorIndicator(!!def.vendorItemIds);
@@ -714,7 +870,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
   // Follows the cursor while a ground-targeted spell (Explosive Trap, Blizzard) is pending
   // placement - see the "click" listener below for how pendingGroundTargetSpellId drives it.
-  const groundTargetPreview = new AoeCircle();
+  const groundTargetPreview = new Telegraph();
   gameScene.scene.add(groundTargetPreview.mesh);
 
   const combatText = new FloatingCombatText(gameScene.scene);
@@ -734,6 +890,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   let localHp = 0;
   let localMaxHp = 0;
   let localCastSpellId = "";
+  let localGuildId = 0;
+  let localGuildRole = "";
   let localCastActive = false;
   let localCastStartRef = 0;
 
@@ -804,6 +962,15 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     playerBuffsEl.hidden = active.length === 0;
   }
 
+  // DotStack (see WorldState.ts) carries no name/kind of its own (unlike ailments/buffs, which
+  // key off AilmentKind/BuffKind) - it's just however many damage-over-time stacks are currently
+  // ticking, so this shows a stack count rather than a list of named effects.
+  function updateDotIndicator(player: { dots: { length: number } }) {
+    const count = player.dots.length;
+    playerDotsEl.textContent = count > 0 ? `DOT${count > 1 ? ` ×${count}` : ""}` : "";
+    playerDotsEl.hidden = count === 0;
+  }
+
   function renderPartyPanel() {
     const local = localSessionId ? playerSchemaById.get(localSessionId) : undefined;
     const partyId = local?.partyId ?? "";
@@ -813,10 +980,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
 
     partyPanel.hidden = false;
-    partyMemberListEl.innerHTML = "";
-    for (const [sessionId, schema] of playerSchemaById) {
-      if (schema.partyId !== partyId) continue;
+    const members = [...playerSchemaById].filter(([, schema]) => schema.partyId === partyId);
+    partyCountEl.textContent = `${members.length} / ${PARTY_MAX_SIZE} members`;
 
+    partyMemberListEl.innerHTML = "";
+    for (const [sessionId, schema] of members) {
       const className = CLASSES[schema.classId as ClassId]?.name ?? schema.classId;
       const label = sessionId === localSessionId ? `${schema.name} (You)` : schema.name;
       const fraction = schema.maxHp > 0 ? Math.max(0, Math.min(1, schema.hp / schema.maxHp)) : 0;
@@ -847,6 +1015,200 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     const inviterLabel = inviter?.name || (inviter ? (CLASSES[inviter.classId as ClassId]?.name ?? "Someone") : "Someone");
     partyInviteTextEl.textContent = `${inviterLabel} wants to group with you.`;
     partyInvitePromptEl.hidden = false;
+  }
+
+  // activeGuildRoster is a pulled snapshot (guild_roster_request -> guild_roster), not synced
+  // schema state - see the plan's own reasoning (mirrors TradeSnapshot): a full roster including
+  // offline members is too large/situational to duplicate onto every member's own Player schema.
+  let activeGuildRoster: GuildRosterSnapshot | null = null;
+
+  function statusDotHtml(online: boolean): string {
+    return `<span class="status-dot ${online ? "online" : "offline"}" title="${online ? "Online" : "Offline"}"></span>`;
+  }
+
+  // The name itself is wrapped in its own inner span so text-overflow:ellipsis has a single text
+  // node to truncate - applying it directly to the outer flex container (name + optional status
+  // dot) doesn't reliably ellipsis in a flex layout, it just hard-clips with no "…".
+  function socialRowNameHtml(text: string, online?: boolean): string {
+    const dot = online === undefined ? "" : statusDotHtml(online);
+    return `<span class="social-row-name">${dot}<span class="social-row-name-text">${text}</span></span>`;
+  }
+
+  function renderFriendsPanel() {
+    if (!localPlayerSchema) return;
+
+    friendRequestListEl.innerHTML = "";
+    for (const request of localPlayerSchema.pendingFriendRequests) {
+      const row = document.createElement("div");
+      row.className = "social-row";
+      row.innerHTML = `<div class="social-row-top">${socialRowNameHtml(request.fromName)}</div>`;
+      const actions = document.createElement("div");
+      actions.className = "social-row-actions";
+      const acceptBtn = document.createElement("button");
+      acceptBtn.type = "button";
+      acceptBtn.className = "overlay-button accent";
+      acceptBtn.textContent = "Accept";
+      acceptBtn.addEventListener("click", () => {
+        const message: FriendRespondMessage = { requestId: request.requestId, accept: true };
+        room?.send("friend_respond", message);
+      });
+      const declineBtn = document.createElement("button");
+      declineBtn.type = "button";
+      declineBtn.className = "overlay-button danger";
+      declineBtn.textContent = "Decline";
+      declineBtn.addEventListener("click", () => {
+        const message: FriendRespondMessage = { requestId: request.requestId, accept: false };
+        room?.send("friend_respond", message);
+      });
+      actions.appendChild(acceptBtn);
+      actions.appendChild(declineBtn);
+      row.appendChild(actions);
+      friendRequestListEl.appendChild(row);
+    }
+
+    friendListEl.innerHTML = "";
+    for (const [, friend] of localPlayerSchema.friends) {
+      const row = document.createElement("div");
+      row.className = "social-row";
+      row.innerHTML = `
+        <div class="social-row-top">
+          ${socialRowNameHtml(friend.name, friend.online)}
+          <span class="item-slot-tag">Lv.${friend.level}</span>
+        </div>
+      `;
+      const actions = document.createElement("div");
+      actions.className = "social-row-actions";
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "overlay-button danger";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => {
+        const message: FriendRemoveMessage = { characterId: friend.characterId };
+        room?.send("friend_remove", message);
+      });
+      actions.appendChild(removeBtn);
+      row.appendChild(actions);
+      friendListEl.appendChild(row);
+    }
+  }
+
+  function renderGuildPanel() {
+    if (!localPlayerSchema) return;
+
+    if (localPlayerSchema.guildId === 0) {
+      guildNoGuildSectionEl.hidden = false;
+      guildRosterSectionEl.hidden = true;
+
+      const invites = localPlayerSchema.pendingGuildInvites;
+      const inviteCount = [...invites].length;
+      guildInvitesSectionEl.hidden = inviteCount === 0;
+      guildEmptyStateEl.hidden = inviteCount > 0;
+
+      guildInviteListEl.innerHTML = "";
+      for (const invite of invites) {
+        const row = document.createElement("div");
+        row.className = "social-row";
+        row.innerHTML = `
+          <div class="social-row-top">
+            ${socialRowNameHtml(`🛡️ ${invite.guildName}`)}
+            <span class="item-slot-tag">from ${invite.invitedByName}</span>
+          </div>
+        `;
+        const actions = document.createElement("div");
+        actions.className = "social-row-actions";
+        const acceptBtn = document.createElement("button");
+        acceptBtn.type = "button";
+        acceptBtn.className = "overlay-button accent";
+        acceptBtn.textContent = "Accept";
+        acceptBtn.addEventListener("click", () => {
+          const message: GuildRespondMessage = { inviteId: invite.inviteId, accept: true };
+          room?.send("guild_respond", message);
+        });
+        const declineBtn = document.createElement("button");
+        declineBtn.type = "button";
+        declineBtn.className = "overlay-button danger";
+        declineBtn.textContent = "Decline";
+        declineBtn.addEventListener("click", () => {
+          const message: GuildRespondMessage = { inviteId: invite.inviteId, accept: false };
+          room?.send("guild_respond", message);
+        });
+        actions.appendChild(acceptBtn);
+        actions.appendChild(declineBtn);
+        row.appendChild(actions);
+        guildInviteListEl.appendChild(row);
+      }
+      return;
+    }
+
+    guildNoGuildSectionEl.hidden = true;
+    guildRosterSectionEl.hidden = false;
+    guildNameLabelEl.textContent = localPlayerSchema.guildName;
+    const isLeader = localPlayerSchema.guildRole === "leader";
+    guildDisbandBtn.hidden = !isLeader;
+    guildInviteSectionEl.hidden = !isLeader; // only a leader can invite - see handleGuildInvite's own leader-only check
+
+    guildMemberListEl.innerHTML = "";
+    const members = activeGuildRoster?.guildId === localPlayerSchema.guildId ? activeGuildRoster.members : [];
+    const onlineCount = members.filter((m) => m.online).length;
+    guildMemberCountEl.textContent = members.length
+      ? `${members.length} member${members.length === 1 ? "" : "s"} · ${onlineCount} online`
+      : "Loading members…";
+
+    for (const member of members) {
+      const row = document.createElement("div");
+      row.className = member.role === "leader" ? "social-row leader-row" : "social-row";
+      const selfTag = member.characterId === characterId ? " (You)" : "";
+      const roleBadge = `<span class="role-badge ${member.role}">${member.role === "leader" ? "👑 Leader" : "Member"}</span>`;
+      row.innerHTML = `
+        <div class="social-row-top">
+          ${socialRowNameHtml(`${member.name}${selfTag}`, member.online)}
+          <span class="social-row-badges">
+            <span class="item-slot-tag">Lv.${member.level}</span>
+            ${roleBadge}
+          </span>
+        </div>
+      `;
+
+      if (isLeader && member.characterId !== characterId) {
+        const actions = document.createElement("div");
+        actions.className = "social-row-actions";
+        const promoteBtn = document.createElement("button");
+        promoteBtn.type = "button";
+        promoteBtn.className = "overlay-button";
+        promoteBtn.textContent = "Promote";
+        promoteBtn.addEventListener("click", () => {
+          const message: GuildPromoteMessage = { characterId: member.characterId };
+          room?.send("guild_promote", message);
+        });
+        const kickBtn = document.createElement("button");
+        kickBtn.type = "button";
+        kickBtn.className = "overlay-button danger";
+        kickBtn.textContent = "Kick";
+        kickBtn.addEventListener("click", () => {
+          const message: GuildKickMessage = { characterId: member.characterId };
+          room?.send("guild_kick", message);
+          room?.send("guild_roster_request");
+        });
+        actions.appendChild(promoteBtn);
+        actions.appendChild(kickBtn);
+        row.appendChild(actions);
+      }
+      guildMemberListEl.appendChild(row);
+    }
+  }
+
+  function sendFriendRequestByName(targetName: string) {
+    const name = targetName.trim();
+    if (!name) return;
+    const message: FriendRequestMessage = { targetName: name };
+    room?.send("friend_request", message);
+  }
+
+  function sendGuildInviteByName(targetName: string) {
+    const name = targetName.trim();
+    if (!name) return;
+    const message: GuildInviteMessage = { targetName: name };
+    room?.send("guild_invite", message);
   }
 
   // Guards mirror the server's own checks in handlePartyInvite, so an obviously-invalid
@@ -900,6 +1262,26 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     room?.send("trade_request", message);
   }
 
+  // Best-effort client-side guard (mirrors handleFriendRequest's own already_friends check by
+  // name) - purely to keep an obviously-redundant option off the menu; the server remains the
+  // sole authority and still rejects a request that slips through (e.g. a stale player list).
+  function canAddFriend(targetSessionId: string): boolean {
+    if (!localSessionId || targetSessionId === localSessionId || !localPlayerSchema) return false;
+    const target = playerSchemaById.get(targetSessionId);
+    if (!target) return false;
+    for (const [, friend] of localPlayerSchema.friends) {
+      if (friend.name === target.name) return false;
+    }
+    return true;
+  }
+
+  // Guard mirrors handleGuildInvite's own leader-only check.
+  function canInviteToGuild(targetSessionId: string): boolean {
+    if (!localSessionId || targetSessionId === localSessionId || !localPlayerSchema) return false;
+    if (localPlayerSchema.guildId === 0 || localPlayerSchema.guildRole !== "leader") return false;
+    return playerSchemaById.has(targetSessionId);
+  }
+
   // Right-click (on the 3D avatar or the target panel) opens this menu - the single entry
   // point for player-targeted actions, always with Invite first per the established convention.
   function actionsForPlayerTarget(targetSessionId: string): ContextMenuAction[] {
@@ -909,6 +1291,18 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
     if (canTrade(targetSessionId)) {
       actions.push({ label: "Trade", onClick: () => sendTradeRequest(targetSessionId) });
+    }
+    if (canAddFriend(targetSessionId)) {
+      actions.push({
+        label: "Add Friend",
+        onClick: () => sendFriendRequestByName(playerSchemaById.get(targetSessionId)!.name),
+      });
+    }
+    if (canInviteToGuild(targetSessionId)) {
+      actions.push({
+        label: "Invite to Guild",
+        onClick: () => sendGuildInviteByName(playerSchemaById.get(targetSessionId)!.name),
+      });
     }
     return actions;
   }
@@ -1073,6 +1467,78 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     room?.send("cast", message);
   }
 
+  const CAST_FAIL_LABEL: Record<CastFailReason, string> = {
+    out_of_range: "Out of Range",
+    no_line_of_sight: "No Line of Sight",
+    no_target: "No Target Selected",
+    already_casting: "Already Casting",
+    on_cooldown: "On Cooldown",
+    interrupted: "Interrupted",
+  };
+
+  const ACTION_FAIL_LABEL: Record<ActionFailReason, string> = {
+    too_far: "Too Far Away",
+    inventory_full: "Inventory Full",
+    not_enough_gold: "Not Enough Gold",
+    not_available: "Not Available",
+    not_found: "Character Not Found",
+    already_friends: "Already Friends",
+    already_pending: "Request Already Pending",
+    already_in_guild: "Already In a Guild",
+    name_taken: "Name Taken",
+    not_leader: "Not the Guild Leader",
+    not_admin: "Admins Only",
+  };
+
+  // One shared toast for every reason a player-initiated action can fail - started out cast-only
+  // (see castSpell's own predictive checks below and the "cast_failed" server message) and now
+  // also covers loot/quest/vendor/waypoint rejections (see "action_failed" below and the
+  // proximity pre-checks before openLootWindow/openNpcDialogue/openWaypointPanel) - a single spot
+  // so "the player tried to do something and it didn't work" always gets the same clear,
+  // consistent acknowledgment regardless of which check caught it or whether it was
+  // client-predicted or a server round-trip.
+  let actionFeedbackFadeTimer = 0;
+  function showActionFeedback(text: string) {
+    actionFeedbackEl.textContent = text;
+    actionFeedbackEl.classList.remove("visible");
+    void actionFeedbackEl.offsetWidth; // force reflow so re-triggering the same text still re-fades from a full restart
+    actionFeedbackEl.classList.add("visible");
+    window.clearTimeout(actionFeedbackFadeTimer);
+    actionFeedbackFadeTimer = window.setTimeout(() => actionFeedbackEl.classList.remove("visible"), 1300);
+    playErrorSound();
+  }
+
+  // Small allowance for latency between this client-side check and the server's own (same idea as
+  // castSpell's CLIENT_RANGE_BUFFER below, just shared across every interact-radius check instead
+  // of a spell-range one) - keeps an "in range" verdict here from diverging from what the server
+  // will accept for a legitimately-in-range click.
+  const CLIENT_INTERACT_RANGE_BUFFER = 1;
+  function isNearWorldPoint(x: number, z: number, radius: number): boolean {
+    return Math.hypot(localPredicted.x - x, localPredicted.z - z) <= radius + CLIENT_INTERACT_RANGE_BUFFER;
+  }
+
+  // Reuses HealthBar's own DEFAULT_Y_OFFSET as the world-space anchor (imported, not duplicated,
+  // so the two can never silently drift apart the way a copied literal would) - the extra 100
+  // screen pixels on top of that is the actual "float above the player" clearance, applied in
+  // screen space (not world units) so it stays a constant, readable distance regardless of camera
+  // zoom/distance.
+  const ACTION_FEEDBACK_WORLD_Y_OFFSET = HEALTH_BAR_DEFAULT_Y_OFFSET;
+  const ACTION_FEEDBACK_SCREEN_OFFSET_PX = 100;
+  const actionFeedbackAnchorScratch = new THREE.Vector3();
+
+  // Projects the local player's position to a screen pixel and repositions the toast there (see
+  // #action-feedback's own CSS comment for how translate(-50%, -100%) uses this point). Called every
+  // frame from animate() alongside the rest of the local-player sync, so the toast tracks the
+  // player smoothly even while it's fading out, not just at the moment it's shown.
+  function syncActionFeedbackPosition(worldX: number, worldY: number, worldZ: number) {
+    actionFeedbackAnchorScratch.set(worldX, worldY + ACTION_FEEDBACK_WORLD_Y_OFFSET, worldZ).project(gameScene.camera);
+    const rect = gameScene.renderer.domElement.getBoundingClientRect();
+    const screenX = rect.left + ((actionFeedbackAnchorScratch.x + 1) / 2) * rect.width;
+    const screenY = rect.top + ((1 - actionFeedbackAnchorScratch.y) / 2) * rect.height;
+    actionFeedbackEl.style.left = `${screenX}px`;
+    actionFeedbackEl.style.top = `${screenY - ACTION_FEEDBACK_SCREEN_OFFSET_PX}px`;
+  }
+
   // Mirrors CombatEngine.RANGE_BUFFER (a small allowance for latency between this check and the
   // server's own) so an "in range" verdict here doesn't diverge from what the server will accept.
   const CLIENT_RANGE_BUFFER = 1;
@@ -1087,6 +1553,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   // ground-target click handler below). The steady "too-far" state itself is driven continuously
   // by isSpellOutOfRange, not by this.
   function flashOutOfRange(slotIndex: number) {
+    showActionFeedback(CAST_FAIL_LABEL.out_of_range);
     const el = spellSlotEls[slotIndex];
     if (!el) return;
     el.classList.remove("out-of-range");
@@ -1129,21 +1596,36 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     const spellId = slotSpellIds[slotIndex];
     if (!spellId) return;
 
+    if (localCastActive) {
+      showActionFeedback(CAST_FAIL_LABEL.already_casting);
+      return;
+    }
+
     const spell = SPELLS[spellId];
     const now = performance.now();
-    if (activeCastsFor(spellId, now).length >= maxChargesFor(spellId)) return;
+    if (activeCastsFor(spellId, now).length >= maxChargesFor(spellId)) {
+      showActionFeedback(CAST_FAIL_LABEL.on_cooldown);
+      return;
+    }
 
     if (spell.targetType === "ground") {
       pendingGroundTargetSpellId = spellId;
       pendingGroundTargetSlotIndex = slotIndex;
       container.classList.add("ground-target-pending");
-      groundTargetPreview.setRadius(spell.aoeRadius ?? 0);
+      // The composable path's own shape if this spell has one (see SpellDef.effects), falling
+      // back to the old flat aoeRadius as a plain circle - keeps every spell authored before
+      // `effects` existed previewing exactly as it always did.
+      const previewShape: EffectShape = spell.effects?.[0]?.shape ?? { kind: "circle", radius: spell.aoeRadius ?? 0, centeredOn: "impact" };
+      groundTargetPreview.setShape(previewShape);
       groundTargetPreview.show();
       return;
     }
 
     if (spell.targetType === "enemy") {
-      if (!currentTargetId || !enemySchemaById.has(currentTargetId)) return;
+      if (!currentTargetId || !enemySchemaById.has(currentTargetId)) {
+        showActionFeedback(CAST_FAIL_LABEL.no_target);
+        return;
+      }
       const enemyPos = enemies.get(currentTargetId)?.group.position;
       if (enemyPos && !isWithinSpellRange(spellId, enemyPos.x, enemyPos.z)) {
         flashOutOfRange(slotIndex);
@@ -1152,7 +1634,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       sendCast(spellId, { spellId, targetId: currentTargetId });
     } else if (spell.targetType === "ally") {
       const targetId = currentTargetId && playerSchemaById.has(currentTargetId) ? currentTargetId : localSessionId ?? undefined;
-      if (targetId && targetId !== localSessionId) {
+      if (!targetId) {
+        showActionFeedback(CAST_FAIL_LABEL.no_target);
+        return;
+      }
+      if (targetId !== localSessionId) {
         const allyPos = avatars.get(targetId)?.group.position;
         if (allyPos && !isWithinSpellRange(spellId, allyPos.x, allyPos.z)) {
           flashOutOfRange(slotIndex);
@@ -1189,7 +1675,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
       const row = document.createElement("button");
       row.className = "item-row";
-      row.innerHTML = `<span style="color: ${RARITY_COLOR[rarity]}">${item.name}</span><span class="item-slot-tag">${capitalize(item.slot)}</span>`;
+      row.innerHTML = `<span style="color: ${RARITY_COLOR[rarity]}">${item.name}</span><span class="item-slot-tag">${EQUIP_SLOT_LABEL[item.slot]}</span>`;
       row.addEventListener("click", () => {
         const message: LootTakeMessage = { bagId: currentLootBagId!, itemId: token };
         room?.send("loot_take", message);
@@ -1199,6 +1685,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   }
 
   function openLootWindow(bagId: string) {
+    const bag = lootBagSchemaById.get(bagId);
+    if (bag && !isNearWorldPoint(bag.x, bag.z, LOOT_PICKUP_RADIUS)) {
+      showActionFeedback(ACTION_FAIL_LABEL.too_far);
+      return;
+    }
     currentLootBagId = bagId;
     lootWindow.hidden = false;
     renderLootWindow();
@@ -1220,29 +1711,60 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
   });
 
-  // Lists every OTHER waypoint on the map - the server independently re-validates that the
-  // player is actually standing near some waypoint (see WorldRoom.handleWaypointTravel), this
-  // just keeps the current one from pointlessly listing itself as a destination.
+  // Draws the whole map's terrain (same as the M-key big map) but with waypointsOnly=true so
+  // structures/NPCs/portal/boss arena don't compete for attention on a panel whose only job is
+  // picking a destination - just the waypoints, every OTHER one linked back to the current one and
+  // labeled by name, plus a highlighted "you are here"
+  // marker over the current one - see Minimap.update's travelFromWaypointId param. The server
+  // independently re-validates that the player is actually standing near some waypoint (see
+  // WorldRoom.handleWaypointTravel) - this client-side proximity gate (openWaypointPanel below)
+  // just keeps the panel itself from ever opening somewhere that request would get rejected. A
+  // static snapshot at open time, not wired into the per-frame animate() loop like the minimap/big
+  // map are - picking a fast-travel destination doesn't need a live-updating view.
   function renderWaypointPanel() {
     if (!currentWaypointId) return;
-
-    waypointListEl.innerHTML = "";
-    for (const def of WAYPOINTS) {
-      if (def.id === currentWaypointId) continue;
-
-      const row = document.createElement("button");
-      row.className = "item-row";
-      row.textContent = def.name;
-      row.addEventListener("click", () => {
-        const message: WaypointTravelMessage = { targetWaypointId: def.id };
-        room?.send("waypoint_travel", message);
-        closeWaypointPanel();
-      });
-      waypointListEl.appendChild(row);
-    }
+    waypointMap.resetView();
+    const self = { x: localPredicted.x, z: localPredicted.z, rotationY: localRotationY };
+    waypointMap.update(self, true, [], new Map(), currentWaypointId, true);
   }
 
+  // Mirrors main.ts's own toBigMapBackingPixels - canvas.width/height are the backing-resolution
+  // pixels Minimap.project()/hitTestWaypoint() work in, but mouse events report CSS pixels against
+  // the element's on-screen size.
+  function toWaypointMapBackingPixels(cssX: number, cssY: number): { x: number; y: number } {
+    const rect = waypointMapCanvas.getBoundingClientRect();
+    return {
+      x: cssX * (rect.width > 0 ? waypointMapCanvas.width / rect.width : 1),
+      y: cssY * (rect.height > 0 ? waypointMapCanvas.height / rect.height : 1),
+    };
+  }
+
+  waypointMapCanvas.addEventListener("click", (event) => {
+    if (!currentWaypointId) return;
+    const p = toWaypointMapBackingPixels(event.offsetX, event.offsetY);
+    const hitId = waypointMap.hitTestWaypoint(p.x, p.y);
+    if (!hitId || hitId === currentWaypointId) return;
+    const message: WaypointTravelMessage = { targetWaypointId: hitId };
+    room?.send("waypoint_travel", message);
+    closeWaypointPanel();
+  });
+
+  // Only the cursor reacts on hover (a pointer over a clickable waypoint, a grab cursor otherwise -
+  // matches the panel's own draggable affordance) - no re-render needed since the map itself is a
+  // static snapshot (see renderWaypointPanel's own doc comment).
+  waypointMapCanvas.addEventListener("mousemove", (event) => {
+    if (!currentWaypointId) return;
+    const p = toWaypointMapBackingPixels(event.offsetX, event.offsetY);
+    const hitId = waypointMap.hitTestWaypoint(p.x, p.y);
+    waypointMapCanvas.style.cursor = hitId && hitId !== currentWaypointId ? "pointer" : "default";
+  });
+
   function openWaypointPanel(waypointId: string) {
+    const waypoint = WAYPOINTS.find((w) => w.id === waypointId);
+    if (waypoint && !isNearWorldPoint(waypoint.x, waypoint.z, WAYPOINT_INTERACT_RADIUS)) {
+      showActionFeedback(ACTION_FAIL_LABEL.too_far);
+      return;
+    }
     currentWaypointId = waypointId;
     waypointPanel.hidden = false;
     renderWaypointPanel();
@@ -1369,7 +1891,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
       if (state === "available") {
         const btn = document.createElement("button");
-        btn.className = "overlay-button";
+        btn.className = "overlay-button accent";
         btn.textContent = "Accept";
         btn.addEventListener("click", () => {
           const message: AcceptQuestMessage = { questId };
@@ -1383,7 +1905,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         card.appendChild(status);
       } else if (state === "ready") {
         const btn = document.createElement("button");
-        btn.className = "overlay-button";
+        btn.className = "overlay-button accent";
         btn.textContent = "Turn In";
         btn.addEventListener("click", () => {
           const message: TurnInQuestMessage = { questId };
@@ -1392,8 +1914,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         card.appendChild(btn);
       } else {
         const status = document.createElement("span");
-        status.className = "talent-rank";
-        status.textContent = "Completed";
+        status.className = "role-badge complete";
+        status.textContent = "✓ Completed";
         card.appendChild(status);
       }
 
@@ -1477,6 +1999,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   }
 
   function openNpcDialogue(npcId: string) {
+    const npc = NPCS[npcId];
+    if (npc && !isNearWorldPoint(npc.x, npc.z, NPC_INTERACT_RADIUS)) {
+      showActionFeedback(ACTION_FAIL_LABEL.too_far);
+      return;
+    }
     currentNpcDialogueId = npcId;
     npcDialoguePanel.hidden = false;
     renderNpcDialogue();
@@ -1554,7 +2081,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         row.appendChild(tag);
       } else {
         const btn = document.createElement("button");
-        btn.className = "overlay-button";
+        btn.className = "overlay-button accent";
         btn.textContent = "Join";
         btn.disabled = !wouldFit;
         btn.addEventListener("click", () => {
@@ -1584,11 +2111,17 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       const number = index++;
       const quest = QUESTS[questId];
       if (!quest) continue;
+      const fraction = quest.objectiveCount > 0 ? Math.max(0, Math.min(1, progress / quest.objectiveCount)) : 0;
       const row = document.createElement("div");
       row.className = "item-row";
+      row.style.flexDirection = "column";
+      row.style.alignItems = "stretch";
       row.innerHTML = `
-        <span><span class="quest-number">${number}</span>${quest.name}<span class="quest-objective">${questObjectiveLabel(quest)}</span></span>
-        <span class="item-slot-tag">${progress} / ${quest.objectiveCount}</span>
+        <div style="display: flex; justify-content: space-between; width: 100%">
+          <span><span class="quest-number">${number}</span>${quest.name}<span class="quest-objective">${questObjectiveLabel(quest)}</span></span>
+          <span class="item-slot-tag">${progress} / ${quest.objectiveCount}</span>
+        </div>
+        <div class="bar thin"><div class="bar-fill" style="width: ${fraction * 100}%; background: #c9a63c"></div></div>
       `;
       questLogListEl.appendChild(row);
     }
@@ -1627,6 +2160,35 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     sendTradeOffer([...activeTradeSnapshot.selfOffer], clamped);
   });
 
+  document.querySelector("[data-friend-add]")!.addEventListener("click", () => {
+    sendFriendRequestByName(friendAddInput.value);
+    friendAddInput.value = "";
+  });
+  friendAddInput.addEventListener("keydown", (e) => {
+    if (e.code !== "Enter") return;
+    sendFriendRequestByName(friendAddInput.value);
+    friendAddInput.value = "";
+  });
+
+  document.querySelector("[data-guild-create]")!.addEventListener("click", () => {
+    const name = guildNameInput.value.trim().slice(0, GUILD_NAME_MAX_LENGTH);
+    if (!name) return;
+    const message: GuildCreateMessage = { name };
+    room?.send("guild_create", message);
+    guildNameInput.value = "";
+  });
+  document.querySelector("[data-guild-invite]")!.addEventListener("click", () => {
+    sendGuildInviteByName(guildInviteInput.value);
+    guildInviteInput.value = "";
+  });
+  guildInviteInput.addEventListener("keydown", (e) => {
+    if (e.code !== "Enter") return;
+    sendGuildInviteByName(guildInviteInput.value);
+    guildInviteInput.value = "";
+  });
+  document.querySelector("[data-guild-leave]")!.addEventListener("click", () => room?.send("guild_leave"));
+  document.querySelector("[data-guild-disband]")!.addEventListener("click", () => room?.send("guild_disband"));
+
   document.querySelector("[data-dungeon-finder-close]")!.addEventListener("click", () => closeDungeonFinder());
   dungeonOpenListingBtn.addEventListener("click", () => room?.send("dungeon_open_listing"));
   dungeonStartBtn.addEventListener("click", () => room?.send("dungeon_start"));
@@ -1639,12 +2201,78 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     window.location.reload();
   });
 
+  // Say/Party/Guild are kept as fully separate logs (each capped at 100 rows independently, same
+  // limit the combined log used to share) rather than one shared feed with a color-coded row per
+  // channel - the tabs used to only pick which channel your OWN messages went to; every incoming
+  // message still landed in the same scrolling list regardless of which tab was active, so a busy
+  // Say channel could bury a Guild message before anyone switched tabs to see it. Switching tabs
+  // now re-renders #chat-log from that channel's own stored history instead of just changing where
+  // new outgoing messages go.
   let activeChatChannel: ChatChannel = "say";
+  const chatHistory: Record<ChatChannel, HTMLElement[]> = { say: [], party: [], guild: [] };
+
+  function renderActiveChatLog() {
+    chatLogEl.replaceChildren(...chatHistory[activeChatChannel]);
+    chatLogEl.scrollTop = chatLogEl.scrollHeight;
+  }
+
   for (const tab of chatTabEls) {
     tab.addEventListener("click", () => {
       activeChatChannel = tab.dataset.chatChannel as ChatChannel;
       for (const other of chatTabEls) other.classList.toggle("active", other === tab);
+      renderActiveChatLog();
     });
+  }
+
+  const TIME_OF_DAY_NAMED: Record<string, number> = {
+    midnight: 0,
+    night: 0,
+    dawn: 0.25,
+    sunrise: 0.25,
+    morning: 0.25,
+    noon: 0.5,
+    midday: 0.5,
+    day: 0.5,
+    dusk: 0.75,
+    sunset: 0.75,
+    evening: 0.75,
+  };
+
+  // Parses "/time"'s one argument into a 0..1 DayNightCycle fraction - either an hour (0-24,
+  // matching formatTimeOfDay's own mapping: 0/24=midnight, 6=dawn, 12=noon, 18=dusk) or one of the
+  // named times above. Returns null for anything that parses as neither.
+  function parseTimeOfDayArg(arg: string | undefined): number | null {
+    if (!arg) return null;
+    const named = TIME_OF_DAY_NAMED[arg.toLowerCase()];
+    if (named !== undefined) return named;
+    const hour = Number(arg);
+    if (!Number.isFinite(hour)) return null;
+    return (((hour % 24) + 24) % 24) / 24;
+  }
+
+  // The one admin-only "/" chat command so far - typed into the same box as regular messages, but
+  // intercepted client-side before it would ever reach the server as a literal "say". The actual
+  // admin-role check happens server-side (WorldRoom.handleSetTimeOfDay) and comes back as a
+  // "not_admin" action_failed toast if the sender isn't one - this only handles client-side syntax
+  // (a malformed argument never round-trips at all).
+  function handleSlashCommand(text: string) {
+    const [rawCmd, ...args] = text.slice(1).trim().split(/\s+/);
+    const cmd = rawCmd?.toLowerCase();
+    if (cmd === "time") {
+      if (isDungeon) {
+        showActionFeedback("The /time command only works in the overworld");
+        return;
+      }
+      const fraction = parseTimeOfDayArg(args[0]);
+      if (fraction === null) {
+        showActionFeedback("Usage: /time <0-24 | dawn | noon | dusk | night>");
+        return;
+      }
+      const message: SetTimeOfDayMessage = { fraction };
+      room?.send("set_time_of_day", message);
+      return;
+    }
+    showActionFeedback(`Unknown command: /${rawCmd ?? ""}`);
   }
 
   chatInputEl.addEventListener("keydown", (e) => {
@@ -1653,6 +2281,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     chatInputEl.value = "";
     chatInputEl.blur(); // hands movement/hotkeys back to the game immediately
     if (!text) return;
+    if (text.startsWith("/")) {
+      handleSlashCommand(text);
+      return;
+    }
     const message: ChatMessage = { channel: activeChatChannel, text: text.slice(0, CHAT_MAX_LENGTH) };
     room?.send("chat", message);
   });
@@ -1678,7 +2310,19 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       if (!talentPanel.hidden && localPlayerSchema) renderTalents(localPlayerSchema);
     }
     else if (e.code === "KeyL") questLogPanel.hidden = !questLogPanel.hidden;
-    else if (e.code === "KeyM") bigMapPanel.hidden = !bigMapPanel.hidden;
+    else if (e.code === "KeyO") friendsPanel.hidden = !friendsPanel.hidden;
+    else if (e.code === "KeyG") {
+      const opening = guildPanel.hidden;
+      guildPanel.hidden = !guildPanel.hidden;
+      if (opening && localPlayerSchema && localPlayerSchema.guildId !== 0) room?.send("guild_roster_request");
+    }
+    else if (e.code === "KeyM") {
+      bigMapPanel.hidden = !bigMapPanel.hidden;
+      // Reset pan/zoom on open (not close) - so a previous session's zoomed-in corner never
+      // greets the player next time they press M, without losing the view mid-session if they
+      // toggle other panels while the map stays open.
+      if (!bigMapPanel.hidden) bigMap.resetView();
+    }
   });
 
   const raycaster = new THREE.Raycaster();
@@ -1849,15 +2493,30 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       row.appendChild(sender);
       row.appendChild(document.createTextNode(payload.text));
 
-      const wasAtBottom = chatLogEl.scrollTop + chatLogEl.clientHeight >= chatLogEl.scrollHeight - 4;
-      chatLogEl.appendChild(row);
-      while (chatLogEl.children.length > 100) chatLogEl.removeChild(chatLogEl.firstChild!);
-      if (wasAtBottom) chatLogEl.scrollTop = chatLogEl.scrollHeight;
+      const history = chatHistory[payload.channel];
+      history.push(row);
+      while (history.length > 100) history.shift();
+
+      // Only touch the visible log if this message's own channel is the one currently showing -
+      // a Party message arriving while the Say tab is open gets recorded (renderActiveChatLog
+      // will show it once the player switches over) but doesn't interrupt/scroll what's on screen.
+      if (payload.channel === activeChatChannel) {
+        const wasAtBottom = chatLogEl.scrollTop + chatLogEl.clientHeight >= chatLogEl.scrollHeight - 4;
+        chatLogEl.appendChild(row);
+        while (chatLogEl.children.length > 100) chatLogEl.removeChild(chatLogEl.firstChild!);
+        if (wasAtBottom) chatLogEl.scrollTop = chatLogEl.scrollHeight;
+      }
 
       if (payload.channel === "say") {
         avatars.get(payload.senderSessionId)?.chatBubble.show(payload.text);
       }
     });
+
+    // The "/time" admin command's result (see handleSlashCommand) - broadcast to every client in
+    // the room, not just whoever ran the command, so it reads as a GM tool everyone sees the effect
+    // of. WorldRoom-only (see WorldRoom.handleSetTimeOfDay), same "harmless to register
+    // unconditionally" reasoning as trade/guild below - a dungeon connection just never emits it.
+    room.onMessage("time_of_day_set", (payload: TimeOfDaySetBroadcast) => gameScene.setTimeOfDay(payload.fraction));
 
     // Trade is WorldRoom-only (see plan) but these handlers are harmless to register
     // unconditionally - a DungeonRoom connection simply never emits these message types.
@@ -1867,6 +2526,14 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     });
     room.onMessage("trade_complete", () => closeTradeWindow());
     room.onMessage("trade_cancelled", () => closeTradeWindow());
+
+    // Guild management (create/invite/kick/promote/disband) is WorldRoom-only (see plan) but
+    // guild_roster is harmless to register unconditionally - a DungeonRoom connection just never
+    // emits it since its own handleGuildRosterRequest is the only thing that can trigger it there.
+    room.onMessage("guild_roster", (snapshot: GuildRosterSnapshot) => {
+      activeGuildRoster = snapshot;
+      renderGuildPanel();
+    });
 
     // Transient, not synced schema state (see CombatTextEvent) - a target that's already
     // despawned by the time this arrives (killing blow, or a projectile landing after death)
@@ -1883,6 +2550,16 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       if (event.kind === "heal") playHealSound();
       else playHitSound(event.isCrit);
     });
+
+    // Targeted at just this client (see CastFailedMessage's own doc comment) - covers the
+    // failure reasons castSpell can't predict itself (no_line_of_sight) plus a safety net for the
+    // ones it normally already catches client-side, so a cast that fails for any reason always
+    // gets the same visible acknowledgment even if client/server state briefly disagrees.
+    room.onMessage("cast_failed", (event: CastFailedMessage) => showActionFeedback(CAST_FAIL_LABEL[event.reason]));
+    // Same "safety net for state the client couldn't (or didn't bother to) predict" role as
+    // cast_failed above, for loot/quest/vendor/waypoint instead of spells - see ActionFailedMessage's
+    // own doc comment.
+    room.onMessage("action_failed", (event: ActionFailedMessage) => showActionFeedback(ACTION_FAIL_LABEL[event.reason]));
 
     dungeonStatusPanel.hidden = !isDungeon;
     if (isDungeon) {
@@ -1905,11 +2582,13 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
 
     $(room.state).players.onAdd((player, sessionId) => {
-      const avatar = new PlayerAvatar(player.classId);
+      const avatar = new PlayerAvatar(player.classId, player.name);
       avatar.group.userData.sessionId = sessionId;
       avatar.setTarget(player.x, getTerrainHeight(player.x, player.z), player.z, player.rotationY);
       avatar.snapToTarget(0, false);
       avatar.setHp(player.hp, player.maxHp);
+      avatar.setLevel(player.level);
+      avatar.setName(player.name, player.guildName);
       avatar.addTo(gameScene.scene);
       avatars.set(sessionId, avatar);
       playerSchemaById.set(sessionId, player);
@@ -1924,12 +2603,34 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         updateCharacterPanel(player);
         updateAilmentIndicator(player);
         updateBuffIndicator(player);
+        updateDotIndicator(player);
         setupHotbarForClass(player.classId);
         updateNpcQuestIndicators();
         renderPartyPanel();
         renderDungeonFinderPanel();
         renderPartyInvitePrompt(player);
         renderTradeInvitePrompt(player);
+        renderFriendsPanel();
+        renderGuildPanel();
+        localGuildId = player.guildId;
+        localGuildRole = player.guildRole;
+        if (localGuildId !== 0) room?.send("guild_roster_request");
+
+        // Same nested-schema-doesn't-bubble reasoning as questProgress/ailments/buffs below -
+        // friends/pendingFriendRequests/pendingGuildInvites are their own MapSchema/ArraySchema,
+        // so mutating one doesn't reliably trigger the parent Player's own onChange. Each
+        // FriendEntry can also change in place (online flips) without being added/removed, so
+        // it needs its own per-entry listener too - mirrors how enemy/projectile schemas below
+        // bind $(entry).onChange() individually as each one is added.
+        $(player.friends).onAdd((friend) => {
+          renderFriendsPanel();
+          $(friend).onChange(() => renderFriendsPanel());
+        });
+        $(player.friends).onRemove(renderFriendsPanel);
+        $(player.pendingFriendRequests).onAdd(renderFriendsPanel);
+        $(player.pendingFriendRequests).onRemove(renderFriendsPanel);
+        $(player.pendingGuildInvites).onAdd(renderGuildPanel);
+        $(player.pendingGuildInvites).onRemove(renderGuildPanel);
 
         // Mutating a nested MapSchema (questProgress/questCompleted/ailments) does not
         // reliably trigger the parent Player's own onChange callback below unless a sibling
@@ -1950,6 +2651,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         $(player.ailments).onRemove(() => updateAilmentIndicator(player));
         $(player.buffs).onAdd(() => updateBuffIndicator(player));
         $(player.buffs).onRemove(() => updateBuffIndicator(player));
+        $(player.dots).onAdd(() => updateDotIndicator(player));
+        $(player.dots).onRemove(() => updateDotIndicator(player));
         // Same reasoning as above - a completed trade removes/adds inventory tokens (see
         // TradeManager.finalize) without necessarily touching gold (a trade can be items-only),
         // so the parent Player onChange below isn't guaranteed to fire and the inventory panel
@@ -1965,6 +2668,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         renderDungeonFinderPanel();
 
         avatar.setHp(player.hp, player.maxHp);
+        avatar.setLevel(player.level);
+        avatar.setName(player.name, player.guildName);
 
         if (sessionId === currentTargetId) {
           updateHpBar(targetHpFill, targetHpLabel, player.hp, player.maxHp);
@@ -1987,10 +2692,22 @@ async function main(token: string, characterId: number, connectOverride?: Connec
           updateCharacterPanel(player);
           updateAilmentIndicator(player);
           updateBuffIndicator(player);
+          updateDotIndicator(player);
           renderNpcDialogue();
           renderQuestLog();
           renderPartyInvitePrompt(player);
           renderTradeInvitePrompt(player);
+          renderGuildPanel();
+
+          // Only an actual guildId/guildRole transition (joined/left/kicked/promoted) warrants a
+          // fresh roster pull, not every field change on this Player (which fires every movement
+          // tick) - same "compare against a cached previous value" guard castSpellId uses below.
+          if (player.guildId !== localGuildId || player.guildRole !== localGuildRole) {
+            localGuildId = player.guildId;
+            localGuildRole = player.guildRole;
+            if (localGuildId === 0) activeGuildRoster = null;
+            else if (!guildPanel.hidden) room?.send("guild_roster_request");
+          }
 
           if (player.castSpellId !== localCastSpellId) {
             localCastSpellId = player.castSpellId;
@@ -2142,35 +2859,40 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   // EnemyAvatar.update() - it needs to see other avatars, not just its own transform.
   function updateEnemyTelegraph(enemyId: string, avatar: EnemyAvatar) {
     const schema = enemySchemaById.get(enemyId);
-    if (!schema?.isCasting || schema.behavior !== "boss") {
-      avatar.setTelegraph(false, 0, 0, 0);
-      return;
-    }
+    if (!schema?.isCasting || schema.behavior !== "boss") return avatar.setTelegraph(false);
 
     const stats = ENEMY_TYPES[schema.enemyTypeId]?.stats as BossStats | undefined;
-    if (!stats) {
-      avatar.setTelegraph(false, 0, 0, 0);
-      return;
-    }
+    if (!stats) return avatar.setTelegraph(false);
+
+    const bossX = avatar.group.position.x;
+    const bossZ = avatar.group.position.z;
+    const targetAvatar = schema.aggroTargetId ? avatars.get(schema.aggroTargetId) : undefined;
+    const impactX = targetAvatar?.group.position.x ?? bossX;
+    const impactZ = targetAvatar?.group.position.z ?? bossZ;
+    // Same atan2(dx,dz) convention this codebase already uses for every other facing angle
+    // (player/enemy movement, hex ramp rotation) - aims a cone/line telegraph the same direction
+    // the server's own unitMatchesShape aims that shape's hit-test.
+    const facing = Math.atan2(impactX - bossX, impactZ - bossZ);
 
     if (schema.castAbilityName) {
       const ability = stats.specialAbilities?.find((a) => a.name === schema.castAbilityName);
-      if (ability?.kind === "raidNova") {
-        avatar.setTelegraph(true, avatar.group.position.x, avatar.group.position.z, ability.radius);
-        return;
-      }
-      avatar.setTelegraph(false, 0, 0, 0);
+      if (!ability) return avatar.setTelegraph(false);
+      const shape = ability.effect.shape;
+      // A circle explicitly centered on the impact point renders there; every other shape
+      // (including a caster-centered circle) is anchored on the boss itself, matching where
+      // CombatEngine's own unitMatchesShape measures cone/line/caster-circle distances from.
+      const atImpact = shape.kind === "circle" && shape.centeredOn === "impact";
+      avatar.setTelegraph(true, atImpact ? impactX : bossX, atImpact ? impactZ : bossZ, shape, facing);
       return;
     }
 
-    if (stats.aoeRadius && schema.aggroTargetId) {
-      const targetAvatar = avatars.get(schema.aggroTargetId);
-      if (targetAvatar) {
-        avatar.setTelegraph(true, targetAvatar.group.position.x, targetAvatar.group.position.z, stats.aoeRadius);
-        return;
-      }
+    // The boss's own unnamed phase-2 splash attack (not a BossAbilityDef - see PendingEnemyCast's
+    // doc comment server-side) - still a flat circle at the target, unchanged from before.
+    if (stats.aoeRadius && targetAvatar) {
+      avatar.setTelegraph(true, impactX, impactZ, { kind: "circle", radius: stats.aoeRadius, centeredOn: "impact" });
+      return;
     }
-    avatar.setTelegraph(false, 0, 0, 0);
+    avatar.setTelegraph(false);
   }
 
   function animate() {
@@ -2223,10 +2945,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         localAvatar.setTarget(localPredicted.x, groundY, localPredicted.z, localRotationY);
         localAvatar.snapToTarget(dt, moveX !== 0 || moveZ !== 0);
       }
+      syncActionFeedbackPosition(localPredicted.x, groundY, localPredicted.z);
 
       followTargetScratch.set(localPredicted.x, groundY, localPredicted.z);
       gameScene.followTarget(followTargetScratch);
-      for (const avatar of structures) avatar.update(localPredicted.x, localPredicted.z);
+      for (const avatar of structures) avatar.update(localPredicted.x, localPredicted.z, gameScene.nightFactor);
     }
 
     for (const [sessionId, avatar] of avatars) {
@@ -2245,21 +2968,17 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     combatText.update(dt);
 
     if (localSessionId) {
-      const others = [...avatars.entries()]
-        .filter(([sessionId]) => sessionId !== localSessionId)
-        .map(([, avatar]) => ({ x: avatar.group.position.x, z: avatar.group.position.z }));
-      const enemyDots = [...enemies.entries()].map(([enemyId, avatar]) => ({
-        x: avatar.group.position.x,
-        z: avatar.group.position.z,
-        isBoss: enemySchemaById.get(enemyId)?.behavior === "boss",
-      }));
       const selfDot = { x: localPredicted.x, z: localPredicted.z, rotationY: localRotationY };
       const questAreas = computeQuestAreaMarkers();
       const npcQuestStates = computeNpcQuestStates();
-      minimap.update(selfDot, others, enemyDots, !isDungeon, questAreas, npcQuestStates);
+      minimap.update(selfDot, !isDungeon, questAreas, npcQuestStates);
       // Same per-frame data, just at a bigger radius - skip the extra canvas work while the
       // panel is closed instead of redrawing a map nobody can see.
-      if (!bigMapPanel.hidden) bigMap.update(selfDot, others, enemyDots, !isDungeon, questAreas, npcQuestStates);
+      if (!bigMapPanel.hidden) bigMap.update(selfDot, !isDungeon, questAreas, npcQuestStates);
+
+      const timeOfDayFraction = gameScene.timeOfDayFraction;
+      minimapClockEl.hidden = timeOfDayFraction === undefined;
+      if (timeOfDayFraction !== undefined) minimapClockEl.textContent = formatTimeOfDay(timeOfDayFraction);
     }
 
     if (localCastActive && localCastSpellId !== "") {

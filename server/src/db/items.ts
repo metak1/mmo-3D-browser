@@ -1,4 +1,4 @@
-import { EquipSlot } from "@mmo/shared";
+import { EquipSlot, EQUIP_SLOTS } from "@mmo/shared";
 import { pool, withTransaction } from "./client.js";
 
 export interface CharacterItemRow {
@@ -8,11 +8,7 @@ export interface CharacterItemRow {
   slot: EquipSlot | null;
 }
 
-export interface EquippedItemIds {
-  weapon: string;
-  armor: string;
-  trinket: string;
-}
+export type EquippedItemIds = Record<EquipSlot, string>;
 
 export async function listCharacterItems(characterId: number): Promise<CharacterItemRow[]> {
   const { rows } = await pool.query<CharacterItemRow>(
@@ -33,9 +29,7 @@ export async function replaceCharacterItems(
 ): Promise<void> {
   const rows: Array<{ item_id: string; slot: EquipSlot | null }> = [
     ...inventory.map((itemId) => ({ item_id: itemId, slot: null })),
-    ...(equipped.weapon ? [{ item_id: equipped.weapon, slot: "weapon" as EquipSlot }] : []),
-    ...(equipped.armor ? [{ item_id: equipped.armor, slot: "armor" as EquipSlot }] : []),
-    ...(equipped.trinket ? [{ item_id: equipped.trinket, slot: "trinket" as EquipSlot }] : []),
+    ...EQUIP_SLOTS.filter((slot) => equipped[slot]).map((slot) => ({ item_id: equipped[slot], slot })),
   ];
 
   await withTransaction(async (client) => {

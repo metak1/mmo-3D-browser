@@ -54,11 +54,30 @@ export class ModelAnimator {
   // moonwalks: limbs cycling through a full stride far faster than the body is actually covering
   // ground. 1 (the default) means "play at the authored pace" - callers whose movement speed is
   // always the same one value (Player) never need to pass anything else.
+  // Deliberately doesn't call the all-in-one .reset() on `next` before playing it - reset() also
+  // snaps its clip time back to 0, and since real movement is mostly short bursts (a tap-to-nudge
+  // player, or an enemy/NPC wander leg that often finishes well inside the walk clip's own ~1s
+  // cycle - more so once it's slowed by speedScale below), doing that on every idle<->walk
+  // transition meant most walks never got past the clip's opening slice before fading back to
+  // idle, over and over - which read as "stuck on the first couple of frames" rather than an
+  // actual walk cycle. Leaving `time` wherever it was left (a fresh AnimationAction already starts
+  // at 0 on its first-ever play, so the very first transition is unaffected) means a resumed walk
+  // picks the stride back up instead of restarting it.
+  //
+  // `enabled`/`paused` still need to be set by hand, though - three.js's own mixer auto-disables
+  // an action once its fadeOut finishes at weight 0 (see AnimationAction._updateWeight), and
+  // _update() hard-bails before ever advancing `time` while `enabled` is false. .play() alone
+  // does NOT re-enable a disabled action (only .reset() does, bundled with the time-zeroing this
+  // comment explains skipping) - without setting these explicitly, the very first fade-out after
+  // this method stopped calling .reset() would permanently freeze the clip's `time`, since nothing
+  // would ever flip `enabled` back to true again.
   setMoving(moving: boolean, speedScale = 1) {
     if (moving && this.walk) this.walk.timeScale = speedScale;
     const next = moving ? this.walk : this.idle;
     if (!next || next === this.current) return;
-    next.reset().fadeIn(0.2).play();
+    next.enabled = true;
+    next.paused = false;
+    next.fadeIn(0.2).play();
     this.current?.fadeOut(0.2);
     this.current = next;
   }
@@ -80,11 +99,20 @@ export interface SpawnedModel {
 // Enemy.ts's per-instance aggressive/passive tint) - mutating a shared material there would
 // silently recolor every other spawned copy using it too. Cloning each mesh's own material here
 // gives every instance something it can safely tint on its own.
-function cloneWithIndependentMaterials(scene: THREE.Group): THREE.Object3D {
+// receiveShadow is a caller choice, castShadow isn't - every model spawned through this function
+// (avatar or static prop alike) should darken the ground/whatever's behind it, but a skinned,
+// animated character mesh receiving shadows on *itself* is exactly the case that produces shadow
+// acne (self-shadowing artifacts from the mesh's own limbs/joints at normal shadow-map precision) -
+// it rendered player/enemy/NPC models almost solid black even at full noon brightness. Static
+// props (furniture, buildings - see spawnStaticModel) have no such animated-joint self-shadowing
+// risk, so they keep receiving shadows (from each other, from characters standing under them).
+function cloneWithIndependentMaterials(scene: THREE.Group, receiveShadow: boolean): THREE.Object3D {
   const object = cloneSkeleton(scene) as THREE.Object3D;
   object.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return;
     child.material = Array.isArray(child.material) ? child.material.map((m) => m.clone()) : child.material.clone();
+    child.castShadow = true;
+    child.receiveShadow = receiveShadow;
   });
   return object;
 }
@@ -101,7 +129,7 @@ function buildAnimator(object: THREE.Object3D, idleClip?: THREE.AnimationClip, w
 // spawnRiggedModel below).
 export async function spawnModel(path: string, clipNames: { idle: string; walk: string }): Promise<SpawnedModel> {
   const { scene, animations } = await loadModel(path);
-  const object = cloneWithIndependentMaterials(scene);
+  const object = cloneWithIndependentMaterials(scene, false);
   const idleClip = THREE.AnimationClip.findByName(animations, clipNames.idle) ?? undefined;
   const walkClip = THREE.AnimationClip.findByName(animations, clipNames.walk) ?? undefined;
   return { object, animator: buildAnimator(object, idleClip, walkClip) };
@@ -123,7 +151,7 @@ export async function spawnRiggedModel(
     loadModel(idleSource.path),
     loadModel(walkSource.path),
   ]);
-  const object = cloneWithIndependentMaterials(scene);
+  const object = cloneWithIndependentMaterials(scene, false);
   const idleClip = THREE.AnimationClip.findByName(idleAnim.animations, idleSource.clip) ?? undefined;
   const walkClip = THREE.AnimationClip.findByName(walkAnim.animations, walkSource.clip) ?? undefined;
   return { object, animator: buildAnimator(object, idleClip, walkClip) };
@@ -134,7 +162,7 @@ export async function spawnRiggedModel(
 // across every other spawned copy of the same prop.
 export async function spawnStaticModel(path: string): Promise<THREE.Object3D> {
   const { scene } = await loadModel(path);
-  return cloneWithIndependentMaterials(scene);
+  return cloneWithIndependentMaterials(scene, true);
 }
 
 // Pulls the raw geometry/material straight off the cached scene's first mesh, uncloned - for

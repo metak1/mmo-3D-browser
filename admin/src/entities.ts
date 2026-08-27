@@ -1,4 +1,4 @@
-export type FieldType = "text" | "textarea" | "number" | "boolean" | "select" | "json" | "reference" | "multiselect";
+export type FieldType = "text" | "textarea" | "number" | "boolean" | "select" | "json" | "reference" | "multiselect" | "effectList";
 
 export interface FieldSchema {
   key: string; // matches the admin API's field name (snake_case, mirrors the DB column)
@@ -52,6 +52,14 @@ export const ENTITIES: EntitySchema[] = [
       { key: "cast_time_ms", label: "Cast Time (ms)", type: "number" },
       { key: "range", label: "Range", type: "number" },
       { key: "projectile_speed", label: "Projectile Speed", type: "number", optional: true },
+      {
+        // The composable path - additive, see shared's SpellDef.effects doc comment. Blank means
+        // "use effect_type/target_type/amount/aoe_radius/interrupts_cast above exactly as before".
+        key: "effects",
+        label: "Composable Effects (advanced - overrides the fields above when set)",
+        type: "effectList",
+        optional: true,
+      },
     ],
   },
   {
@@ -61,7 +69,12 @@ export const ENTITIES: EntitySchema[] = [
     fields: [
       { key: "id", label: "ID", type: "text" },
       { key: "name", label: "Name", type: "text" },
-      { key: "slot", label: "Slot", type: "select", options: ["weapon", "armor", "trinket"] },
+      {
+        key: "slot",
+        label: "Slot",
+        type: "select",
+        options: ["weapon", "offHand", "head", "neck", "shoulders", "armor", "hands", "waist", "legs", "feet", "ring", "trinket"],
+      },
       { key: "bonuses", label: "Bonuses", type: "json" },
       { key: "icon", label: "Icon (emoji)", type: "text" },
       { key: "description", label: "Description", type: "textarea" },
@@ -124,6 +137,23 @@ export const ENTITIES: EntitySchema[] = [
     ],
   },
   {
+    key: "enemy-spawn-zones",
+    label: "Enemy Spawn Zones",
+    displayField: "id",
+    fields: [
+      { key: "id", label: "ID", type: "text" },
+      { key: "map_id", label: "Map", type: "reference", referenceEntity: "maps" },
+      { key: "enemy_type_ids", label: "Enemy Types (pool)", type: "multiselect", referenceEntity: "enemy-types" },
+      { key: "x", label: "X", type: "number" },
+      { key: "z", label: "Z", type: "number" },
+      { key: "radius", label: "Radius", type: "number" },
+      { key: "max_population", label: "Max Population", type: "number" },
+      { key: "respawn_ms", label: "Respawn (ms)", type: "number", optional: true },
+      { key: "wander_radius", label: "Wander Radius (blank = default)", type: "number", optional: true },
+      { key: "leash_range", label: "Leash Range (blank = default)", type: "number", optional: true },
+    ],
+  },
+  {
     key: "npcs",
     label: "NPCs",
     displayField: "name",
@@ -183,7 +213,7 @@ export const ENTITIES: EntitySchema[] = [
       { key: "id", label: "ID", type: "text" },
       { key: "name", label: "Name", type: "text" },
       { key: "map_id", label: "Map", type: "reference", referenceEntity: "maps" },
-      { key: "kind", label: "Kind", type: "select", options: ["wall", "door", "tower", "gate", "building"] },
+      { key: "kind", label: "Kind", type: "select", options: ["wall", "door", "tower", "gate", "building", "lamp"] },
       { key: "x", label: "X", type: "number" },
       { key: "z", label: "Z", type: "number" },
       { key: "rotation_y", label: "Rotation Y (radians)", type: "number", optional: true },
@@ -194,10 +224,12 @@ export const ENTITIES: EntitySchema[] = [
       { key: "y_offset", label: "Y Offset", type: "number", optional: true },
       {
         key: "model_id",
-        label: "Model ID (kind=building only, see Structure.ts's BUILDING_MODELS)",
+        label: "Model ID (building: see BUILDING_MODELS; lamp: lampPost or lampCeiling, see Structure.ts's buildLamp)",
         type: "select",
         optional: true,
         options: [
+          "lampPost",
+          "lampCeiling",
           "building_archeryrange_blue",
           "building_barracks_blue",
           "building_blacksmith_blue",
@@ -291,6 +323,12 @@ export const ENTITIES: EntitySchema[] = [
           "wall_straight",
           "wall_straight_gate",
         ],
+      },
+      {
+        key: "light_intensity",
+        label: "Light Intensity (lamp only, 0-3ish, blank = default)",
+        type: "number",
+        optional: true,
       },
     ],
   },
@@ -429,6 +467,29 @@ export const ENTITIES: EntitySchema[] = [
         // angles - anything else would leave the tile's own hex edge misaligned with its neighbors.
         key: "rotation",
         label: "Rotation (coast tiles only)",
+        type: "select",
+        optional: true,
+        numberOptions: [
+          { value: 0, label: "0°" },
+          { value: Math.PI / 3, label: "60°" },
+          { value: (2 * Math.PI) / 3, label: "120°" },
+          { value: Math.PI, label: "180°" },
+          { value: (4 * Math.PI) / 3, label: "240°" },
+          { value: (5 * Math.PI) / 3, label: "300°" },
+        ],
+      },
+      {
+        key: "elevation",
+        label: "Elevation (any kind, blank = ground level)",
+        type: "number",
+        optional: true,
+      },
+      {
+        // Same hex-alignment constraint as coast tiles' `rotation` above - a ramp's own footprint
+        // only lines up with a neighbor's edge at 60-degree steps, so this reuses the same fixed
+        // set of options rather than a free-form angle.
+        key: "ramp_rotation",
+        label: "Ramp Direction (grass only, blank = no ramp)",
         type: "select",
         optional: true,
         numberOptions: [

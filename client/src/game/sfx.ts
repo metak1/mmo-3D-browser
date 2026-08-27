@@ -62,3 +62,16 @@ export function playHealSound() {
   beep(520, 70, "sine", 0.05);
   beep(780, 120, "sine", 0.04);
 }
+
+let lastErrorAt = 0;
+
+// A short, low "denied" blip for a rejected action (see main.ts's showCastFeedback) - distinct in
+// both pitch and waveform from the hit/heal sounds above so it never gets mistaken for combat
+// feedback, since it fires for the opposite reason (nothing happened).
+export function playErrorSound() {
+  const now = performance.now();
+  if (now - lastErrorAt < RATE_LIMIT_MS) return;
+  lastErrorAt = now;
+
+  beep(150, 110, "sawtooth", 0.05);
+}

@@ -149,6 +149,275 @@ function towerCap(width: number, depth: number, height: number): THREE.Mesh {
 
 interface BuiltStructure {
   object: THREE.Object3D;
+  // Only "lamp" populates this - see buildLamp/StructureAvatar.update, which fades the light and
+  // the glass's own emissive glow (and its soft outer halo) together as nightFactor changes, up to
+  // these per-instance max* values (see lampIntensityScale - already scaled by the admin's own
+  // def.lightIntensity, so update() never needs to know about that field at all).
+  lamp?: {
+    light: THREE.PointLight;
+    glassMaterial: THREE.MeshStandardMaterial;
+    haloMaterial: THREE.MeshBasicMaterial;
+    maxLightIntensity: number;
+    maxEmissiveIntensity: number;
+    maxHaloOpacity: number;
+  };
+}
+
+const LAMP_FRAME_COLOR = 0x2a2a2a;
+// Fixed regardless of def.color, unlike the lantern's own glow below - the ornament gems are a
+// decorative accent (always lightly lit, day or night), not the actual light source an admin is
+// customizing the color of.
+const LAMP_GEM_COLOR = 0xb356e0;
+const LAMP_GEM_EMISSIVE_INTENSITY = 0.7;
+// The "def.lightIntensity unset" baseline - an admin's own value (see lampIntensityScale) scales
+// these up/down from here rather than replacing them outright, so leaving the field blank keeps
+// exactly the tuned-by-eye brightness this lamp always had.
+const LAMP_MAX_LIGHT_INTENSITY = 2.5;
+const LAMP_MAX_EMISSIVE_INTENSITY = 1.3;
+const LAMP_MAX_HALO_OPACITY = 0.3;
+const LAMP_LIGHT_RANGE = 6; // world units - wide enough to light the ground well past the lamp's own base
+
+// def.lightIntensity is a multiplier on the LAMP_MAX_* constants above (1 = the built-in default,
+// unset also = 1) rather than an absolute value replacing them - clamped so a stray huge/negative
+// admin-entered number can't produce a nonsensical light (the server's own Zod schema already
+// caps it 0-10, this is just defense in depth against any other path a StructureDef could arrive
+// from).
+function lampIntensityScale(def: StructureDef): number {
+  return Math.max(0, Math.min(3, def.lightIntensity ?? 1));
+}
+
+// A stone-footed wooden signpost with a horizontal arm, a lantern hanging off its far end on a
+// short chain, and a pair of decorative crystal ornaments (post/arm junction + arm tip) - based on
+// a reference the user provided of a wooden lamppost with an overhanging arm. Built strictly
+// bottom-to-top (base -> post -> arm -> chain -> lantern), each piece positioned off the previous
+// one's own edge rather than off independent fractions of def.height - an earlier version instead
+// did the latter and ended up with the glass sphere sitting *inside* neighboring geometry, with
+// only a sliver of it ever visible. The lantern's own glow (light + emissive + halo, all fading
+// with GameScene.nightFactor - see StructureAvatar.update) is the one thing def.color drives; the
+// gems stay a fixed color (see LAMP_GEM_COLOR) since they're flavor, not "what this lamp lights up
+// with." The roof cap deliberately stays narrower than the lantern body rather than the wider
+// flared "witch hat" the reference shows - the game's camera looks down at a steep angle (see
+// Scene.ts's CAMERA_OFFSET), so a roof wider than the lantern sitting directly above it would
+// visually eclipse most of the glow from that viewing angle even though the two don't actually
+// overlap in world space (an earlier iteration of this same lamp got exactly that wrong).
+function buildLampPost(def: StructureDef): BuiltStructure {
+  const group = new THREE.Group();
+  const baseRadius = Math.max(def.width, def.depth);
+  const intensityScale = lampIntensityScale(def);
+
+  // Flat tint, no stoneTexture()/woodTexture() map - unlike buildWall/buildTower/buildGate below
+  // (all admin-sized, several units across), applying either texture to this structure's much
+  // smaller pieces rendered them solid black for reasons that didn't reduce to anything in this
+  // function (repeat count, UV wrapping, shadow flags, and material props were all otherwise
+  // fine) - confirmed by A/B testing with and without the map, not assumed. A flat tint reads
+  // perfectly well as stone/wood at this size, and matches how the admin editor's own preview of
+  // this same lamp already renders it (see structureGeometry.ts's buildLamp, which never had a
+  // texture map to begin with).
+  const stoneMaterial = new THREE.MeshStandardMaterial({ color: softTint(0x8a8a8a) });
+  const woodMaterial = new THREE.MeshStandardMaterial({ color: softTint(0x6b4a30) });
+  // A little metallic sheen (three.js's MeshStandardMaterial defaults to fully matte, metalness 0)
+  // reads as forged iron instead of the flat-painted look most of this file's other materials use.
+  const frameMaterial = new THREE.MeshStandardMaterial({ color: LAMP_FRAME_COLOR, metalness: 0.6, roughness: 0.35 });
+  const gemMaterial = new THREE.MeshStandardMaterial({ color: 0x0d0e12, emissive: LAMP_GEM_COLOR, emissiveIntensity: LAMP_GEM_EMISSIVE_INTENSITY });
+
+  // --- Stone base: two stacked tiers, wider at the bottom ---
+  let y = 0;
+  const tier1Height = def.height * 0.07;
+  const tier1 = new THREE.Mesh(new THREE.BoxGeometry(baseRadius * 1.7, tier1Height, baseRadius * 1.7), stoneMaterial);
+  tier1.position.y = y + tier1Height / 2;
+  group.add(tier1);
+  y += tier1Height;
+
+  const tier2Height = def.height * 0.07;
+  const tier2 = new THREE.Mesh(new THREE.BoxGeometry(baseRadius * 1.15, tier2Height, baseRadius * 1.15), stoneMaterial);
+  tier2.position.y = y + tier2Height / 2;
+  group.add(tier2);
+  y += tier2Height;
+
+  // --- Wooden post ---
+  const postWidth = baseRadius * 0.55;
+  const postHeight = def.height * 0.6;
+  const post = new THREE.Mesh(new THREE.BoxGeometry(postWidth, postHeight, postWidth), woodMaterial);
+  post.position.y = y + postHeight / 2;
+  group.add(post);
+  y += postHeight;
+
+  // --- Horizontal arm, extending sideways in local +X - def.rotationY is what actually aims it
+  // once placed, same as everything else here. ---
+  const armLength = baseRadius * 3.2;
+  const armHeight = postWidth * 0.55;
+  const armDepth = postWidth * 0.85;
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(armLength, armHeight, armDepth), woodMaterial);
+  arm.position.set(armLength / 2, y - armHeight / 2, 0);
+  group.add(arm);
+
+  // --- Ornament gems: one at the post/arm junction, one near the arm's far end ---
+  const gemSize = postWidth * 0.7;
+  const junctionGem = new THREE.Mesh(new THREE.BoxGeometry(gemSize, gemSize, gemSize * 0.4), gemMaterial);
+  junctionGem.position.set(0, y - armHeight / 2, postWidth / 2 + gemSize * 0.18);
+  group.add(junctionGem);
+  const tipGem = new THREE.Mesh(new THREE.BoxGeometry(gemSize, gemSize, gemSize * 0.4), gemMaterial);
+  tipGem.position.set(armLength - gemSize * 0.7, y - armHeight / 2, armDepth / 2 + gemSize * 0.18);
+  group.add(tipGem);
+
+  // --- Chain + lantern, hanging from the arm's outer end ---
+  const hangX = armLength - baseRadius * 0.4;
+  y -= armHeight;
+
+  const chainHeight = def.height * 0.14;
+  const chain = new THREE.Mesh(new THREE.CylinderGeometry(baseRadius * 0.05, baseRadius * 0.05, chainHeight, 6), frameMaterial);
+  y -= chainHeight / 2;
+  chain.position.set(hangX, y, 0);
+  group.add(chain);
+  y -= chainHeight / 2;
+
+  const glassRadius = baseRadius * 0.5;
+  const capRadius = glassRadius * 0.5;
+  const capHeight = glassRadius * 0.8;
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(capRadius, capHeight, 6), frameMaterial);
+  y -= capHeight / 2;
+  cap.position.set(hangX, y, 0);
+  group.add(cap);
+  y -= capHeight / 2;
+
+  // Full saturation (not softTint's usual 70%-toward-white blend, which is meant for muted
+  // structural textures) - a light's own color should read as vividly as the admin actually chose.
+  const glowColor = new THREE.Color(def.color);
+  const glassMaterial = new THREE.MeshStandardMaterial({ color: glowColor, emissive: glowColor, emissiveIntensity: 0 });
+  y -= glassRadius;
+  const glassY = y;
+  // A hexagonal prism (tapered slightly narrower at the bottom) reads closer to the reference's
+  // lantern-cage silhouette than a plain sphere did.
+  const glass = new THREE.Mesh(new THREE.CylinderGeometry(glassRadius, glassRadius * 0.75, glassRadius * 1.8, 6), glassMaterial);
+  glass.position.set(hangX, glassY, 0);
+  group.add(glass);
+
+  // A soft, larger, mostly-transparent sphere behind the glass - reads as a gentle glow halo once
+  // lit rather than a hard-edged shape, the same cheap fake-bloom trick WaypointAvatar's own beacon
+  // already uses.
+  const haloMaterial = new THREE.MeshBasicMaterial({ color: glowColor, transparent: true, opacity: 0, depthWrite: false });
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(glassRadius * 1.7, 16, 16), haloMaterial);
+  halo.position.set(hangX, glassY, 0);
+  halo.userData.noShadow = true; // a transparent glow sprite, not a real solid - see the constructor's shadow-flag traversal
+  group.add(halo);
+
+  // A thin metal rim closing off the lantern's bottom, instead of leaving its flat cylinder cap bare.
+  const rimHeight = glassRadius * 0.18;
+  const rim = new THREE.Mesh(new THREE.CylinderGeometry(glassRadius * 0.75, glassRadius * 0.6, rimHeight, 6), frameMaterial);
+  y -= glassRadius * 0.9 + rimHeight / 2;
+  rim.position.set(hangX, y, 0);
+  group.add(rim);
+
+  // decay=0 drops three.js's own distance-based attenuation entirely - intensity reads as roughly
+  // the same brightness everywhere inside LAMP_LIGHT_RANGE, tapering smoothly to 0 only right at
+  // that edge (still three.js's own `distance` cutoff, not the decay curve). A real inverse-square
+  // falloff (decay=2, or even the softer decay=1 this used to be) reads as a small overexposed hot
+  // core next to a fast-fading halo no matter how far `distance` itself reaches - a flat decay is
+  // what actually spreads one lamp's light evenly across a wide pool instead of just its own base.
+  // The range itself grows a bit with intensityScale too (a brighter bulb plausibly reaches
+  // further), floored so a near-zero intensity doesn't collapse it to a pinprick.
+  const light = new THREE.PointLight(glowColor, 0, LAMP_LIGHT_RANGE * Math.max(0.4, intensityScale), 0);
+  light.position.set(hangX, glassY, 0);
+  group.add(light);
+
+  return {
+    object: group,
+    lamp: {
+      light,
+      glassMaterial,
+      haloMaterial,
+      maxLightIntensity: LAMP_MAX_LIGHT_INTENSITY * intensityScale,
+      maxEmissiveIntensity: LAMP_MAX_EMISSIVE_INTENSITY * intensityScale,
+      maxHaloOpacity: LAMP_MAX_HALO_OPACITY * intensityScale,
+    },
+  };
+}
+
+// A small ring/hook at the top - an admin lifts the whole structure off the ground with
+// StructureDef's own yOffset to actually suspend it, e.g. under an archway or a building eave; the
+// hook is what sells "this is meant to hang" rather than "this fell over" - with a short chain
+// down to a lantern body that glows after dark. No base/post at all, unlike buildLampPost - this
+// is the wall/ceiling-mounted alternative selected via def.modelId (see buildLamp's own dispatch).
+// Built strictly top-to-bottom (hook -> chain -> roof -> glass -> drip tip), each new piece
+// positioned off the previous one's own edge, same reasoning as buildLampPost's own comment on why.
+function buildLampCeiling(def: StructureDef): BuiltStructure {
+  const group = new THREE.Group();
+  const frameMaterial = new THREE.MeshStandardMaterial({ color: LAMP_FRAME_COLOR, metalness: 0.6, roughness: 0.35 });
+  const baseRadius = Math.max(def.width, def.depth);
+  const glassRadius = baseRadius * 0.45;
+  const intensityScale = lampIntensityScale(def);
+
+  const hookRadius = baseRadius * 0.35;
+  const hookTube = baseRadius * 0.09;
+  const hook = new THREE.Mesh(new THREE.TorusGeometry(hookRadius, hookTube, 8, 12), frameMaterial);
+  hook.rotation.x = Math.PI / 2; // lies flat - reads as a small ring/eyelet from the game's top-down camera
+  let y = def.height - hookRadius - hookTube;
+  hook.position.y = y;
+  group.add(hook);
+
+  const chainHeight = def.height * 0.14;
+  y -= hookRadius + hookTube; // bottom edge of the ring
+  const chain = new THREE.Mesh(new THREE.CylinderGeometry(baseRadius * 0.05, baseRadius * 0.05, chainHeight, 6), frameMaterial);
+  y -= chainHeight / 2;
+  chain.position.y = y;
+  group.add(chain);
+  y -= chainHeight / 2;
+
+  // Narrower than the glass, not wider - see buildLampPost's own comment on why (the game's steep
+  // top-down camera would otherwise let a wider roof eclipse the bulb beneath it).
+  const capRadius = glassRadius * 0.5;
+  const capHeight = glassRadius * 0.8;
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(capRadius, capHeight, 6), frameMaterial);
+  y -= capHeight / 2;
+  cap.position.y = y;
+  group.add(cap);
+  y -= capHeight / 2;
+
+  const glowColor = new THREE.Color(def.color);
+  const glassMaterial = new THREE.MeshStandardMaterial({ color: glowColor, emissive: glowColor, emissiveIntensity: 0 });
+  y -= glassRadius;
+  const glassY = y;
+  const glass = new THREE.Mesh(new THREE.SphereGeometry(glassRadius, 16, 16), glassMaterial);
+  glass.position.y = glassY;
+  group.add(glass);
+
+  const haloMaterial = new THREE.MeshBasicMaterial({ color: glowColor, transparent: true, opacity: 0, depthWrite: false });
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(glassRadius * 1.8, 16, 16), haloMaterial);
+  halo.position.y = glassY;
+  halo.userData.noShadow = true;
+  group.add(halo);
+
+  y -= glassRadius;
+  const tipHeight = glassRadius * 0.6;
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(capRadius * 0.6, tipHeight, 6), frameMaterial);
+  tip.rotation.x = Math.PI; // point down, not up
+  y -= tipHeight / 2;
+  tip.position.y = y;
+  group.add(tip);
+
+  const light = new THREE.PointLight(glowColor, 0, LAMP_LIGHT_RANGE * Math.max(0.4, intensityScale), 0);
+  light.position.y = glassY;
+  group.add(light);
+
+  return {
+    object: group,
+    lamp: {
+      light,
+      glassMaterial,
+      haloMaterial,
+      maxLightIntensity: LAMP_MAX_LIGHT_INTENSITY * intensityScale,
+      maxEmissiveIntensity: LAMP_MAX_EMISSIVE_INTENSITY * intensityScale,
+      maxHaloOpacity: LAMP_MAX_HALO_OPACITY * intensityScale,
+    },
+  };
+}
+
+// "lamp" covers two visual variants selected by def.modelId (same pattern "building" already uses
+// for BUILDING_MODELS) - a ground-standing signpost, or a hook-hung ceiling/wall lantern. Unset/
+// unrecognized modelId falls back to the post (the more common "stands somewhere on its own"
+// case), matching every other kind's own "render something reasonable rather than nothing" default.
+function buildLamp(def: StructureDef): BuiltStructure {
+  return def.modelId === "lampCeiling" ? buildLampCeiling(def) : buildLampPost(def);
 }
 
 function buildWall(def: StructureDef): BuiltStructure {
@@ -232,6 +501,14 @@ function buildGate(def: StructureDef): BuiltStructure {
 // never participates in either).
 export class StructureAvatar {
   readonly group = new THREE.Group();
+  private lamp?: {
+    light: THREE.PointLight;
+    glassMaterial: THREE.MeshStandardMaterial;
+    haloMaterial: THREE.MeshBasicMaterial;
+    maxLightIntensity: number;
+    maxEmissiveIntensity: number;
+    maxHaloOpacity: number;
+  };
 
   constructor(def: StructureDef) {
     if (def.kind === "building") {
@@ -259,9 +536,29 @@ export class StructureAvatar {
         case "gate":
           built = buildGate(def);
           break;
+        case "lamp":
+          built = buildLamp(def);
+          break;
         default:
           built = { object: new THREE.Group() }; // unrecognized kind (e.g. stale data) - render nothing rather than crash
       }
+      // One traversal covers every procedural kind's meshes (wall/door/tower/gate can each be a
+      // group of several) rather than repeating the same two flags inside each builder above.
+      // noShadow (see buildLamp's halo sprite) opts a transparent decorative mesh out entirely - a
+      // real shadow from/onto a glow sprite would look wrong, not just be wasted cost. A lamp's own
+      // pieces skip *receiving* (but still cast, so it still darkens the ground under it) - it's
+      // built from many small pieces sitting edge-to-edge (base tiers, post, arm), and letting them
+      // all receive shadows from each other produced the same kind of self-shadowing darkening
+      // found earlier with skinned character meshes (see models.ts's own comment on that), except
+      // here it's coplanar touching seams rather than joints - it rendered the entire lamp almost
+      // solid black even at full noon brightness.
+      const receiveShadow = def.kind !== "lamp";
+      built.object.traverse((child) => {
+        if (!(child instanceof THREE.Mesh) || child.userData.noShadow) return;
+        child.castShadow = true;
+        child.receiveShadow = receiveShadow;
+      });
+      this.lamp = built.lamp;
       this.group.add(built.object);
     }
     // getTerrainHeight flattens the ground under every structure's own footprint (see
@@ -272,9 +569,16 @@ export class StructureAvatar {
     this.group.rotation.y = def.rotationY;
   }
 
-  // No-op today - kept so main.ts can iterate structures and enclosures through the same
-  // `update(x, z)` call without caring which of the two it's actually holding.
-  update(_playerX: number, _playerZ: number) {}
+  // A no-op for every kind except "lamp" - kept as one shared signature (rather than a separate
+  // per-frame hook only lamps opt into) so main.ts can iterate structures and enclosures through
+  // the same call without caring which kind, or which of StructureAvatar/StructureEnclosureAvatar,
+  // it's actually holding. nightFactor comes from GameScene.nightFactor (0 = day, 1 = night).
+  update(_playerX: number, _playerZ: number, nightFactor: number) {
+    if (!this.lamp) return;
+    this.lamp.light.intensity = nightFactor * this.lamp.maxLightIntensity;
+    this.lamp.glassMaterial.emissiveIntensity = nightFactor * this.lamp.maxEmissiveIntensity;
+    this.lamp.haloMaterial.opacity = nightFactor * this.lamp.maxHaloOpacity;
+  }
 
   addTo(scene: THREE.Scene) {
     scene.add(this.group);
@@ -323,6 +627,7 @@ export class StructureEnclosureAvatar {
   constructor(loop: StructureLoop) {
     const floorMaterial = new THREE.MeshStandardMaterial({ color: FLOOR_COLOR, side: THREE.DoubleSide });
     const floor = buildFlatPolygon(loop.floorPoints, loop.floorY + 0.02, floorMaterial);
+    floor.receiveShadow = true;
     this.group.add(floor);
 
     this.roofMaterial = new THREE.MeshStandardMaterial({
@@ -342,7 +647,9 @@ export class StructureEnclosureAvatar {
 
   // Called every frame with the local player's world position - fades the roof out once the
   // player is well inside the room, same WoW-style "walk under the roof" as the old pyramid roof.
-  update(playerX: number, playerZ: number) {
+  // nightFactor is unused here (a room has no lamp of its own to fade) - only in the signature to
+  // match StructureAvatar.update, see its own comment for why that's shared.
+  update(playerX: number, playerZ: number, _nightFactor: number) {
     const dist = Math.hypot(playerX - this.centroidX, playerZ - this.centroidZ);
     const t = Math.min(1, Math.max(0, (dist - this.fadeInnerRadius) / FADE_MARGIN));
     this.roofMaterial.opacity = FADE_MIN_OPACITY + (1 - FADE_MIN_OPACITY) * t;

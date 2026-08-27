@@ -1,6 +1,8 @@
 import { Room, Client, matchMaker } from "@colyseus/core";
 import {
   AcceptQuestMessage,
+  ActionFailedMessage,
+  ActionFailReason,
   BuyItemMessage,
   ChatMessage,
   DUNGEON_PARTY_SIZE,
@@ -9,8 +11,19 @@ import {
   ENEMY_RESPAWN_MS,
   ENEMY_TYPES,
   EnemySpawnDef,
+  EnemySpawnZoneDef,
   EquipMessage,
-  EquipSlot,
+  EQUIP_SLOTS,
+  FriendRemoveMessage,
+  FriendRequestMessage,
+  FriendRespondMessage,
+  GuildCreateMessage,
+  GuildInviteMessage,
+  GuildKickMessage,
+  GuildPromoteMessage,
+  GuildRespondMessage,
+  GuildRosterSnapshot,
+  GUILD_NAME_MAX_LENGTH,
   INVENTORY_SIZE,
   ITEM_IDS,
   ITEMS,
@@ -30,10 +43,13 @@ import {
   QUESTS,
   RARITY_MULTIPLIER,
   RefundTalentMessage,
+  SetTimeOfDayMessage,
   SPAWN_POINTS,
+  SPAWN_ZONES,
   SellItemMessage,
   SpendTalentMessage,
   TALENTS,
+  TimeOfDaySetBroadcast,
   TRADE_RANGE_CHECK_INTERVAL_MS,
   TradeOfferMessage,
   TradeRequestMessage,
@@ -53,18 +69,24 @@ import {
   rollRarity,
 } from "@mmo/shared";
 import { verifyToken } from "../auth/jwt.js";
-import { getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
-import { listCharacterItems, replaceCharacterItems } from "../db/items.js";
+import { findCharacterByName, getCharacterById, getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
+import * as friendsDb from "../db/friends.js";
+import * as guildsDb from "../db/guilds.js";
+import { EquippedItemIds, listCharacterItems, replaceCharacterItems } from "../db/items.js";
+import { isUniqueViolation } from "../db/client.js";
+import { findUserRoleById } from "../db/users.js";
+import { getOnlineEntry, isOnline, notifyCharacter, registerOnline, SocialCapableRoom, unregisterOnline } from "../onlineRegistry.js";
 import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
-import { DungeonListing, Enemy, LootBag, Player, WorldState } from "./schema/WorldState.js";
+import { getEquippedItemId, setEquippedItemId } from "./equipment.js";
+import { DungeonListing, Enemy, FriendEntry, FriendRequestEntry, GuildInviteEntry, LootBag, Player, WorldState } from "./schema/WorldState.js";
 import { TradeManager } from "./trade.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const AUTOSAVE_INTERVAL_MS = 30_000;
 const BOSS_GUARANTEED_DROPS = 3; // bypasses LOOT_DROP_CHANCE - a group should always walk away with something
 
-export class WorldRoom extends Room<WorldState> {
+export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
   private combat!: CombatEngine;
   private trade!: TradeManager;
   private characterIdBySession = new Map<string, number>();
@@ -76,6 +98,11 @@ export class WorldRoom extends Room<WorldState> {
   // newer one in the DB. Chaining every persistence call for a session through this queue makes
   // them apply strictly in call order, so the last one always wins.
   private persistQueues = new Map<string, Promise<void>>();
+  // Which zone a given state.enemies slot key belongs to - populated once per slot at onCreate
+  // (see the SPAWN_ZONES loop below) and read again on every respawn, so membership survives a
+  // slot's whole death/respawn cycle for the life of the room (mirrors why SPAWN_POINTS.find(...)
+  // works for point spawns: the lookup key is stable for as long as the room exists).
+  private zoneBySlotKey = new Map<string, EnemySpawnZoneDef>();
 
   onCreate() {
     this.setState(new WorldState());
@@ -95,6 +122,17 @@ export class WorldRoom extends Room<WorldState> {
 
     for (const point of SPAWN_POINTS) {
       this.spawnEnemy(point);
+    }
+
+    // Each zone gets `maxPopulation` stable slot keys (zoneId::0, zoneId::1, ...) so its
+    // membership map (used by handleEnemyKilled's respawn dispatch below) stays populated across
+    // however many times that slot dies and respawns, not just its first spawn.
+    for (const zone of SPAWN_ZONES) {
+      for (let i = 0; i < zone.maxPopulation; i++) {
+        const slotKey = `${zone.id}::${i}`;
+        this.zoneBySlotKey.set(slotKey, zone);
+        this.spawnZoneMember(zone, slotKey);
+      }
     }
 
     this.onMessage("input", (client, message: InputMessage) => this.combat.handleInput(client.sessionId, message));
@@ -118,12 +156,24 @@ export class WorldRoom extends Room<WorldState> {
     );
     this.onMessage("dungeon_start", (client) => this.handleDungeonStart(client));
     this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
+    this.onMessage("set_time_of_day", (client, message: SetTimeOfDayMessage) => this.handleSetTimeOfDay(client, message));
     this.onMessage("trade_request", (client, message: TradeRequestMessage) => this.trade.handleRequest(client, message));
     this.onMessage("trade_respond", (client, message: TradeRespondMessage) => this.trade.handleRespond(client, message));
     this.onMessage("trade_offer", (client, message: TradeOfferMessage) => this.trade.handleOffer(client, message));
     this.onMessage("trade_accept", (client) => this.trade.handleAccept(client));
     this.onMessage("trade_cancel", (client) => this.trade.handleCancel(client));
     this.onMessage("waypoint_travel", (client, message: WaypointTravelMessage) => this.handleWaypointTravel(client, message));
+    this.onMessage("friend_request", (client, message: FriendRequestMessage) => this.handleFriendRequest(client, message));
+    this.onMessage("friend_respond", (client, message: FriendRespondMessage) => this.handleFriendRespond(client, message));
+    this.onMessage("friend_remove", (client, message: FriendRemoveMessage) => this.handleFriendRemove(client, message));
+    this.onMessage("guild_create", (client, message: GuildCreateMessage) => this.handleGuildCreate(client, message));
+    this.onMessage("guild_invite", (client, message: GuildInviteMessage) => this.handleGuildInvite(client, message));
+    this.onMessage("guild_respond", (client, message: GuildRespondMessage) => this.handleGuildRespond(client, message));
+    this.onMessage("guild_leave", (client) => this.handleGuildLeave(client));
+    this.onMessage("guild_kick", (client, message: GuildKickMessage) => this.handleGuildKick(client, message));
+    this.onMessage("guild_promote", (client, message: GuildPromoteMessage) => this.handleGuildPromote(client, message));
+    this.onMessage("guild_disband", (client) => this.handleGuildDisband(client));
+    this.onMessage("guild_roster_request", (client) => this.handleGuildRosterRequest(client));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
@@ -183,10 +233,47 @@ export class WorldRoom extends Room<WorldState> {
 
     const items = await listCharacterItems(character.id);
     for (const row of items) {
-      if (row.slot === "weapon") player.equippedWeapon = row.item_id;
-      else if (row.slot === "armor") player.equippedArmor = row.item_id;
-      else if (row.slot === "trinket") player.equippedTrinket = row.item_id;
+      if (row.slot) setEquippedItemId(player, row.slot, row.item_id);
       else player.inventory.push(row.item_id);
+    }
+
+    // Friends/guild are real DB-persisted player data (see WorldState.ts's own doc comment on
+    // FriendEntry) - hydrated here the same way inventory/quests already are above, not derived
+    // from currently-connected sessions the way party is.
+    const friendRows = await friendsDb.listFriends(character.id);
+    for (const row of friendRows) {
+      const entry = new FriendEntry();
+      entry.characterId = row.character_id;
+      entry.name = row.name;
+      entry.level = row.level;
+      entry.classId = row.class_id;
+      entry.online = isOnline(row.character_id);
+      player.friends.set(String(row.character_id), entry);
+    }
+    for (const row of await friendsDb.listIncomingFriendRequests(character.id)) {
+      const entry = new FriendRequestEntry();
+      entry.requestId = row.id;
+      entry.fromCharacterId = row.from_character_id;
+      entry.fromName = row.from_name;
+      player.pendingFriendRequests.push(entry);
+    }
+
+    const guildMembership = await guildsDb.getGuildForCharacter(character.id);
+    if (guildMembership) {
+      player.guildId = guildMembership.guild_id;
+      player.guildName = guildMembership.guild_name;
+      player.guildRole = guildMembership.role;
+    } else {
+      // Pending invites are only meaningful while guildless - a character already in a guild
+      // has no way to accept a second one (see handleGuildRespond), so there's nothing to show.
+      for (const row of await guildsDb.listIncomingGuildInvites(character.id)) {
+        const entry = new GuildInviteEntry();
+        entry.inviteId = row.id;
+        entry.guildId = row.guild_id;
+        entry.guildName = row.guild_name;
+        entry.invitedByName = row.invited_by_name;
+        player.pendingGuildInvites.push(entry);
+      }
     }
 
     this.combat.recomputeMaxHp(player);
@@ -195,6 +282,14 @@ export class WorldRoom extends Room<WorldState> {
     this.state.players.set(client.sessionId, player);
     this.characterIdBySession.set(client.sessionId, character.id);
     this.tokenBySession.set(client.sessionId, options.token);
+    registerOnline({ sessionId: client.sessionId, roomId: this.roomId, characterId: character.id, name: character.name, level: player.level, classId });
+    // Let already-online friends know I've come online too - a live nicety layered on top of the
+    // DB-derived state above (see onlineRegistry's own doc comment on this always being
+    // best-effort, never the source of truth).
+    for (const row of friendRows) {
+      if (!isOnline(row.character_id)) continue;
+      notifyCharacter(row.character_id, (room, sid) => room.applyFriendOnlineChange(sid, character.id, true));
+    }
     console.log(`[WorldRoom] ${client.sessionId} joined as ${character.name} (${classId}, lv ${player.level})`);
   }
 
@@ -204,6 +299,16 @@ export class WorldRoom extends Room<WorldState> {
     const leavingPlayer = this.state.players.get(client.sessionId);
     if (leavingPlayer) this.removeFromParty(leavingPlayer);
     this.trade.handleLeave(client.sessionId);
+
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (characterId !== undefined) {
+      unregisterOnline(characterId);
+      if (leavingPlayer) {
+        for (const friend of leavingPlayer.friends.values()) {
+          notifyCharacter(friend.characterId, (room, sid) => room.applyFriendOnlineChange(sid, characterId, false));
+        }
+      }
+    }
 
     this.combat.clearSessionTracking(client.sessionId);
     this.state.players.delete(client.sessionId);
@@ -263,11 +368,10 @@ export class WorldRoom extends Room<WorldState> {
       if (!player || !characterId) return;
 
       try {
-        await replaceCharacterItems(characterId, [...player.inventory], {
-          weapon: player.equippedWeapon,
-          armor: player.equippedArmor,
-          trinket: player.equippedTrinket,
-        });
+        const equipped = Object.fromEntries(
+          EQUIP_SLOTS.map((slot) => [slot, getEquippedItemId(player, slot)]),
+        ) as EquippedItemIds;
+        await replaceCharacterItems(characterId, [...player.inventory], equipped);
       } catch (err) {
         console.error(`[WorldRoom] failed to persist items for character ${characterId}:`, err);
       }
@@ -290,6 +394,32 @@ export class WorldRoom extends Room<WorldState> {
     this.state.enemies.set(point.id, enemy);
   }
 
+  // Spawns (or respawns) one population slot of a zone: rolls a random enemy type from its pool
+  // and a random clear point within its radius (via CombatEngine's findClearPointNear - the same
+  // retry-against-colliders logic wander legs already use), then sets that point as the enemy's
+  // own home so the existing wander/leash code in CombatEngine treats it exactly like any other
+  // enemy from here on, independent of the zone itself.
+  private spawnZoneMember(zone: EnemySpawnZoneDef, slotKey: string) {
+    if (zone.enemyTypeIds.length === 0) return; // pool not configured yet - nothing to spawn
+    const enemyTypeId = zone.enemyTypeIds[Math.floor(Math.random() * zone.enemyTypeIds.length)];
+    const enemyType = ENEMY_TYPES[enemyTypeId];
+    if (!enemyType) return; // admin deleted/renamed this enemy type after the zone was authored
+
+    const { x, z } = this.combat.findClearPointNear(zone.x, zone.z, zone.radius);
+    const enemy = new Enemy();
+    enemy.enemyTypeId = enemyTypeId;
+    enemy.behavior = enemyType.behavior;
+    enemy.x = x;
+    enemy.z = z;
+    enemy.homeX = x;
+    enemy.homeZ = z;
+    enemy.hp = enemyType.stats.maxHp;
+    enemy.maxHp = enemyType.stats.maxHp;
+    enemy.wanderRadius = zone.wanderRadius ?? 0;
+    enemy.leashRange = zone.leashRange ?? 0;
+    this.state.enemies.set(slotKey, enemy);
+  }
+
   // CombatEngine hook: called once an enemy's hp hits 0 (already removed from state by then).
   private handleEnemyKilled(enemyId: string, enemyTypeId: string, killerSessionId: string, x: number, z: number) {
     this.grantKillRewards(killerSessionId, enemyTypeId, x, z);
@@ -300,7 +430,13 @@ export class WorldRoom extends Room<WorldState> {
     }
 
     const point = SPAWN_POINTS.find((p) => p.id === enemyId);
-    if (point) this.clock.setTimeout(() => this.spawnEnemy(point), point.respawnMs ?? ENEMY_RESPAWN_MS);
+    if (point) {
+      this.clock.setTimeout(() => this.spawnEnemy(point), point.respawnMs ?? ENEMY_RESPAWN_MS);
+      return;
+    }
+
+    const zone = this.zoneBySlotKey.get(enemyId);
+    if (zone) this.clock.setTimeout(() => this.spawnZoneMember(zone, enemyId), zone.respawnMs ?? ENEMY_RESPAWN_MS);
   }
 
   // CombatEngine hook: called after a dead player's hp/ailments/cast have already been reset.
@@ -405,6 +541,299 @@ export class WorldRoom extends Room<WorldState> {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
     this.removeFromParty(player);
+  }
+
+  // --- Friends ---
+
+  private addFriendEntryToPlayer(player: Player, characterId: number, name: string, level: number, classId: string, online: boolean) {
+    const entry = new FriendEntry();
+    entry.characterId = characterId;
+    entry.name = name;
+    entry.level = level;
+    entry.classId = classId;
+    entry.online = online;
+    player.friends.set(String(characterId), entry);
+  }
+
+  // Adds the friendship in the DB and reflects it live on both sides - shared by the explicit-
+  // accept path (handleFriendRespond) and the auto-accept path (handleFriendRequest, when the
+  // target already sent a reverse request).
+  private async finalizeFriendship(selfPlayer: Player, selfCharacterId: number, otherCharacterId: number, otherName: string, otherLevel: number, otherClassId: string) {
+    await friendsDb.addFriendship(selfCharacterId, otherCharacterId);
+    this.addFriendEntryToPlayer(selfPlayer, otherCharacterId, otherName, otherLevel, otherClassId, isOnline(otherCharacterId));
+    notifyCharacter(otherCharacterId, (room, sid) =>
+      room.applyFriendAdded(sid, { characterId: selfCharacterId, name: selfPlayer.name, level: selfPlayer.level, classId: selfPlayer.classId, online: true }),
+    );
+  }
+
+  private async handleFriendRequest(client: Client, message: FriendRequestMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const fromCharacterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || fromCharacterId === undefined) return;
+
+    const targetName = message.targetName.trim();
+    if (!targetName) return;
+    const target = await findCharacterByName(targetName);
+    if (!target || target.id === fromCharacterId) return this.rejectAction(client, "not_found");
+    if (await friendsDb.areFriends(fromCharacterId, target.id)) return this.rejectAction(client, "already_friends");
+
+    // If the target already sent *me* a request, accept it instead of creating a redundant
+    // reverse row - two people friend-requesting each other should just become friends.
+    const reverseRequest = await friendsDb.findRequestBetween(target.id, fromCharacterId);
+    if (reverseRequest) {
+      await friendsDb.deleteFriendRequest(reverseRequest.id);
+      await this.finalizeFriendship(player, fromCharacterId, target.id, target.name, target.level, target.class_id);
+      return;
+    }
+
+    let created: { id: number };
+    try {
+      created = await friendsDb.createFriendRequest(fromCharacterId, target.id);
+    } catch (err) {
+      if (isUniqueViolation(err)) return this.rejectAction(client, "already_pending");
+      throw err;
+    }
+    notifyCharacter(target.id, (room, sid) =>
+      room.applyFriendRequestPush(sid, { requestId: created.id, fromCharacterId, fromName: player.name }),
+    );
+  }
+
+  private async handleFriendRespond(client: Client, message: FriendRespondMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const selfCharacterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || selfCharacterId === undefined) return;
+
+    const index = player.pendingFriendRequests.findIndex((r) => r.requestId === message.requestId);
+    if (index === -1) return; // stale/already-resolved request - silent no-op, mirrors handlePartyRespond
+    const request = player.pendingFriendRequests[index];
+    player.pendingFriendRequests.splice(index, 1);
+    await friendsDb.deleteFriendRequest(message.requestId);
+    if (!message.accept) return;
+
+    const fromCharacter = await getCharacterById(request.fromCharacterId);
+    if (!fromCharacter) return; // requester's account no longer exists - nothing sane to do
+    await this.finalizeFriendship(player, selfCharacterId, fromCharacter.id, fromCharacter.name, fromCharacter.level, fromCharacter.class_id);
+  }
+
+  private async handleFriendRemove(client: Client, message: FriendRemoveMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const selfCharacterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || selfCharacterId === undefined) return;
+    if (!player.friends.has(String(message.characterId))) return;
+
+    await friendsDb.removeFriendship(selfCharacterId, message.characterId);
+    player.friends.delete(String(message.characterId));
+    notifyCharacter(message.characterId, (room, sid) => room.applyFriendRemoved(sid, selfCharacterId));
+  }
+
+  // --- Guilds ---
+
+  private async handleGuildCreate(client: Client, message: GuildCreateMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+    if (player.guildId !== 0) return this.rejectAction(client, "already_in_guild");
+
+    const name = message.name.trim().slice(0, GUILD_NAME_MAX_LENGTH);
+    if (!name) return;
+
+    let guild: { id: number; name: string };
+    try {
+      guild = await guildsDb.createGuild(name, characterId);
+    } catch (err) {
+      if (isUniqueViolation(err)) return this.rejectAction(client, "name_taken");
+      throw err;
+    }
+
+    player.guildId = guild.id;
+    player.guildName = guild.name;
+    player.guildRole = "leader";
+  }
+
+  private async handleGuildInvite(client: Client, message: GuildInviteMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+
+    const targetName = message.targetName.trim();
+    if (!targetName) return;
+    const target = await findCharacterByName(targetName);
+    if (!target) return this.rejectAction(client, "not_found");
+    if (await guildsDb.getGuildForCharacter(target.id)) return this.rejectAction(client, "already_in_guild");
+
+    let invite: { id: number };
+    try {
+      invite = await guildsDb.createGuildInvite(player.guildId, target.id, characterId);
+    } catch (err) {
+      if (isUniqueViolation(err)) return this.rejectAction(client, "already_pending");
+      throw err;
+    }
+    notifyCharacter(target.id, (room, sid) =>
+      room.applyGuildInvitePush(sid, { inviteId: invite.id, guildId: player.guildId, guildName: player.guildName, invitedByName: player.name }),
+    );
+  }
+
+  private async handleGuildRespond(client: Client, message: GuildRespondMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+
+    const index = player.pendingGuildInvites.findIndex((i) => i.inviteId === message.inviteId);
+    if (index === -1) return;
+    const invite = player.pendingGuildInvites[index];
+    player.pendingGuildInvites.splice(index, 1);
+    await guildsDb.deleteGuildInvite(message.inviteId);
+    if (!message.accept) return;
+    if (player.guildId !== 0) return; // already joined a different guild in the meantime - stale accept, silent no-op
+
+    try {
+      await guildsDb.addGuildMember(invite.guildId, characterId, "member");
+    } catch (err) {
+      if (isUniqueViolation(err)) return; // race: joined elsewhere between the check above and this insert
+      throw err;
+    }
+    await guildsDb.deleteOtherInvitesForCharacter(characterId, message.inviteId);
+    // Every other pending invite is now stale (a character can only be in one guild) - clear them
+    // from this client's own view too, not just the DB.
+    player.pendingGuildInvites.splice(0, player.pendingGuildInvites.length);
+
+    player.guildId = invite.guildId;
+    player.guildName = invite.guildName;
+    player.guildRole = "member";
+  }
+
+  private async handleGuildLeave(client: Client) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+    if (player.guildId === 0) return;
+
+    const guildId = player.guildId;
+    const guildName = player.guildName;
+    const wasLeader = player.guildRole === "leader";
+    await guildsDb.removeGuildMember(characterId);
+    player.guildId = 0;
+    player.guildName = "";
+    player.guildRole = "";
+
+    if (wasLeader) {
+      const promotedId = await guildsDb.promoteNextMemberAsLeader(guildId);
+      if (promotedId === null) {
+        await guildsDb.deleteGuild(guildId);
+      } else {
+        notifyCharacter(promotedId, (room, sid) => room.applyGuildFieldsChange(sid, guildId, guildName, "leader"));
+      }
+    }
+  }
+
+  private async handleGuildKick(client: Client, message: GuildKickMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+    if (message.characterId === characterId) return; // use leave, not kick, on yourself
+
+    await guildsDb.removeGuildMember(message.characterId);
+    notifyCharacter(message.characterId, (room, sid) => room.applyGuildFieldsChange(sid, 0, "", ""));
+  }
+
+  private async handleGuildPromote(client: Client, message: GuildPromoteMessage) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+    if (message.characterId === characterId) return;
+
+    await guildsDb.transferLeadership(player.guildId, characterId, message.characterId);
+    player.guildRole = "member";
+    notifyCharacter(message.characterId, (room, sid) => room.applyGuildFieldsChange(sid, player.guildId, player.guildName, "leader"));
+  }
+
+  private async handleGuildDisband(client: Client) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+
+    const guildId = player.guildId;
+    const members = await guildsDb.listGuildMembers(guildId);
+    await guildsDb.deleteGuild(guildId);
+
+    for (const member of members) {
+      if (member.character_id === characterId) continue; // self, handled below
+      notifyCharacter(member.character_id, (room, sid) => room.applyGuildFieldsChange(sid, 0, "", ""));
+    }
+    player.guildId = 0;
+    player.guildName = "";
+    player.guildRole = "";
+  }
+
+  private async handleGuildRosterRequest(client: Client) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.guildId === 0) return;
+
+    const members = await guildsDb.listGuildMembers(player.guildId);
+    const snapshot: GuildRosterSnapshot = {
+      guildId: player.guildId,
+      guildName: player.guildName,
+      members: members.map((m) => ({
+        characterId: m.character_id,
+        name: m.name,
+        level: m.level,
+        classId: m.class_id,
+        role: m.role,
+        online: isOnline(m.character_id),
+      })),
+    };
+    client.send("guild_roster", snapshot);
+  }
+
+  // --- SocialCapableRoom (see onlineRegistry.ts's own doc comment - lets notifyCharacter reach a
+  // specific online character's client regardless of which room instance currently holds them) ---
+
+  applyFriendOnlineChange(sessionId: string, characterId: number, online: boolean) {
+    const entry = this.state.players.get(sessionId)?.friends.get(String(characterId));
+    if (entry) entry.online = online;
+  }
+
+  applyFriendRequestPush(sessionId: string, entry: { requestId: number; fromCharacterId: number; fromName: string }) {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    const requestEntry = new FriendRequestEntry();
+    requestEntry.requestId = entry.requestId;
+    requestEntry.fromCharacterId = entry.fromCharacterId;
+    requestEntry.fromName = entry.fromName;
+    player.pendingFriendRequests.push(requestEntry);
+  }
+
+  applyFriendAdded(sessionId: string, entry: { characterId: number; name: string; level: number; classId: string; online: boolean }) {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    this.addFriendEntryToPlayer(player, entry.characterId, entry.name, entry.level, entry.classId, entry.online);
+  }
+
+  applyFriendRemoved(sessionId: string, characterId: number) {
+    this.state.players.get(sessionId)?.friends.delete(String(characterId));
+  }
+
+  applyGuildInvitePush(sessionId: string, entry: { inviteId: number; guildId: number; guildName: string; invitedByName: string }) {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    const inviteEntry = new GuildInviteEntry();
+    inviteEntry.inviteId = entry.inviteId;
+    inviteEntry.guildId = entry.guildId;
+    inviteEntry.guildName = entry.guildName;
+    inviteEntry.invitedByName = entry.invitedByName;
+    player.pendingGuildInvites.push(inviteEntry);
+  }
+
+  applyGuildFieldsChange(sessionId: string, guildId: number, guildName: string, guildRole: string) {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    player.guildId = guildId;
+    player.guildName = guildName;
+    player.guildRole = guildRole;
   }
 
   // --- Dungeon finder ---
@@ -521,17 +950,45 @@ export class WorldRoom extends Room<WorldState> {
     this.clock.setTimeout(() => this.state.lootBags.delete(id), LOOT_BAG_DESPAWN_MS);
   }
 
+  // Sends an ActionFailedMessage back to just this one client - see that type's own doc comment.
+  private rejectAction(client: Client, reason: ActionFailReason) {
+    const failure: ActionFailedMessage = { reason };
+    client.send("action_failed", failure);
+  }
+
+  // The "/time" chat command's GM tool (see main.ts's handleSlashCommand) - looked up fresh from
+  // the DB on every call rather than a role cached at onJoin, same "a demotion takes effect
+  // immediately" posture as the HTTP admin routes' own requireAdmin (adminMiddleware.ts). Broadcasts
+  // to every client in the room (not just the caller) so a GM setting the time is something
+  // everyone actually sees, not a private client-only preview.
+  private async handleSetTimeOfDay(client: Client, message: SetTimeOfDayMessage) {
+    const token = this.tokenBySession.get(client.sessionId);
+    let userId: number;
+    try {
+      userId = token ? verifyToken(token).userId : -1;
+    } catch {
+      userId = -1;
+    }
+    const role = userId !== -1 ? await findUserRoleById(userId) : null;
+    if (role !== "admin") return this.rejectAction(client, "not_admin");
+
+    if (!Number.isFinite(message.fraction)) return;
+    const fraction = ((message.fraction % 1) + 1) % 1;
+    const payload: TimeOfDaySetBroadcast = { fraction };
+    this.broadcast("time_of_day_set", payload);
+  }
+
   private handleLootTake(client: Client, message: LootTakeMessage) {
     const player = this.state.players.get(client.sessionId);
     const bag = this.state.lootBags.get(message.bagId);
     if (!player || !bag) return;
 
     const dist = Math.hypot(player.x - bag.x, player.z - bag.z);
-    if (dist > LOOT_PICKUP_RADIUS) return;
+    if (dist > LOOT_PICKUP_RADIUS) return this.rejectAction(client, "too_far");
 
     const index = bag.items.indexOf(message.itemId);
-    if (index === -1) return;
-    if (player.inventory.length >= INVENTORY_SIZE) return;
+    if (index === -1) return this.rejectAction(client, "not_available");
+    if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
 
     bag.items.splice(index, 1);
     player.inventory.push(message.itemId);
@@ -543,30 +1000,6 @@ export class WorldRoom extends Room<WorldState> {
     this.persistItems(client.sessionId);
   }
 
-  private getEquippedItemId(player: Player, slot: EquipSlot): string {
-    switch (slot) {
-      case "weapon":
-        return player.equippedWeapon;
-      case "armor":
-        return player.equippedArmor;
-      case "trinket":
-        return player.equippedTrinket;
-    }
-  }
-
-  private setEquippedItemId(player: Player, slot: EquipSlot, itemId: string) {
-    switch (slot) {
-      case "weapon":
-        player.equippedWeapon = itemId;
-        break;
-      case "armor":
-        player.equippedArmor = itemId;
-        break;
-      case "trinket":
-        player.equippedTrinket = itemId;
-        break;
-    }
-  }
 
   private handleEquip(client: Client, message: EquipMessage) {
     const player = this.state.players.get(client.sessionId);
@@ -580,9 +1013,9 @@ export class WorldRoom extends Room<WorldState> {
 
     player.inventory.splice(index, 1);
 
-    const previous = this.getEquippedItemId(player, item.slot);
+    const previous = getEquippedItemId(player, item.slot);
     if (previous) player.inventory.push(previous);
-    this.setEquippedItemId(player, item.slot, message.itemId);
+    setEquippedItemId(player, item.slot, message.itemId);
 
     this.combat.recomputeMaxHp(player);
     this.persistItems(client.sessionId);
@@ -592,11 +1025,11 @@ export class WorldRoom extends Room<WorldState> {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
-    const itemId = this.getEquippedItemId(player, message.slot);
+    const itemId = getEquippedItemId(player, message.slot);
     if (!itemId) return;
     if (player.inventory.length >= INVENTORY_SIZE) return;
 
-    this.setEquippedItemId(player, message.slot, "");
+    setEquippedItemId(player, message.slot, "");
     player.inventory.push(itemId);
 
     this.combat.recomputeMaxHp(player);
@@ -656,7 +1089,7 @@ export class WorldRoom extends Room<WorldState> {
     if (!target) return;
 
     const nearAnyWaypoint = WAYPOINTS.some((w) => Math.hypot(player.x - w.x, player.z - w.z) <= WAYPOINT_INTERACT_RADIUS);
-    if (!nearAnyWaypoint) return;
+    if (!nearAnyWaypoint) return this.rejectAction(client, "too_far");
 
     player.x = target.x;
     player.y = 0;
@@ -669,8 +1102,8 @@ export class WorldRoom extends Room<WorldState> {
 
     const quest = QUESTS[message.questId];
     if (!quest) return;
-    if (player.questProgress.has(quest.id) || player.questCompleted.has(quest.id)) return;
-    if (!this.isNearNpc(player, quest.giverNpcId)) return;
+    if (player.questProgress.has(quest.id) || player.questCompleted.has(quest.id)) return this.rejectAction(client, "not_available");
+    if (!this.isNearNpc(player, quest.giverNpcId)) return this.rejectAction(client, "too_far");
 
     player.questProgress.set(quest.id, 0);
   }
@@ -683,9 +1116,9 @@ export class WorldRoom extends Room<WorldState> {
     if (!quest) return;
 
     const progress = player.questProgress.get(quest.id);
-    if (progress === undefined || progress < quest.objectiveCount) return;
-    if (!this.isNearNpc(player, quest.giverNpcId)) return;
-    if (quest.rewardItemId && player.inventory.length >= INVENTORY_SIZE) return;
+    if (progress === undefined || progress < quest.objectiveCount) return this.rejectAction(client, "not_available");
+    if (!this.isNearNpc(player, quest.giverNpcId)) return this.rejectAction(client, "too_far");
+    if (quest.rewardItemId && player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
 
     player.questProgress.delete(quest.id);
     player.questCompleted.set(quest.id, Date.now());
@@ -705,12 +1138,12 @@ export class WorldRoom extends Room<WorldState> {
 
     const npc = NPCS[message.npcId];
     if (!npc?.vendorItemIds?.includes(message.itemId)) return;
-    if (!this.isNearNpc(player, message.npcId)) return;
+    if (!this.isNearNpc(player, message.npcId)) return this.rejectAction(client, "too_far");
 
     const item = ITEMS[message.itemId];
     if (!item) return;
-    if (player.gold < item.basePrice) return;
-    if (player.inventory.length >= INVENTORY_SIZE) return;
+    if (player.gold < item.basePrice) return this.rejectAction(client, "not_enough_gold");
+    if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
 
     player.gold -= item.basePrice;
     player.inventory.push(encodeItemToken(message.itemId, "common"));
@@ -726,7 +1159,7 @@ export class WorldRoom extends Room<WorldState> {
 
     const npc = NPCS[message.npcId];
     if (!npc?.vendorItemIds) return;
-    if (!this.isNearNpc(player, message.npcId)) return;
+    if (!this.isNearNpc(player, message.npcId)) return this.rejectAction(client, "too_far");
 
     const index = player.inventory.indexOf(message.token);
     if (index === -1) return;

@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import { CAMERA_PITCH } from "./Scene";
 
-const WIDTH = 0.9;
-const HEIGHT = 0.12;
-export const DEFAULT_Y_OFFSET = 1.55;
+export const WIDTH = 1.0;
+const HEIGHT = 0.15;
+export const DEFAULT_Y_OFFSET = 1.75;
 
 const COLOR_HIGH = 0x4fd166;
 const COLOR_MID = 0xe0b23c;

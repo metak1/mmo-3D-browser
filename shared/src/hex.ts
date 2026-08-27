@@ -140,7 +140,24 @@ const LAKE_WATER_THRESHOLD = 0.28; // fraction of the map's "wilderness" area th
 const HILL_HASH_A = 89.7;
 const HILL_HASH_B = 193.1;
 const HILL_WAVELENGTH = 55; // broader than lakes - a handful of rounded hill regions, not a fine jagged pattern
-const HILL_THRESHOLD = 0.72; // hills are the minority accent feature, not the majority of wilderness grass
+// Nested thresholds against the same noise value - since each band's region is a strict subset of
+// the one below it (higher noise value implies every lower threshold is also cleared), this
+// naturally produces terraced, contour-ring hills where a cell's neighbor is almost always the
+// same level or one level different, matching the one ramp asset's fixed one-level-rise shape (see
+// HEX_MAX_ELEVATION/classify below). [0] matches the original single-tier HILL_THRESHOLD, roughly
+// preserving how much of the map reads as "hilly" at all; each band above it is progressively
+// rarer/smaller, like a real hill's summit being narrower than its base.
+const HILL_LEVEL_THRESHOLDS = [0.62, 0.74, 0.86];
+export const HEX_MAX_ELEVATION = HILL_LEVEL_THRESHOLDS.length; // 3 - 4 total bands (0-3)
+
+function hillElevationFromNoise(noise: number): number {
+  let level = 0;
+  for (const threshold of HILL_LEVEL_THRESHOLDS) {
+    if (noise <= threshold) break;
+    level++;
+  }
+  return level;
+}
 
 interface PointLike {
   x: number;
@@ -162,6 +179,20 @@ interface OverrideLike {
   r: number;
   kind: HexTerrainKind;
   rotation?: number;
+  // Unset means "flat, ground level" (0) - the same default this cell would already have had
+  // before elevation overrides existed, so a tile painted without ever touching this field looks
+  // identical to before. Applies to any kind - only classifyElevationRamps' ramp mesh is
+  // grass-specific, a raised water/road/river/coast tile just sits at its own height instead.
+  elevation?: number;
+  // Only meaningful on a "grass" cell with elevation > 0 - overrides classifyElevationRamps' own
+  // automatic direction-finding (findAllLowNeighborDirs) with a single admin-chosen direction
+  // instead, for a cell whose auto-computed ramp doesn't face the way it should (or that has no
+  // qualifying lower neighbor to auto-ramp toward at all). Unset means "keep computing
+  // automatically" - the same default behavior a cell already had before this field existed, so a
+  // tile painted without ever touching this field looks identical to before. Deliberately not
+  // reusing the `rotation` field above - that one's already coast-specific, and 0 is a valid ramp
+  // direction, so the two need to stay distinguishable as "unset" vs "explicitly facing index 0".
+  rampRotation?: number;
 }
 
 export interface HexTerrainContent {
@@ -252,11 +283,18 @@ function computeRoadCells(waypoints: PointLike[]): Set<string> {
 interface OverrideEntry {
   kind: HexTerrainKind;
   rotation: number;
+  elevation: number;
+  // Left as undefined (not defaulted like the fields above) when the admin never set it - see
+  // OverrideLike.rampRotation's own doc comment for why "unset" and "explicitly 0" must stay
+  // distinguishable here.
+  rampRotation: number | undefined;
 }
 
 function buildOverridesMap(overrides: OverrideLike[] | undefined): Map<string, OverrideEntry> {
   const map = new Map<string, OverrideEntry>();
-  for (const o of overrides ?? []) map.set(hexKey(o.q, o.r), { kind: o.kind, rotation: o.rotation ?? 0 });
+  for (const o of overrides ?? []) {
+    map.set(hexKey(o.q, o.r), { kind: o.kind, rotation: o.rotation ?? 0, elevation: o.elevation ?? 0, rampRotation: o.rampRotation });
+  }
   return map;
 }
 
@@ -279,15 +317,20 @@ function getLiveOverrides(): Map<string, OverrideEntry> {
 // An admin's hand-painted cell wins first (even over the procedural road network - it's a
 // deliberate, authoritative placement), then roads (so a road can cross what would otherwise be
 // lake territory without a gap), then the land-buffer guarantee, then noise-based lake placement
-// for whatever's left. Elevation only ever applies to a genuine wilderness grass cell (never an
-// override, road, protected-content, or water cell - see this module's Scope notes) - a second,
-// independent noise channel decides whether that grass rises one level.
+// for whatever's left. Elevation applies to a genuine wilderness grass cell via a second,
+// independent noise channel (see hillElevationFromNoise), or to a hand-painted override that set
+// its own elevation explicitly (see OverrideLike's own doc comment) - never to road/river/coast/
+// protected-content grass, which always sit at the baseline.
 interface Classified {
   kind: HexTerrainKind;
-  elevation: number; // 0 (baseline) or 1 (one hill tier) for now
+  elevation: number; // 0 (baseline) .. HEX_MAX_ELEVATION
   // Only ever non-zero for a hand-painted coast* override - see HexTileOverrideDef's own doc
   // comment. Every procedurally classified cell (grass/water/road/river/hill noise) is 0.
   rotation: number;
+  // Set only by a hand-painted override that explicitly chose a manual ramp direction (see
+  // OverrideLike.rampRotation) - undefined everywhere else, including every procedurally
+  // classified cell, so classifyElevationRamps below knows to keep auto-computing for them.
+  rampRotation?: number;
 }
 
 function classify(
@@ -298,14 +341,21 @@ function classify(
   overrides: Map<string, OverrideEntry>,
 ): Classified {
   const overridden = overrides.get(hexKey(q, r));
-  if (overridden) return { kind: overridden.kind, elevation: 0, rotation: overridden.rotation };
+  if (overridden) {
+    return {
+      kind: overridden.kind,
+      elevation: overridden.elevation,
+      rotation: overridden.rotation,
+      rampRotation: overridden.rampRotation,
+    };
+  }
   if (roadCells.has(hexKey(q, r))) return { kind: "road", elevation: 0, rotation: 0 };
   const { x, z } = hexToWorld(q, r);
   if (isNearProtectedContent(x, z, content)) return { kind: "grass", elevation: 0, rotation: 0 };
   const isWater = valueNoise2D(x / LAKE_WAVELENGTH, z / LAKE_WAVELENGTH, LAKE_HASH_A, LAKE_HASH_B) < LAKE_WATER_THRESHOLD;
   if (isWater) return { kind: "water", elevation: 0, rotation: 0 };
-  const isHill = valueNoise2D(x / HILL_WAVELENGTH, z / HILL_WAVELENGTH, HILL_HASH_A, HILL_HASH_B) > HILL_THRESHOLD;
-  return { kind: "grass", elevation: isHill ? 1 : 0, rotation: 0 };
+  const hillNoise = valueNoise2D(x / HILL_WAVELENGTH, z / HILL_WAVELENGTH, HILL_HASH_A, HILL_HASH_B);
+  return { kind: "grass", elevation: hillElevationFromNoise(hillNoise), rotation: 0 };
 }
 
 // The live game's classified cell for (q, r) - always the currently-ACTIVE map's own content
@@ -328,10 +378,40 @@ export function classifyHexTerrain(q: number, r: number): HexTerrainKind {
   return getLiveClassified(q, r).kind;
 }
 
+// A coast piece's water dip isn't a straight cut in reality (KayKit's own meshes have an
+// irregular shoreline curve per piece), but a single straight line through the cell - at a
+// per-kind depth chosen so the blocked area matches that piece's REAL water-vs-land triangle
+// area from its own mesh (measured directly off each hex_coast_*.gltf's top-surface faces, then
+// converted to this cutline via numeric integration over a regular hex) - reads close enough in
+// play to the actual shoreline, without needing full per-triangle collision against 4 separate
+// meshes on every movement tick. All 4 pieces share one native-orientation convention (water
+// sits toward local +Z at rotation 0, mirroring how ramps treat local -X as their own "high"
+// side - see getHexElevation), which the placed cell's own `rotation` field then reorients same
+// as everything else about a coast tile already does.
+const COAST_WATER_LOCAL_Z_THRESHOLD: Record<"coastCornerLight" | "coastNarrowEdge" | "coastHalf" | "coastMostly", number> = {
+  coastCornerLight: 0.24,
+  coastNarrowEdge: -0.38,
+  coastHalf: -0.57,
+  coastMostly: -0.88,
+};
+
 export function isHexPassable(x: number, z: number): boolean {
   const { q, r } = worldToHex(x, z);
-  const kind = getLiveClassified(q, r).kind;
-  return kind !== "water" && kind !== "river";
+  const here = getLiveClassified(q, r);
+  if (here.kind === "water" || here.kind === "river") return false;
+
+  const threshold = (COAST_WATER_LOCAL_Z_THRESHOLD as Record<string, number | undefined>)[here.kind];
+  if (threshold === undefined) return true;
+
+  // Same world-delta -> rotated-local-frame transform getHexElevation's ramp interpolation
+  // already uses for localX (dx*cos - dz*sin) - localZ is that same rotation matrix's other row.
+  const center = hexToWorld(q, r);
+  const dx = x - center.x;
+  const dz = z - center.z;
+  const cos = Math.cos(here.rotation);
+  const sin = Math.sin(here.rotation);
+  const localZ = (dx * sin + dz * cos) / HEX_TILE_SCALE;
+  return localZ <= threshold;
 }
 
 // content omitted: the live (cached) elevation at this world position. content provided: freshly
@@ -352,17 +432,14 @@ export function getHexElevation(x: number, z: number, content?: HexTerrainConten
 
   const here = classifyAt(q, r);
   if (here.kind !== "grass" || here.elevation <= 0) return here.elevation;
-
-  const lowDir = findLowNeighborDir(q, r, here.elevation, (nq, nr) => {
-    const neighbor = classifyAt(nq, nr);
-    return neighbor.kind === "water" || neighbor.kind === "river" ? undefined : neighbor.elevation;
-  });
-  if (lowDir === -1) return here.elevation; // fully interior to the hill - flat top, no ramp
+  // No ramp here unless an admin explicitly placed one (see classifyElevationRamps' own doc
+  // comment) - a plain elevated cell with no override is a flat top, nothing to interpolate.
+  if (here.rampRotation === undefined) return here.elevation;
+  const rotation = here.rampRotation;
 
   // Undo the ramp mesh's own placement (rotation, then HEX_TILE_SCALE) to get the position in the
   // ramp's local frame, matching GRASS_RAMP_MODEL_PATH's own doc comment: flat (t=0) at local -X,
   // one full level up (t=1) at local +X, native x spanning [-1, 1].
-  const rotation = findRoadRotationSteps([3], [lowDir]) * (Math.PI / 3);
   const center = hexToWorld(q, r);
   const dx = x - center.x;
   const dz = z - center.z;
@@ -371,6 +448,16 @@ export function getHexElevation(x: number, z: number, content?: HexTerrainConten
   const localX = (dx * cos - dz * sin) / HEX_TILE_SCALE;
   const t = Math.min(1, Math.max(0, (localX + 1) / 2));
   return here.elevation - 1 + t;
+}
+
+// Same content-optional pattern as getHexElevation above, but returns the whole classified cell
+// (kind/elevation/rotation) rather than just an interpolated height - the admin map editor's
+// raise/lower terrain tool uses this to read a cell's current elevation (procedural or already
+// hand-painted) before incrementing/decrementing it, since it needs the plain per-cell integer
+// level, not a ramp-interpolated in-between value.
+export function classifyHexCell(q: number, r: number, content?: HexTerrainContent): Classified {
+  if (!content) return getLiveClassified(q, r);
+  return classify(q, r, content, computeRoadCells(content.waypoints), buildOverridesMap(content.overrides));
 }
 
 // Must be called whenever the content this classifier reads from changes - loadGameContent
@@ -391,6 +478,7 @@ export interface HexCellPlacement {
   kind: HexTerrainKind;
   elevation: number;
   rotation: number;
+  rampRotation?: number;
 }
 
 // Native-unit rise per elevation level (matches hex_grass_sloped_high's own modeled height - see
@@ -572,55 +660,23 @@ export interface PlacedElevationRamp {
   rotationRadians: number;
 }
 
-// A level-1 grass cell adjacent to at least one level-0 neighbor needs the ramp piece
-// (GRASS_RAMP_MODEL_PATH) instead of a plain flat tile, rotated to face one such neighbor - reuses
-// findRoadRotationSteps (same rotation math, a totally different piece: the ramp's own low edge is
-// AXIAL_DIRECTIONS index 3, established in GRASS_RAMP_MODEL_PATH's own doc comment). A cell with
-// multiple differently-elevated neighbors only gets ramped on the one chosen side - the asset pack
-// has no multi-directional ramp piece (unlike roads' junction catch-all), so this is a deliberate
-// approximation: any other low-facing edges on that same cell render as a small unramped step
-// rather than a smooth slope, accepted the same way roads accept their own junction-piece
-// approximation. A cell with no lower neighbor at all (fully interior to a hill, or at the map
-// edge) isn't ramped either - it's just a flat tile translated up (see the renderer, not here).
-// The first AXIAL_DIRECTIONS index (in AXIAL_DIRECTIONS' own fixed order) whose neighbor is
-// strictly lower than `elevation`, or -1 if none is (fully interior to a hill, or the map edge).
-// `lookupElevation` is injected so this one scan works both against a precomputed grid
-// (classifyElevationRamps, bulk rendering) and against live/content-parameterized single-cell
-// classification (getHexElevation, per-point queries) without either needing the other's shape.
-function findLowNeighborDir(q: number, r: number, elevation: number, lookupElevation: (q: number, r: number) => number | undefined): number {
-  for (let i = 0; i < AXIAL_DIRECTIONS.length; i++) {
-    const dir = AXIAL_DIRECTIONS[i];
-    const neighborElevation = lookupElevation(q + dir.q, r + dir.r);
-    if (neighborElevation !== undefined && neighborElevation < elevation) return i;
-  }
-  return -1;
-}
-
+// A ramp (GRASS_RAMP_MODEL_PATH) only ever appears where an admin explicitly placed one via the
+// map editor's Ramp tool + rotate gizmo (OverrideLike.rampRotation) - there is no automatic
+// direction-finding anymore. A grass cell with elevation > 0 and no rampRotation set just renders
+// as a flat elevated block with a bare cliff edge on every side (see the renderer, not here).
 export function classifyElevationRamps(grid: HexCellPlacement[]): PlacedElevationRamp[] {
-  const elevationByKey = new Map<string, number>();
-  const kindByKey = new Map<string, HexTerrainKind>();
-  for (const cell of grid) {
-    elevationByKey.set(hexKey(cell.q, cell.r), cell.elevation);
-    kindByKey.set(hexKey(cell.q, cell.r), cell.kind);
-  }
-  // A ramp only ever descends toward a lower grass neighbor, never toward water - water is
-  // already elevation 0 like flat grass, but sloping a hillside straight into a lake produces a
-  // flat, undressed grass/water seam (this cell is excluded from coast dressing by elevation > 0,
-  // and there's no coast piece for a sloped edge anyway), not a coastline. A cell whose only lower
-  // neighbor is water renders as a flat elevated tile with a plain (un-sloped) edge instead - the
-  // same accepted approximation as any other low-facing edge that isn't the chosen ramp direction.
-  const lookup = (q: number, r: number) => {
-    const key = hexKey(q, r);
-    const kind = kindByKey.get(key);
-    return kind === "water" || kind === "river" ? undefined : elevationByKey.get(key);
-  };
-
   const ramps: PlacedElevationRamp[] = [];
   for (const cell of grid) {
-    if (cell.elevation <= 0) continue;
-    const lowDir = findLowNeighborDir(cell.q, cell.r, cell.elevation, lookup);
-    if (lowDir === -1) continue;
-    ramps.push({ cell, rotationRadians: findRoadRotationSteps([3], [lowDir]) * (Math.PI / 3) });
+    // The ramp mesh is a grass-specific piece (GRASS_RAMP_MODEL_PATH) - a non-grass cell (e.g. a
+    // hand-painted road override that happens to carry a leftover elevation value) must never
+    // reach here, or the renderer would place a floating grass ramp on top of its own kind's mesh
+    // (see HexGround.ts's per-kind instance loop, which only skips the flat grass instance for
+    // cells in this list - it doesn't know or care what kind a ramp entry claims to be for).
+    if (cell.kind !== "grass" || cell.elevation <= 0) continue;
+    if (cell.rampRotation === undefined) continue;
+    // Already a final mesh rotation in radians (set via the map editor's rotate gizmo, the same
+    // way a coast tile's rotation already is), not a direction index to convert.
+    ramps.push({ cell, rotationRadians: cell.rampRotation });
   }
   return ramps;
 }

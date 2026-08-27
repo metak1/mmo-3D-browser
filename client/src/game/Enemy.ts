@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { ENEMY_CHASE_SPEED, EnemyBehavior, getTerrainHeight } from "@mmo/shared";
-import { AoeCircle } from "./AoeCircle";
+import { EffectShape, ENEMY_CHASE_SPEED, EnemyBehavior, getTerrainHeight } from "@mmo/shared";
+import { Telegraph } from "./Telegraph";
 import { DEFAULT_Y_OFFSET, HealthBar } from "./HealthBar";
 import { NameLabel } from "./NameLabel";
 import { fitHeight, ModelAnimator, spawnModel, spawnRiggedModel, tintModel } from "./models";
@@ -68,14 +68,14 @@ const MODEL_CONFIG: Record<string, { meshPath: string; targetHeight: number }> =
 const BOSS_PHASE_2_COLOR = 0xe0503c;
 
 const SELECTION_RING_COLOR = 0xf5d76e;
-const BOSS_HEALTH_BAR_Y_OFFSET = 2.6; // clears the boss's taller body; regular enemies use HealthBar's own default
-const NAME_LABEL_GAP = 0.22; // clearance above the health bar so the two never overlap
+const BOSS_HEALTH_BAR_Y_OFFSET = 2.8; // clears the boss's taller body; regular enemies use HealthBar's own default
+const NAME_LABEL_GAP = 0.4; // clearance above the health bar so the two never overlap
 
 export class EnemyAvatar {
   readonly group = new THREE.Group();
   readonly healthBar: HealthBar;
   readonly nameLabel: NameLabel;
-  readonly telegraph = new AoeCircle();
+  readonly telegraph = new Telegraph();
   private readonly selectionRing: THREE.Mesh;
   private readonly isBoss: boolean;
   private readonly kind: EnemyBehavior;
@@ -160,12 +160,15 @@ export class EnemyAvatar {
   // necessarily centered on the enemy itself (see main.ts's updateEnemyTelegraph, which centers
   // the existing phase-2 splash on its target instead), so this takes an explicit position rather
   // than always following this.group.
-  setTelegraph(active: boolean, x: number, z: number, radius: number) {
-    if (!active) {
+  // `shape` is whatever EffectShape the ability being telegraphed actually has - any composable
+  // shape "just works" here with no per-kind code (see main.ts's updateEnemyTelegraph, the only
+  // caller, for how `facingRadians` gets derived from the boss->impact direction).
+  setTelegraph(active: boolean, x?: number, z?: number, shape?: EffectShape, facingRadians = 0) {
+    if (!active || !shape || x === undefined || z === undefined) {
       this.telegraph.hide();
       return;
     }
-    this.telegraph.setRadius(radius);
+    this.telegraph.setShape(shape, facingRadians);
     this.telegraph.setPosition(x, z);
     this.telegraph.show();
   }

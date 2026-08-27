@@ -3,7 +3,9 @@ import {
   ContentSnapshot,
   DungeonDef,
   DungeonSpawnDef,
+  EffectDef,
   EnemySpawnDef,
+  EnemySpawnZoneDef,
   EnemyStats,
   EnemyTypeDef,
   GameMapDef,
@@ -48,6 +50,7 @@ interface SpellRow {
   cast_time_ms: number;
   range: number;
   projectile_speed: number | null;
+  effects: EffectDef[] | null;
 }
 
 interface ItemRow {
@@ -129,6 +132,23 @@ interface EnemySpawnRow {
   respawn_ms: number | null;
 }
 
+interface EnemySpawnZoneRow {
+  id: string;
+  map_id: string;
+  x: number;
+  z: number;
+  radius: number;
+  max_population: number;
+  respawn_ms: number | null;
+  wander_radius: number | null;
+  leash_range: number | null;
+}
+
+interface EnemySpawnZoneTypeRow {
+  zone_id: string;
+  enemy_type_id: string;
+}
+
 interface DungeonRow {
   id: string;
   name: string;
@@ -153,6 +173,7 @@ interface StructureRow {
   color: string;
   y_offset: number;
   model_id: string | null;
+  light_intensity: number | null;
 }
 
 interface WaypointRow {
@@ -182,6 +203,8 @@ interface HexTileRow {
   r: number;
   kind: string;
   rotation: number | null;
+  elevation: number | null;
+  ramp_rotation: number | null;
 }
 
 export async function getContentSnapshot(): Promise<ContentSnapshot> {
@@ -196,6 +219,8 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     questRows,
     mapRows,
     spawnRows,
+    spawnZoneRows,
+    spawnZoneTypeRows,
     dungeonRows,
     structureRows,
     waypointRows,
@@ -212,6 +237,8 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     pool.query<QuestRow>("SELECT * FROM quests").then((r) => r.rows),
     pool.query<GameMapRow>("SELECT * FROM game_maps").then((r) => r.rows),
     pool.query<EnemySpawnRow>("SELECT * FROM enemy_spawns").then((r) => r.rows),
+    pool.query<EnemySpawnZoneRow>("SELECT * FROM enemy_spawn_zones").then((r) => r.rows),
+    pool.query<EnemySpawnZoneTypeRow>("SELECT * FROM enemy_spawn_zone_types").then((r) => r.rows),
     pool.query<DungeonRow>("SELECT * FROM dungeons").then((r) => r.rows),
     pool.query<StructureRow>("SELECT * FROM structures").then((r) => r.rows),
     pool.query<WaypointRow>("SELECT * FROM waypoints").then((r) => r.rows),
@@ -224,6 +251,13 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     const list = vendorItemIdsByNpc.get(row.npc_id);
     if (list) list.push(row.item_id);
     else vendorItemIdsByNpc.set(row.npc_id, [row.item_id]);
+  }
+
+  const enemyTypeIdsByZone = new Map<string, string[]>();
+  for (const row of spawnZoneTypeRows) {
+    const list = enemyTypeIdsByZone.get(row.zone_id);
+    if (list) list.push(row.enemy_type_id);
+    else enemyTypeIdsByZone.set(row.zone_id, [row.enemy_type_id]);
   }
 
   const classes: ClassDef[] = classRows.map((c) => ({
@@ -247,6 +281,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     castTimeMs: s.cast_time_ms,
     range: s.range,
     projectileSpeed: nullToUndefined(s.projectile_speed),
+    effects: nullToUndefined(s.effects),
   }));
 
   const items: ItemDef[] = itemRows.map((i) => ({
@@ -324,6 +359,19 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     respawnMs: nullToUndefined(s.respawn_ms),
   }));
 
+  const spawnZones: EnemySpawnZoneDef[] = spawnZoneRows.map((z) => ({
+    id: z.id,
+    mapId: z.map_id,
+    x: z.x,
+    z: z.z,
+    radius: z.radius,
+    enemyTypeIds: enemyTypeIdsByZone.get(z.id) ?? [],
+    maxPopulation: z.max_population,
+    respawnMs: nullToUndefined(z.respawn_ms),
+    wanderRadius: nullToUndefined(z.wander_radius),
+    leashRange: nullToUndefined(z.leash_range),
+  }));
+
   const dungeons: DungeonDef[] = dungeonRows.map((d) => ({
     id: d.id,
     name: d.name,
@@ -348,6 +396,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     color: s.color,
     yOffset: s.y_offset,
     modelId: nullToUndefined(s.model_id),
+    lightIntensity: nullToUndefined(s.light_intensity),
   }));
 
   const waypoints: WaypointDef[] = waypointRows.map((w) => ({
@@ -377,6 +426,8 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     r: h.r,
     kind: h.kind as HexTerrainKind,
     rotation: nullToUndefined(h.rotation),
+    elevation: nullToUndefined(h.elevation),
+    rampRotation: nullToUndefined(h.ramp_rotation),
   }));
 
   return {
@@ -390,6 +441,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     maps,
     dungeons,
     spawns,
+    spawnZones,
     structures,
     waypoints,
     furniture,

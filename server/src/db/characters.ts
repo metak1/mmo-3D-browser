@@ -45,6 +45,14 @@ export async function findCharacterByName(name: string): Promise<CharacterRow | 
   return rows[0] ?? null;
 }
 
+// Unlike getCharacterForUser, deliberately not scoped to a userId - used by friend/guild flows
+// (see db/friends.ts's/db/guilds.ts's own callers in WorldRoom) to resolve the OTHER side of an
+// action from a bare character id, which by definition belongs to a different account.
+export async function getCharacterById(characterId: number): Promise<CharacterRow | null> {
+  const { rows } = await pool.query<CharacterRow>("SELECT * FROM characters WHERE id = $1", [characterId]);
+  return rows[0] ?? null;
+}
+
 export async function createCharacter(userId: number, name: string, classId: ClassId): Promise<CharacterRow> {
   const stats = createInitialStats();
   const { rows } = await pool.query<CharacterRow>(

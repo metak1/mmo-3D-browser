@@ -10,11 +10,16 @@ import {
   CLASSES,
   CRIT_MULTIPLIER,
   CasterStats,
+  CastFailedMessage,
+  CastFailReason,
   CastMessage,
   ClassId,
   ClassRole,
   CombatTextEvent,
   DAMAGE_STAT_FACTOR,
+  EffectAction,
+  EffectDef,
+  EffectShape,
   ENEMY_CHASE_SPEED,
   ENEMY_LEASH_RANGE,
   ENEMY_TYPES,
@@ -56,10 +61,11 @@ import {
   resolveClassId,
   xpForNextLevel,
 } from "@mmo/shared";
-import { Enemy, Player, Projectile } from "../schema/WorldState.js";
+import { DotStack, Enemy, Player, Projectile } from "../schema/WorldState.js";
 
 const RANGE_BUFFER = 1; // small allowance for latency between client input and server check
 const BOSS_ENRAGE_MS = 90_000; // time since first damage taken before the boss enrages
+const ENEMY_WANDER_TARGET_ATTEMPTS = 6; // see pickWanderTarget's own doc comment
 
 // A tank generates threat faster per point of damage than anyone else, which is what makes them
 // naturally hold aggro without needing a special-cased "always target the tank" rule - it falls
@@ -174,6 +180,85 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+// --- Composable effect resolution (EffectDef = shape + actions[], see shared/src/types.ts) ---
+// The single interpreter every spell/boss-ability call site funnels through once it opts into
+// the composable path (spell.effects / BossAbilityDef.effect) - see resolveEffect below.
+
+const MAX_DOT_STACKS = 4; // per unit - caps synced-state growth from repeated DOT casts on the same target
+
+// Everything CasterContext needs to know about whoever triggered an EffectDef, independent of
+// whether that's a player casting a spell or a boss firing a special ability - resolveEffect/
+// applyAction branch on `isPlayer` wherever the two need genuinely different math (player damage
+// goes through the stat/talent/crit formula; boss damage is a flat number times enrageMultiplier).
+interface CasterContext {
+  isPlayer: boolean;
+  casterX: number;
+  casterZ: number;
+  sourceId: string; // sessionId (player) or enemyId (boss) - threat/kill-credit/DotStack.sourceId
+  casterPlayer?: Player; // set iff isPlayer - needed for computePlayerDamage/computePlayerHeal/healPlayer's own stat lookups
+  spellId?: SpellId; // for talent lookups (computePlayerDamage/computePlayerHeal's own spellId param)
+  enrageMultiplier: number; // 1 for players; boss's current enrage multiplier otherwise
+}
+
+// Which side of the fight an action's target sits on, relative to whoever cast it - "enemy"
+// actions (damage/dot/ailment/knockback/interrupt) hit the caster's opponents; "ally" actions
+// (heal/buff/dispel) hit the caster's own side; "self" actions (summon) don't target a unit at
+// all. Two separate shape-matching passes in resolveEffect (one per polarity actually present in
+// an effect's actions[]) is what lets a single EffectDef mix polarities, e.g. "damage the enemies
+// in this cone AND heal myself" from one cast.
+const ACTION_POLARITY: Record<EffectAction["kind"], "enemy" | "ally" | "self"> = {
+  damage: "enemy",
+  dot: "enemy",
+  ailment: "enemy",
+  knockback: "enemy",
+  interrupt: "enemy",
+  heal: "ally",
+  buff: "ally",
+  dispel: "ally",
+  summon: "self",
+};
+
+// Pure geometry - does (ux,uz) fall inside `shape`, given where the caster is standing and where
+// the cast is aimed (the resolved impact point)? Circle stays a plain distance check (matches the
+// old flat-aoeRadius behavior exactly when centeredOn:"impact"); cone/line are newly added, both
+// aimed from the caster toward the impact point rather than needing a separately-tracked facing
+// angle. singleTarget/randomPoints are handled by matchShape directly, not through here (neither
+// is a per-unit geometric test against a fixed area).
+function unitMatchesShape(shape: EffectShape, casterCtx: CasterContext, impact: { x: number; z: number }, ux: number, uz: number): boolean {
+  if (shape.kind === "circle") {
+    const cx = shape.centeredOn === "caster" ? casterCtx.casterX : impact.x;
+    const cz = shape.centeredOn === "caster" ? casterCtx.casterZ : impact.z;
+    return Math.hypot(ux - cx, uz - cz) <= shape.radius;
+  }
+  if (shape.kind === "cone") {
+    const aimX = impact.x - casterCtx.casterX;
+    const aimZ = impact.z - casterCtx.casterZ;
+    const aimLen = Math.hypot(aimX, aimZ);
+    if (aimLen < 0.0001) return false; // caster is standing exactly on the impact point - no facing to aim a cone along
+    const toUx = ux - casterCtx.casterX;
+    const toUz = uz - casterCtx.casterZ;
+    const dist = Math.hypot(toUx, toUz);
+    if (dist > shape.radius || dist < 0.0001) return false;
+    const dot = (toUx / dist) * (aimX / aimLen) + (toUz / dist) * (aimZ / aimLen);
+    const angleRad = Math.acos(clamp(dot, -1, 1));
+    return angleRad <= (shape.angleDeg * Math.PI) / 180 / 2;
+  }
+  if (shape.kind === "line") {
+    const dirX = impact.x - casterCtx.casterX;
+    const dirZ = impact.z - casterCtx.casterZ;
+    const len = Math.hypot(dirX, dirZ) || 1;
+    const normX = dirX / len;
+    const normZ = dirZ / len;
+    const toUx = ux - casterCtx.casterX;
+    const toUz = uz - casterCtx.casterZ;
+    const along = toUx * normX + toUz * normZ; // distance projected along the caster->impact direction
+    if (along < 0 || along > shape.length) return false;
+    const perp = Math.abs(toUx * -normZ + toUz * normX); // perpendicular distance from that line
+    return perp <= shape.width / 2;
+  }
+  return false; // singleTarget/randomPoints never reach here - see matchShape
+}
+
 // Owns every mechanic that's generic over a {players, enemies, projectiles} state shape:
 // movement, spell casting/targeting/AoE resolution, enemy AI (including the boss's
 // phase/enrage branching), projectile physics, and the damage/heal/ailment formulas.
@@ -193,6 +278,11 @@ export class CombatEngine {
   private interruptLockoutUntil = new Map<string, number>(); // key: sessionId or enemyId
   private projectileAge = new Map<string, number>(); // key: projectileId, value: ms alive
   private projectileSeq = 0;
+  // key: projectileId - only set for a player-cast composable spell (spell.effects) delivered via
+  // a projectile; consulted by tickProjectiles on arrival instead of the flat projectile.damage
+  // field, so a projectile spell can carry any shape/actions combo, not just flat single-target
+  // damage. Cleared on both hit and early removal (target death/timeout) - see removeProjectile.
+  private pendingProjectileEffects = new Map<string, { effects: EffectDef[]; casterCtx: CasterContext; targetHint: string }>();
   // key: enemyId -> (sessionId -> accumulated threat). Server-internal, not synced - only
   // Enemy.aggroTargetId (who currently has the highest threat) is exposed to clients.
   private threatTables = new Map<string, Map<string, number>>();
@@ -224,11 +314,21 @@ export class CombatEngine {
     });
   }
 
+  // Sends a CastFailedMessage back to just this one client - see that type's own doc comment for
+  // why (client.ts's castSpell already predicts/blocks the common cases itself, so most of these
+  // sites are a safety net for state drift rather than the normal path; no_line_of_sight has no
+  // client-side equivalent at all, since a cheap client-side LOS check would need the same
+  // structure-raycast work the server already does here).
+  private rejectCast(client: Client, reason: CastFailReason) {
+    const failure: CastFailedMessage = { reason };
+    client.send("cast_failed", failure);
+  }
+
   handleCast(client: Client, message: CastMessage) {
     const player = this.state.players.get(client.sessionId);
     if (!player || player.hp <= 0) return;
-    if (player.castSpellId !== "") return; // already casting
-    if ((this.interruptLockoutUntil.get(client.sessionId) ?? 0) > Date.now()) return;
+    if (player.castSpellId !== "") return this.rejectCast(client, "already_casting");
+    if ((this.interruptLockoutUntil.get(client.sessionId) ?? 0) > Date.now()) return this.rejectCast(client, "interrupted");
 
     const spell = SPELLS[message.spellId];
     if (!spell || spell.classId !== resolveClassId(player.classId)) return;
@@ -239,18 +339,20 @@ export class CombatEngine {
     const effectiveCooldownMs = Math.max(100, spell.cooldownMs * (1 - cooldownPercent / 100));
     const maxCharges = 1 + getSpellCharges(resolveClassId(player.classId), message.spellId, player.talentRanks);
     const activeCasts = (this.lastCastAt.get(cooldownKey) ?? []).filter((t) => now - t < effectiveCooldownMs);
-    if (activeCasts.length >= maxCharges) return;
+    if (activeCasts.length >= maxCharges) return this.rejectCast(client, "on_cooldown");
 
     const target = this.resolveCastTarget(player, client.sessionId, spell, message);
-    if (!target) return;
+    if (!target) return this.rejectCast(client, "no_target");
 
     const impact = this.resolveImpactPoint(player, target);
-    if (!impact) return;
+    if (!impact) return this.rejectCast(client, "no_target");
 
     const dist = Math.hypot(player.x - impact.x, player.z - impact.z);
-    if (dist > spell.range + RANGE_BUFFER) return;
+    if (dist > spell.range + RANGE_BUFFER) return this.rejectCast(client, "out_of_range");
 
-    if (this.config.collidableStructures && !hasLineOfSight(player.x, player.z, impact.x, impact.z, STRUCTURES)) return;
+    if (this.config.collidableStructures && !hasLineOfSight(player.x, player.z, impact.x, impact.z, STRUCTURES)) {
+      return this.rejectCast(client, "no_line_of_sight");
+    }
 
     activeCasts.push(now);
     this.lastCastAt.set(cooldownKey, activeCasts);
@@ -262,6 +364,10 @@ export class CombatEngine {
         target,
         fireAt: now + spell.castTimeMs,
       });
+    } else if (spell.effects?.length) {
+      const casterCtx = this.makePlayerCasterCtx(player, client.sessionId, spell.id);
+      const hint = this.targetHintId(client.sessionId, target);
+      for (const effect of spell.effects) this.resolveEffect(casterCtx, effect, impact, hint);
     } else {
       this.resolveSpellEffect(player, client.sessionId, spell, target);
     }
@@ -287,7 +393,20 @@ export class CombatEngine {
         luck: player.luck,
         armor: player.armor,
       },
-      { weapon: player.equippedWeapon, armor: player.equippedArmor, trinket: player.equippedTrinket },
+      {
+        weapon: player.equippedWeapon,
+        offHand: player.equippedOffHand,
+        head: player.equippedHead,
+        neck: player.equippedNeck,
+        shoulders: player.equippedShoulders,
+        armor: player.equippedArmor,
+        hands: player.equippedHands,
+        waist: player.equippedWaist,
+        legs: player.equippedLegs,
+        feet: player.equippedFeet,
+        ring: player.equippedRing,
+        trinket: player.equippedTrinket,
+      },
     );
   }
 
@@ -483,6 +602,19 @@ export class CombatEngine {
     return null;
   }
 
+  private makePlayerCasterCtx(player: Player, sessionId: string, spellId?: SpellId): CasterContext {
+    return { isPlayer: true, casterX: player.x, casterZ: player.z, sourceId: sessionId, casterPlayer: player, spellId, enrageMultiplier: 1 };
+  }
+
+  // The unit id a composable EffectDef's shape:"singleTarget" should resolve to - "ground" has no
+  // single unit to fall back to (a ground-targeted singleTarget effect is a no-op by construction,
+  // an admin authoring error rather than something worth a special case here).
+  private targetHintId(casterSessionId: string, target: ResolvedTarget): string | undefined {
+    if (target.kind === "enemy" || target.kind === "ally") return target.id;
+    if (target.kind === "self") return casterSessionId;
+    return undefined;
+  }
+
   // Cancels whatever the target currently has pending (enemy windup or player cast) and
   // applies a short lockout, regardless of whether anything was actually pending - a
   // whiffed interrupt still consumes its own cooldown, matching how every other spell's
@@ -494,6 +626,219 @@ export class CombatEngine {
     } else if (target.kind === "ally" && this.pendingPlayerCast.has(target.id)) {
       this.cancelPlayerCast(target.id);
       this.interruptLockoutUntil.set(target.id, Date.now() + INTERRUPT_LOCKOUT_MS);
+    }
+  }
+
+  // Same cancel-and-lockout as tryInterrupt above, but from a plain (id, "is this id an enemy or
+  // a player") pair instead of a ResolvedTarget - the composable "interrupt" action targets
+  // whichever unit a shape matched, not a single pre-resolved cast target.
+  private tryInterruptUnit(unitId: string, unitIsEnemy: boolean) {
+    if (unitIsEnemy && this.pendingEnemyCast.has(unitId)) {
+      this.cancelEnemyCast(unitId);
+      this.interruptLockoutUntil.set(unitId, Date.now() + INTERRUPT_LOCKOUT_MS);
+    } else if (!unitIsEnemy && this.pendingPlayerCast.has(unitId)) {
+      this.cancelPlayerCast(unitId);
+      this.interruptLockoutUntil.set(unitId, Date.now() + INTERRUPT_LOCKOUT_MS);
+    }
+  }
+
+  // Pushes a new DotStack (see WorldState.ts) onto a unit, evicting the oldest stack once
+  // MAX_DOT_STACKS is reached - repeated casts stack rather than refresh/overwrite (unlike
+  // ailments/buffs, which overwrite a single expiresAt per kind), since a DOT's whole point is
+  // that reapplying it is a meaningful damage increase, not just a duration refresh.
+  private addDot(unit: Player | Enemy, sourceId: string, amount: number, tickIntervalMs: number, durationMs: number) {
+    if (unit.dots.length >= MAX_DOT_STACKS) unit.dots.shift();
+    const dot = new DotStack();
+    dot.sourceId = sourceId;
+    dot.damagePerTick = amount;
+    dot.tickIntervalMs = tickIntervalMs;
+    const now = Date.now();
+    dot.nextTickAt = now + tickIntervalMs;
+    dot.expiresAt = now + durationMs;
+    unit.dots.push(dot);
+  }
+
+  // Finds every [id, unit] pair `shape` covers, scanned from `pool` (already narrowed to the
+  // correct side by resolveEffect - see ACTION_POLARITY). singleTarget/randomPoints don't fit
+  // unitMatchesShape's per-unit geometric test (the former needs the pre-resolved target id, the
+  // latter tests against several ad-hoc points rather than one fixed area), so both are handled
+  // directly here instead.
+  private matchShape(
+    casterCtx: CasterContext,
+    shape: EffectShape,
+    impact: { x: number; z: number },
+    pool: Iterable<[string, Player | Enemy]>,
+    targetHint?: string,
+  ): [string, Player | Enemy][] {
+    const results: [string, Player | Enemy][] = [];
+    if (shape.kind === "singleTarget") {
+      if (!targetHint) return results;
+      for (const [id, unit] of pool) {
+        if (id === targetHint && unit.hp > 0) results.push([id, unit]);
+      }
+      return results;
+    }
+    if (shape.kind === "randomPoints") {
+      const seen = new Set<string>();
+      for (let i = 0; i < shape.count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const r = Math.random() * shape.spreadRadius;
+        const px = impact.x + Math.cos(angle) * r;
+        const pz = impact.z + Math.sin(angle) * r;
+        for (const [id, unit] of pool) {
+          if (seen.has(id) || unit.hp <= 0) continue;
+          if (Math.hypot(unit.x - px, unit.z - pz) <= shape.pointRadius) {
+            seen.add(id);
+            results.push([id, unit]);
+          }
+        }
+      }
+      return results;
+    }
+    for (const [id, unit] of pool) {
+      if (unit.hp <= 0) continue;
+      if (unitMatchesShape(shape, casterCtx, impact, unit.x, unit.z)) results.push([id, unit]);
+    }
+    return results;
+  }
+
+  // The single interpreter every composable spell (SpellDef.effects) and boss ability
+  // (BossAbilityDef.effect) resolves through - see this file's own header comment on
+  // ACTION_POLARITY for why enemy-polarity and ally-polarity actions get their own shape-match
+  // pass each (so one EffectDef can mix both, e.g. "damage the cone in front of me AND heal
+  // myself"). `targetHint` is the pre-resolved single-target id (ResolvedTarget's own id for a
+  // spell, or the boss's aggro target for an ability) - only consulted by shape:"singleTarget".
+  private resolveEffect(casterCtx: CasterContext, effect: EffectDef, impact: { x: number; z: number }, targetHint?: string) {
+    const enemyActions = effect.actions.filter((a) => ACTION_POLARITY[a.kind] === "enemy");
+    const allyActions = effect.actions.filter((a) => ACTION_POLARITY[a.kind] === "ally");
+    const selfActions = effect.actions.filter((a) => ACTION_POLARITY[a.kind] === "self");
+
+    if (enemyActions.length > 0) {
+      const pool = casterCtx.isPlayer ? this.state.enemies : this.state.players;
+      for (const [unitId, unit] of this.matchShape(casterCtx, effect.shape, impact, pool, targetHint)) {
+        for (const action of enemyActions) this.applyAction(casterCtx, action, unit, unitId);
+      }
+    }
+    if (allyActions.length > 0) {
+      const pool = casterCtx.isPlayer ? this.state.players : this.state.enemies;
+      for (const [unitId, unit] of this.matchShape(casterCtx, effect.shape, impact, pool, targetHint)) {
+        for (const action of allyActions) this.applyAction(casterCtx, action, unit, unitId);
+      }
+    }
+    for (const action of selfActions) this.applySelfAction(casterCtx, action, impact);
+  }
+
+  // Actions with no unit target at all - just "summon" for now, spawning near the impact point
+  // rather than the caster (a ground-targeted summon spell should drop its adds where it was
+  // aimed, not at the caster's own feet) using the exact same Enemy-construction shape
+  // tickBossAddSpawns already uses for reinforcement waves.
+  private applySelfAction(casterCtx: CasterContext, action: EffectAction, impact: { x: number; z: number }) {
+    if (action.kind !== "summon") return;
+    const addType = ENEMY_TYPES[action.enemyTypeId];
+    if (!addType) return;
+    for (let i = 0; i < action.count; i++) {
+      const add = new Enemy();
+      add.enemyTypeId = action.enemyTypeId;
+      add.behavior = addType.behavior;
+      add.x = impact.x + (Math.random() * 4 - 2);
+      add.z = impact.z + (Math.random() * 4 - 2);
+      add.homeX = impact.x;
+      add.homeZ = impact.z;
+      add.hp = addType.stats.maxHp;
+      add.maxHp = addType.stats.maxHp;
+      this.state.enemies.set(`summon-${casterCtx.sourceId}-${this.addSeq++}`, add);
+    }
+  }
+
+  // Applies one EffectAction to one unit a shape already matched - `unit`'s actual runtime type
+  // (Player vs Enemy) is implied by which polarity/pool resolveEffect scanned to find it (see
+  // ACTION_POLARITY), not by anything checkable at this level, so the branches below cast
+  // accordingly rather than re-deriving it. ailment/buff/dispel only have somewhere to write when
+  // the unit is a Player (Enemy has no ailments/buffs fields, unlike dots - see DotStack) - a
+  // player-cast ailment/buff/dispel action landing on an enemy is a documented no-op, same
+  // "accepted approximation" tone as this codebase's other asset/geometry limitations.
+  private applyAction(casterCtx: CasterContext, action: EffectAction, unit: Player | Enemy, unitId: string) {
+    switch (action.kind) {
+      case "damage":
+        if (casterCtx.isPlayer) {
+          const { amount, isCrit } = this.computePlayerDamage(casterCtx.casterPlayer!, action.amount, casterCtx.spellId);
+          this.applySpellDamage(unit as Enemy, amount, unitId, casterCtx.sourceId, isCrit);
+        } else {
+          this.damagePlayer(unitId, unit as Player, action.amount * casterCtx.enrageMultiplier);
+        }
+        return;
+      case "heal":
+        if (casterCtx.isPlayer) {
+          this.healPlayer(casterCtx.casterPlayer!, casterCtx.sourceId, unit as Player, unitId, action.amount, casterCtx.spellId);
+        } else {
+          const enemyUnit = unit as Enemy;
+          enemyUnit.hp = Math.min(enemyUnit.maxHp, enemyUnit.hp + action.amount);
+        }
+        return;
+      case "dot":
+        this.addDot(unit, casterCtx.sourceId, action.amount, action.tickIntervalMs, action.durationMs);
+        return;
+      case "ailment":
+        if (!casterCtx.isPlayer) this.applyAilment(unit as Player, action.ailment, AILMENTS[action.ailment].durationMs);
+        return;
+      case "buff":
+        if (casterCtx.isPlayer) this.applyBuff(unit as Player, action.buff);
+        return;
+      case "knockback": {
+        // A simple clamped push away from the caster, not re-checked against structure/furniture/
+        // water collision (those all live behind CombatEngineConfig flags this deep helper doesn't
+        // have easy access to) - an accepted approximation matching this codebase's existing
+        // "physics-lite" tone (e.g. hex.ts's own ramp/road edge-case comments).
+        const dx = unit.x - casterCtx.casterX;
+        const dz = unit.z - casterCtx.casterZ;
+        const dist = Math.hypot(dx, dz) || 1;
+        unit.x = clamp(unit.x + (dx / dist) * action.distance, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        unit.z = clamp(unit.z + (dz / dist) * action.distance, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        return;
+      }
+      case "dispel":
+        if (casterCtx.isPlayer) (unit as Player).ailments.clear();
+        return;
+      case "interrupt":
+        this.tryInterruptUnit(unitId, casterCtx.isPlayer);
+        return;
+    }
+  }
+
+  // Sweeps every player's and enemy's own `dots` array (see DotStack) once per tick, applying
+  // `damagePerTick` through the same damagePlayer/applySpellDamage paths instant damage already
+  // uses (so DOT damage still shows combat text, still triggers boss enrage-on-first-hit, still
+  // respects armor mitigation, etc. - it's not a separate damage pipeline) whenever a stack's
+  // nextTickAt has come due, then splices out anything past its expiresAt. Appended to tick()
+  // as its own method, same "one tick* per mechanic" shape as tickBossAddSpawns/
+  // tickBossSpecialAbilities.
+  private tickDots() {
+    const now = Date.now();
+    for (const [sessionId, player] of this.state.players) {
+      for (let i = player.dots.length - 1; i >= 0; i--) {
+        const dot = player.dots[i];
+        if (now >= dot.expiresAt) {
+          player.dots.splice(i, 1);
+          continue;
+        }
+        if (now >= dot.nextTickAt) {
+          dot.nextTickAt += dot.tickIntervalMs;
+          if (player.hp > 0) this.damagePlayer(sessionId, player, dot.damagePerTick);
+        }
+      }
+    }
+    for (const [enemyId, enemy] of this.state.enemies) {
+      for (let i = enemy.dots.length - 1; i >= 0; i--) {
+        const dot = enemy.dots[i];
+        if (now >= dot.expiresAt) {
+          enemy.dots.splice(i, 1);
+          continue;
+        }
+        if (now >= dot.nextTickAt) {
+          dot.nextTickAt += dot.tickIntervalMs;
+          if (enemy.hp > 0) this.applySpellDamage(enemy, dot.damagePerTick, enemyId, dot.sourceId);
+        }
+      }
     }
   }
 
@@ -574,6 +919,15 @@ export class CombatEngine {
   // Highest-threat candidate wins; on a tie, keeps the enemy's current target instead of
   // arbitrarily picking whichever candidate happened to iterate first, so two players sitting at
   // equal threat don't cause the enemy to flicker between them every tick.
+  // A candidate with zero recorded threat is skipped unless it's already the enemy's current
+  // target - being merely in attack/cast range isn't provocation. Without this, tickEnemyAttacks'
+  // range-only candidate list let ANY passive enemy (aggroRange<=0, the default - see
+  // MeleeStats.aggroRange's own doc comment) take the first free hit on anyone who wandered into
+  // range, even though it never proactively engaged them (a caster's much larger cast range than
+  // its melee cousin's swing range made this especially visible: a "passive" caster would open
+  // fire from well outside anything that looked like aggro). An aggressive type (aggroRange>0)
+  // isn't affected - tickEnemyAggro already seeds threat=1 on whoever it engages, well before they
+  // ever reach attack range, so they always clear this bar by the time they'd need to.
   private pickThreatTarget(enemyId: string, candidateSessionIds: string[]): string | undefined {
     if (candidateSessionIds.length === 0) return undefined;
     const table = this.threatTables.get(enemyId);
@@ -582,6 +936,7 @@ export class CombatEngine {
     let bestThreat = -1;
     for (const sessionId of candidateSessionIds) {
       const threat = table?.get(sessionId) ?? 0;
+      if (threat <= 0 && sessionId !== currentTarget) continue;
       if (threat > bestThreat || (threat === bestThreat && sessionId === currentTarget)) {
         best = sessionId;
         bestThreat = threat;
@@ -640,6 +995,7 @@ export class CombatEngine {
   tick(dt: number) {
     this.tickPlayerMovement(dt);
     this.tickPlayerCasts();
+    this.tickDots();
     if (this.config.enemiesWander) this.tickEnemyMovement(dt);
     this.tickEnemyAttacks();
     this.tickPendingEnemyCasts();
@@ -708,9 +1064,17 @@ export class CombatEngine {
       // moved behind a wall during the windup, same as the immediate check in handleCast.
       if (this.config.collidableStructures && !hasLineOfSight(player.x, player.z, impact.x, impact.z, STRUCTURES)) continue;
 
-      if (spell.projectileSpeed && pending.target.kind === "enemy") {
+      if (spell.projectileSpeed && pending.target.kind === "enemy" && spell.effects?.length) {
+        const casterCtx = this.makePlayerCasterCtx(player, sessionId, spell.id);
+        const projId = this.spawnProjectile(player.x, player.z, "player", pending.target.id, 0, spell.projectileSpeed, sessionId, false);
+        this.pendingProjectileEffects.set(projId, { effects: spell.effects, casterCtx, targetHint: pending.target.id });
+      } else if (spell.projectileSpeed && pending.target.kind === "enemy") {
         const { amount, isCrit } = this.computePlayerDamage(player, spell.amount ?? 0);
         this.spawnProjectile(player.x, player.z, "player", pending.target.id, amount, spell.projectileSpeed, sessionId, isCrit);
+      } else if (spell.effects?.length) {
+        const casterCtx = this.makePlayerCasterCtx(player, sessionId, spell.id);
+        const hint = this.targetHintId(sessionId, pending.target);
+        for (const effect of spell.effects) this.resolveEffect(casterCtx, effect, impact, hint);
       } else {
         this.resolveSpellEffect(player, sessionId, spell, pending.target);
       }
@@ -736,7 +1100,7 @@ export class CombatEngine {
       const chaseTarget = chaseTargetId ? this.state.players.get(chaseTargetId) : undefined;
       const distFromHome = Math.hypot(enemy.x - enemy.homeX, enemy.z - enemy.homeZ);
 
-      if (chaseTarget && chaseTarget.hp > 0 && distFromHome <= ENEMY_LEASH_RANGE) {
+      if (chaseTarget && chaseTarget.hp > 0 && distFromHome <= (enemy.leashRange || ENEMY_LEASH_RANGE)) {
         this.stepToward(enemy, chaseTarget.x, chaseTarget.z, ENEMY_CHASE_SPEED, dt);
       } else {
         if (chaseTargetId) {
@@ -820,12 +1184,7 @@ export class CombatEngine {
 
     let target = this.wanderTarget.get(enemyId);
     if (!target) {
-      const angle = Math.random() * Math.PI * 2;
-      const radius = Math.random() * ENEMY_WANDER_RADIUS;
-      target = {
-        x: clamp(enemy.homeX + Math.cos(angle) * radius, -MAP_HALF_EXTENT, MAP_HALF_EXTENT),
-        z: clamp(enemy.homeZ + Math.sin(angle) * radius, -MAP_HALF_EXTENT, MAP_HALF_EXTENT),
-      };
+      target = this.pickWanderTarget(enemy);
       this.wanderTarget.set(enemyId, target);
     }
 
@@ -836,6 +1195,41 @@ export class CombatEngine {
     }
 
     this.stepToward(enemy, target.x, target.z, ENEMY_WANDER_SPEED, dt);
+  }
+
+  private pickWanderTarget(enemy: Enemy): { x: number; z: number } {
+    return this.findClearPointNear(enemy.homeX, enemy.homeZ, enemy.wanderRadius || ENEMY_WANDER_RADIUS);
+  }
+
+  // Sampling a random point in a circle used to ignore structures/furniture entirely - once
+  // decoration/buildings got real colliders (see shared's BUILDING_FOOTPRINT/FURNITURE_FOOTPRINT),
+  // a leg that happened to land inside or behind one gave stepToward's push-out nothing reachable
+  // to walk toward, so the enemy just vibrated against the obstacle every tick instead of visibly
+  // wandering. Retries a few random points and keeps the first one that isn't blocked; if every
+  // attempt is (boxed in by dense decoration), the center itself is always the fallback rather
+  // than committing to an unreachable spot. Used for wander legs above (via pickWanderTarget) and
+  // by WorldRoom to pick where a zone-based enemy spawns (see EnemySpawnZoneDef).
+  findClearPointNear(cx: number, cz: number, radius: number): { x: number; z: number } {
+    for (let attempt = 0; attempt < ENEMY_WANDER_TARGET_ATTEMPTS; attempt++) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * radius;
+      const x = clamp(cx + Math.cos(angle) * r, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      const z = clamp(cz + Math.sin(angle) * r, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      if (!this.isPointBlocked(x, z)) return { x, z };
+    }
+    return { x: cx, z: cz };
+  }
+
+  private isPointBlocked(x: number, z: number): boolean {
+    if (this.config.collidableStructures) {
+      const resolved = resolveStructureCollisions(x, z, STRUCTURES);
+      if (Math.hypot(resolved.x - x, resolved.z - z) > 0.01) return true;
+    }
+    if (this.config.collidableFurniture) {
+      const resolved = resolveFurnitureCollisions(x, z, FURNITURE);
+      if (Math.hypot(resolved.x - x, resolved.z - z) > 0.01) return true;
+    }
+    return false;
   }
 
   private tickEnemyAttacks() {
@@ -924,7 +1318,7 @@ export class CombatEngine {
       if (!enemy || enemy.hp <= 0) continue;
 
       if (pending.abilityId) {
-        this.resolveBossAbility(enemy, pending);
+        this.resolveBossAbility(enemy, enemyId, pending);
         continue;
       }
 
@@ -1061,21 +1455,21 @@ export class CombatEngine {
     }
   }
 
-  private resolveBossAbility(enemy: Enemy, pending: PendingEnemyCast) {
+  private resolveBossAbility(enemy: Enemy, enemyId: string, pending: PendingEnemyCast) {
     const stats = ENEMY_TYPES[enemy.enemyTypeId]?.stats as BossStats | undefined;
     const ability = stats?.specialAbilities?.find((a) => a.id === pending.abilityId);
     if (!ability) return; // content deleted mid-windup - cast fizzles
 
-    const enrageMultiplier = this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1;
-
-    if (ability.kind === "raidNova") {
-      forEachAlive(this.state.players, enemy.x, enemy.z, ability.radius, (player, sessionId) => {
-        this.damagePlayer(sessionId, player, ability.damage * enrageMultiplier);
-      });
-    } else if (ability.kind === "singleTargetBurst") {
-      const player = this.state.players.get(pending.targetSessionId);
-      if (player && player.hp > 0) this.damagePlayer(pending.targetSessionId, player, ability.damage * enrageMultiplier);
-    }
+    const casterCtx: CasterContext = {
+      isPlayer: false,
+      casterX: enemy.x,
+      casterZ: enemy.z,
+      sourceId: enemyId,
+      enrageMultiplier: this.isBossEnraged(enemy) ? BOSS_ENRAGE_DAMAGE_MULTIPLIER : 1,
+    };
+    const target = this.state.players.get(pending.targetSessionId);
+    const impact = target ? { x: target.x, z: target.z } : { x: enemy.x, z: enemy.z };
+    this.resolveEffect(casterCtx, ability.effect, impact, pending.targetSessionId);
   }
 
   private spawnProjectile(
@@ -1087,7 +1481,7 @@ export class CombatEngine {
     speed: number,
     ownerId: string,
     isCrit = false,
-  ) {
+  ): string {
     const projectile = new Projectile();
     projectile.x = x;
     projectile.z = z;
@@ -1101,6 +1495,7 @@ export class CombatEngine {
     const id = `proj-${this.projectileSeq++}`;
     this.state.projectiles.set(id, projectile);
     this.projectileAge.set(id, 0);
+    return id;
   }
 
   private tickProjectiles(dt: number) {
@@ -1149,7 +1544,16 @@ export class CombatEngine {
           }
         } else {
           const enemy = this.state.enemies.get(projectile.targetId)!;
-          this.applySpellDamage(enemy, projectile.damage, projectile.targetId, projectile.ownerId, projectile.isCrit);
+          const pending = this.pendingProjectileEffects.get(id);
+          if (pending) {
+            // Re-resolved against the target's live arrival position (not wherever they were at
+            // cast time) - matches the homing behavior above (targetX/targetZ re-fetched every
+            // tick), so e.g. a circle-on-impact AOE lands centered on where they actually are.
+            const impact = { x: enemy.x, z: enemy.z };
+            for (const effect of pending.effects) this.resolveEffect(pending.casterCtx, effect, impact, pending.targetHint);
+          } else {
+            this.applySpellDamage(enemy, projectile.damage, projectile.targetId, projectile.ownerId, projectile.isCrit);
+          }
         }
         this.removeProjectile(id);
         continue;
@@ -1169,5 +1573,6 @@ export class CombatEngine {
   private removeProjectile(id: string) {
     this.state.projectiles.delete(id);
     this.projectileAge.delete(id);
+    this.pendingProjectileEffects.delete(id);
   }
 }

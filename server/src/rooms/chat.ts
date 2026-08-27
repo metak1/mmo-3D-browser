@@ -15,14 +15,15 @@ interface ChatCapableRoom {
 export function handleChatMessage(room: ChatCapableRoom, client: Client, message: ChatMessage) {
   const player = room.state.players.get(client.sessionId);
   if (!player) return;
-  if (message.channel !== "say" && message.channel !== "party") return;
+  if (message.channel !== "say" && message.channel !== "party" && message.channel !== "guild") return;
 
   const text = message.text.trim().slice(0, CHAT_MAX_LENGTH);
   if (!text) return;
 
-  // A party send with no party is rejected outright, not silently downgraded to "say" -
-  // that would leak a message the sender thought was scoped to their group.
+  // A party/guild send with no party/guild is rejected outright, not silently downgraded to
+  // "say" - that would leak a message the sender thought was scoped to their group.
   if (message.channel === "party" && !player.partyId) return;
+  if (message.channel === "guild" && player.guildId === 0) return;
 
   const payload: ChatBroadcast = {
     channel: message.channel,
@@ -35,6 +36,13 @@ export function handleChatMessage(room: ChatCapableRoom, client: Client, message
   if (message.channel === "party") {
     for (const [sessionId, other] of room.state.players) {
       if (other.partyId !== player.partyId) continue;
+      room.clients.getById(sessionId)?.send("chat", payload);
+    }
+  } else if (message.channel === "guild") {
+    // Guild chat is room-scoped only, same pre-existing limitation party chat already has - a
+    // guildmate in a different room instance (overworld vs. a dungeon) doesn't receive it either.
+    for (const [sessionId, other] of room.state.players) {
+      if (other.guildId !== player.guildId) continue;
       room.clients.getById(sessionId)?.send("chat", payload);
     }
   } else {

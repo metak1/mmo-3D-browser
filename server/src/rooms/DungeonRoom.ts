@@ -1,11 +1,15 @@
 import { Room, Client } from "@colyseus/core";
 import {
   ACTIVE_DUNGEON,
+  ActionFailedMessage,
+  ActionFailReason,
   CastMessage,
   ChatMessage,
   DungeonSpawnDef,
   ENEMY_RESPAWN_MS,
   ENEMY_TYPES,
+  EQUIP_SLOTS,
+  GuildRosterSnapshot,
   INVENTORY_SIZE,
   InputMessage,
   LOOT_BAG_AGGREGATE_RADIUS,
@@ -21,15 +25,20 @@ import {
 } from "@mmo/shared";
 import { verifyToken } from "../auth/jwt.js";
 import { getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
-import { listCharacterItems, replaceCharacterItems } from "../db/items.js";
+import * as friendsDb from "../db/friends.js";
+import * as guildsDb from "../db/guilds.js";
+import { EquippedItemIds, listCharacterItems, replaceCharacterItems } from "../db/items.js";
+import { isOnline, notifyCharacter, registerOnline, SocialCapableRoom, unregisterOnline } from "../onlineRegistry.js";
 import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
+import { getEquippedItemId, setEquippedItemId } from "./equipment.js";
 import { DungeonState, Enemy, LootBag, Player } from "./schema/DungeonState.js";
+import { FriendEntry, FriendRequestEntry, GuildInviteEntry } from "./schema/WorldState.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const BOSS_GUARANTEED_DROPS = 3;
 
-export class DungeonRoom extends Room<DungeonState> {
+export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom {
   private combat!: CombatEngine;
   private characterIdBySession = new Map<string, number>();
   private lootBagSeq = 0;
@@ -59,6 +68,8 @@ export class DungeonRoom extends Room<DungeonState> {
     this.onMessage("cast", (client, message: CastMessage) => this.combat.handleCast(client, message));
     this.onMessage("loot_take", (client, message: LootTakeMessage) => this.handleLootTake(client, message));
     this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
+    this.onMessage("guild_leave", (client) => this.handleGuildLeave(client));
+    this.onMessage("guild_roster_request", (client) => this.handleGuildRosterRequest(client));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
   }
@@ -108,10 +119,29 @@ export class DungeonRoom extends Room<DungeonState> {
 
     const items = await listCharacterItems(character.id);
     for (const row of items) {
-      if (row.slot === "weapon") player.equippedWeapon = row.item_id;
-      else if (row.slot === "armor") player.equippedArmor = row.item_id;
-      else if (row.slot === "trinket") player.equippedTrinket = row.item_id;
+      if (row.slot) setEquippedItemId(player, row.slot, row.item_id);
       else player.inventory.push(row.item_id);
+    }
+
+    // Mid-dungeon, only the "who's a friend / what guild" facts matter - unlike WorldRoom's own
+    // onJoin, pending friend requests/guild invites are skipped here since responding to a social
+    // invite mid-run isn't a supported flow (see plan: guild management stays world-only for v1).
+    const friendRows = await friendsDb.listFriends(character.id);
+    for (const row of friendRows) {
+      const entry = new FriendEntry();
+      entry.characterId = row.character_id;
+      entry.name = row.name;
+      entry.level = row.level;
+      entry.classId = row.class_id;
+      entry.online = isOnline(row.character_id);
+      player.friends.set(String(row.character_id), entry);
+    }
+
+    const guildMembership = await guildsDb.getGuildForCharacter(character.id);
+    if (guildMembership) {
+      player.guildId = guildMembership.guild_id;
+      player.guildName = guildMembership.guild_name;
+      player.guildRole = guildMembership.role;
     }
 
     this.combat.recomputeMaxHp(player);
@@ -119,12 +149,32 @@ export class DungeonRoom extends Room<DungeonState> {
 
     this.state.players.set(client.sessionId, player);
     this.characterIdBySession.set(client.sessionId, character.id);
+    registerOnline({
+      sessionId: client.sessionId,
+      roomId: this.roomId,
+      characterId: character.id,
+      name: character.name,
+      level: player.level,
+      classId: player.classId,
+    });
+    for (const row of friendRows) {
+      if (!isOnline(row.character_id)) continue;
+      notifyCharacter(row.character_id, (room, sid) => room.applyFriendOnlineChange(sid, character.id, true));
+    }
     console.log(`[DungeonRoom] ${client.sessionId} joined as ${character.name}`);
   }
 
   async onLeave(client: Client) {
     const player = this.state.players.get(client.sessionId);
     const characterId = this.characterIdBySession.get(client.sessionId);
+    if (characterId !== undefined) {
+      unregisterOnline(characterId);
+      if (player) {
+        for (const friend of player.friends.values()) {
+          notifyCharacter(friend.characterId, (room, sid) => room.applyFriendOnlineChange(sid, characterId, false));
+        }
+      }
+    }
     if (player && characterId) {
       try {
         await saveCharacterProgress(characterId, {
@@ -218,17 +268,25 @@ export class DungeonRoom extends Room<DungeonState> {
     this.clock.setTimeout(() => this.state.lootBags.delete(id), LOOT_BAG_DESPAWN_MS);
   }
 
+  // Sends an ActionFailedMessage back to just this one client - mirrors WorldRoom's own
+  // rejectAction (each room keeps its own copy of handleLootTake, so this small helper is
+  // duplicated too rather than sharing a base class for one line of behavior).
+  private rejectAction(client: Client, reason: ActionFailReason) {
+    const failure: ActionFailedMessage = { reason };
+    client.send("action_failed", failure);
+  }
+
   private handleLootTake(client: Client, message: LootTakeMessage) {
     const player = this.state.players.get(client.sessionId);
     const bag = this.state.lootBags.get(message.bagId);
     if (!player || !bag) return;
 
     const dist = Math.hypot(player.x - bag.x, player.z - bag.z);
-    if (dist > LOOT_PICKUP_RADIUS) return;
+    if (dist > LOOT_PICKUP_RADIUS) return this.rejectAction(client, "too_far");
 
     const index = bag.items.indexOf(message.itemId);
-    if (index === -1) return;
-    if (player.inventory.length >= INVENTORY_SIZE) return;
+    if (index === -1) return this.rejectAction(client, "not_available");
+    if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
 
     bag.items.splice(index, 1);
     player.inventory.push(message.itemId);
@@ -246,13 +304,101 @@ export class DungeonRoom extends Room<DungeonState> {
     if (!player || !characterId) return;
 
     try {
-      await replaceCharacterItems(characterId, [...player.inventory], {
-        weapon: player.equippedWeapon,
-        armor: player.equippedArmor,
-        trinket: player.equippedTrinket,
-      });
+      const equipped = Object.fromEntries(EQUIP_SLOTS.map((slot) => [slot, getEquippedItemId(player, slot)])) as EquippedItemIds;
+      await replaceCharacterItems(characterId, [...player.inventory], equipped);
     } catch (err) {
       console.error(`[DungeonRoom] failed to persist items for character ${characterId}:`, err);
     }
+  }
+
+  // --- Guilds (leave/roster only - see plan: creation/invite/kick/promote/disband stay world-only) ---
+
+  private async handleGuildLeave(client: Client) {
+    const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIdBySession.get(client.sessionId);
+    if (!player || characterId === undefined) return;
+    if (player.guildId === 0) return;
+
+    const guildId = player.guildId;
+    const guildName = player.guildName;
+    const wasLeader = player.guildRole === "leader";
+    await guildsDb.removeGuildMember(characterId);
+    player.guildId = 0;
+    player.guildName = "";
+    player.guildRole = "";
+
+    if (wasLeader) {
+      const promotedId = await guildsDb.promoteNextMemberAsLeader(guildId);
+      if (promotedId === null) {
+        await guildsDb.deleteGuild(guildId);
+      } else {
+        notifyCharacter(promotedId, (room, sid) => room.applyGuildFieldsChange(sid, guildId, guildName, "leader"));
+      }
+    }
+  }
+
+  private async handleGuildRosterRequest(client: Client) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.guildId === 0) return;
+
+    const members = await guildsDb.listGuildMembers(player.guildId);
+    const snapshot: GuildRosterSnapshot = {
+      guildId: player.guildId,
+      guildName: player.guildName,
+      members: members.map((m) => ({
+        characterId: m.character_id,
+        name: m.name,
+        level: m.level,
+        classId: m.class_id,
+        role: m.role,
+        online: isOnline(m.character_id),
+      })),
+    };
+    client.send("guild_roster", snapshot);
+  }
+
+  // --- SocialCapableRoom (see onlineRegistry.ts's own doc comment - lets notifyCharacter reach a
+  // specific online character's client regardless of which room instance currently holds them) ---
+
+  applyFriendOnlineChange(sessionId: string, characterId: number, online: boolean) {
+    const entry = this.state.players.get(sessionId)?.friends.get(String(characterId));
+    if (entry) entry.online = online;
+  }
+
+  applyFriendRequestPush(sessionId: string, entry: { requestId: number; fromCharacterId: number; fromName: string }) {
+    // Requests are irrelevant mid-dungeon (no accept/decline UI here) - the DB row still exists,
+    // so it'll surface correctly on this character's next onJoin regardless of which room type.
+    void sessionId;
+    void entry;
+  }
+
+  applyFriendAdded(sessionId: string, entry: { characterId: number; name: string; level: number; classId: string; online: boolean }) {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    const friendEntry = new FriendEntry();
+    friendEntry.characterId = entry.characterId;
+    friendEntry.name = entry.name;
+    friendEntry.level = entry.level;
+    friendEntry.classId = entry.classId;
+    friendEntry.online = entry.online;
+    player.friends.set(String(entry.characterId), friendEntry);
+  }
+
+  applyFriendRemoved(sessionId: string, characterId: number) {
+    this.state.players.get(sessionId)?.friends.delete(String(characterId));
+  }
+
+  applyGuildInvitePush(sessionId: string, entry: { inviteId: number; guildId: number; guildName: string; invitedByName: string }) {
+    // Same reasoning as applyFriendRequestPush - no accept/decline UI mid-dungeon.
+    void sessionId;
+    void entry;
+  }
+
+  applyGuildFieldsChange(sessionId: string, guildId: number, guildName: string, guildRole: string) {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    player.guildId = guildId;
+    player.guildName = guildName;
+    player.guildRole = guildRole;
   }
 }

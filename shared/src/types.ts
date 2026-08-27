@@ -4,7 +4,7 @@
 // never at module top-level. Re-exported (in addition to imported - `export *` alone doesn't create
 // a local binding this file can call) so @mmo/shared consumers (shared/package.json's "main" only
 // resolves this file) see hex.ts's public API too.
-import { resetHexTerrainCache, getHexElevation, HEX_ELEVATION_STEP_WORLD, HexTerrainKind } from "./hex.js";
+import { resetHexTerrainCache, getHexElevation, HEX_ELEVATION_STEP_WORLD, HexTerrainKind, HexTerrainContent } from "./hex.js";
 export * from "./hex.js";
 
 export const WORLD_ROOM_NAME = "world_room";
@@ -104,6 +104,39 @@ export type SpellId = string;
 export type SpellTargetType = "enemy" | "ally" | "self" | "ground";
 export type SpellEffectType = "damage" | "heal" | "dispel" | "interrupt";
 
+// The composable effect system - a "technique" (boss ability or spell) is a `shape` (where it
+// lands, relative to whoever cast it and the resolved impact point) crossed with one or more
+// `actions` (what happens to every unit the shape hits). Both are combinable independently of
+// each other - a single EffectDef can be "cone in front of the caster: damage + a lingering DOT +
+// knockback" - see CombatEngine's resolveEffect/collectUnitsInShape, the one interpreter every
+// spell/boss-ability call site now funnels through instead of each growing its own bespoke branch.
+export type EffectShape =
+  | { kind: "singleTarget" }
+  | { kind: "circle"; radius: number; centeredOn: "caster" | "impact" }
+  | { kind: "cone"; radius: number; angleDeg: number } // centered on the caster, aimed at the impact point
+  | { kind: "line"; length: number; width: number } // a rectangle from the caster toward the impact point
+  | { kind: "randomPoints"; count: number; spreadRadius: number; pointRadius: number }; // e.g. a "meteor shower" around the impact point
+
+// "ailment"/"buff" apply an EXISTING AilmentKind/BuffKind (see AILMENTS/BUFFS below) rather than
+// carrying their own magnitude/duration - one shared tuning table either way, same as before this
+// system existed. "dot"/"knockback" are the two genuinely new primitives this system adds - see
+// DotStack (server/src/rooms/schema/WorldState.ts) for how a dot action becomes ticked state.
+export type EffectAction =
+  | { kind: "damage"; amount: number }
+  | { kind: "heal"; amount: number }
+  | { kind: "dot"; amount: number; tickIntervalMs: number; durationMs: number }
+  | { kind: "ailment"; ailment: AilmentKind }
+  | { kind: "buff"; buff: BuffKind }
+  | { kind: "knockback"; distance: number }
+  | { kind: "dispel" }
+  | { kind: "interrupt" }
+  | { kind: "summon"; enemyTypeId: EnemyTypeId; count: number };
+
+export interface EffectDef {
+  shape: EffectShape;
+  actions: EffectAction[];
+}
+
 export interface SpellDef {
   id: SpellId;
   classId: ClassId;
@@ -118,6 +151,13 @@ export interface SpellDef {
   castTimeMs: number;
   range: number;
   projectileSpeed?: number; // only used when castTimeMs > 0 (cast-time spells may travel as a projectile)
+  // The composable path - additive, not a replacement for effectType/amount/aoeRadius/
+  // interruptsCast above. Unset (every spell authored before this field existed) falls through to
+  // that exact original flat-field resolution in resolveSpellEffect, unchanged; a spell that sets
+  // this instead runs through resolveEffect, one EffectDef per independent shape this cast should
+  // apply (most spells only ever need one entry - the array exists so a spell CAN layer more than
+  // one shape, e.g. "hit the target AND drop a circle at their feet").
+  effects?: EffectDef[];
 }
 
 export let SPELLS: Record<SpellId, SpellDef> = {};
@@ -167,11 +207,20 @@ export interface BossStats {
   specialCooldownMs?: number;
 }
 
-// A boss's special-spell rotation: cycled through in array order on BossStats.specialCooldownMs.
-// Modeled on TalentEffect's discriminated-union pattern - easy to extend with more kinds later.
-export type BossAbilityDef =
-  | { id: string; name: string; kind: "raidNova"; damage: number; radius: number; castTimeMs: number }
-  | { id: string; name: string; kind: "singleTargetBurst"; damage: number; castTimeMs: number };
+// A boss's special-spell rotation: cycled through in array order on BossStats.specialCooldownMs
+// (see CombatEngine.tickBossSpecialAbilities, unchanged by this) - `effect` is the composable
+// EffectDef above (shape + actions[]), resolved by the same resolveEffect every spell now runs
+// through. Previously a closed 2-member kind union (raidNova/singleTargetBurst) requiring a new
+// TypeScript variant + CombatEngine branch + client telegraph case for every new boss technique -
+// any admin-authored shape/action combination now "just works" on both server and client with no
+// code changes. Live enemy_types.stats JSON authored under the old shape needs a one-time hand
+// reshape in the admin editor (there were only ever a handful of boss rows).
+export interface BossAbilityDef {
+  id: string;
+  name: string;
+  castTimeMs: number;
+  effect: EffectDef;
+}
 
 export type EnemyStats = MeleeStats | CasterStats | BossStats;
 
@@ -274,7 +323,91 @@ export interface CastMessage {
   targetZ?: number;
 }
 
-export type EquipSlot = "weapon" | "armor" | "trinket";
+// Sent back to just the casting client (never broadcast - nobody else needs to know why someone
+// else's cast fizzled) whenever CombatEngine.handleCast rejects an attempt for a reason the
+// client couldn't already predict/block on its own (see client/src/main.ts's castSpell, which
+// pre-checks range/target/cast-state itself so the common cases never even round-trip to the
+// server - this message is what surfaces the ones that can't be predicted client-side, like line
+// of sight, plus a safety net for the predictable ones in case client/server state ever drifts).
+export type CastFailReason = "out_of_range" | "no_line_of_sight" | "no_target" | "already_casting" | "on_cooldown" | "interrupted";
+
+export interface CastFailedMessage {
+  reason: CastFailReason;
+}
+
+// Generalizes CastFailedMessage's own pattern (see its doc comment) to every other player-
+// initiated action that can be silently rejected server-side - loot/quest/vendor/waypoint
+// interactions all funnel through this instead of each growing its own bespoke message type.
+// reason is intentionally coarse (one value covers many handlers) since the client already
+// blocks the common "too far" case itself before these ever round-trip to the server (see main.ts's
+// own isNearNpcForClient-style proximity checks gating whether a panel opens at all) - this is
+// mostly a safety net for state drift (e.g. the player walked away while a panel stayed open), not
+// the primary way a player learns why something didn't work.
+export type ActionFailReason =
+  | "too_far"
+  | "inventory_full"
+  | "not_enough_gold"
+  | "not_available"
+  | "not_found"
+  | "already_friends"
+  | "already_pending"
+  | "already_in_guild"
+  | "name_taken"
+  | "not_leader"
+  | "not_admin";
+
+export interface ActionFailedMessage {
+  reason: ActionFailReason;
+}
+
+// "weapon"/"armor"/"trinket" predate the rest of this list and keep their original ids for
+// backward compatibility with already-equipped items in the live `character_items` table (a
+// rename would orphan any row whose `slot` column still says the old value) - "weapon" is the
+// main-hand slot, "armor" is the chest slot, both relabeled accordingly in EQUIP_SLOT_LABEL below
+// without touching the id itself.
+export type EquipSlot =
+  | "weapon"
+  | "offHand"
+  | "head"
+  | "neck"
+  | "shoulders"
+  | "armor"
+  | "hands"
+  | "waist"
+  | "legs"
+  | "feet"
+  | "ring"
+  | "trinket";
+
+export const EQUIP_SLOTS: EquipSlot[] = [
+  "head",
+  "neck",
+  "shoulders",
+  "armor",
+  "hands",
+  "waist",
+  "legs",
+  "feet",
+  "weapon",
+  "offHand",
+  "ring",
+  "trinket",
+];
+
+export const EQUIP_SLOT_LABEL: Record<EquipSlot, string> = {
+  weapon: "Main Hand",
+  offHand: "Off Hand",
+  head: "Head",
+  neck: "Neck",
+  shoulders: "Shoulders",
+  armor: "Chest",
+  hands: "Hands",
+  waist: "Waist",
+  legs: "Legs",
+  feet: "Feet",
+  ring: "Ring",
+  trinket: "Trinket",
+};
 
 export interface ItemDef {
   id: string;
@@ -326,11 +459,7 @@ export const LOOT_BAG_DESPAWN_MS = 180_000;
 export const LOOT_PICKUP_RADIUS = 3;
 export const INVENTORY_SIZE = 20;
 
-export interface EquippedItems {
-  weapon: string;
-  armor: string;
-  trinket: string;
-}
+export type EquippedItems = Record<EquipSlot, string>;
 
 export function getEffectiveStats(base: PlayerStats, equipped: EquippedItems): PlayerStats {
   const total: PlayerStats = { ...base };
@@ -544,6 +673,19 @@ export interface HexTileOverrideDef {
   // other kind ignores it (grass/water are rotationally uniform, road/river compute their own
   // piece rotation from neighbor connectivity). Defaults to 0 when absent.
   rotation?: number;
+  // Applies to any kind (grass, water, road, river, coast) - lets an admin hand-sculpt a specific
+  // cell's height (0..HEX_MAX_ELEVATION) independent of the procedural noise that would otherwise
+  // decide it. Only a "grass" cell ever gets a sloped ramp toward a lower neighbor though (see
+  // hex.ts's classifyElevationRamps) - the asset pack's only ramp shape is grass-specific, so any
+  // other kind (or a grass cell too far from its neighbor) just sits at its own flat height with
+  // an unramped edge. Defaults to 0 (flat, ground level) when absent, same as every painted tile
+  // already behaved before this field existed.
+  elevation?: number;
+  // Only meaningful on a "grass" cell with elevation > 0 - see hex.ts's OverrideLike.rampRotation
+  // (the shared source of truth for this field's exact semantics). Picks which direction the
+  // ramp slopes toward directly, replacing classifyElevationRamps' own automatic neighbor-facing
+  // computation for this cell. Unset (the default) keeps the automatic behavior.
+  rampRotation?: number;
 }
 
 export let HEX_TILE_OVERRIDES: HexTileOverrideDef[] = [];
@@ -596,9 +738,104 @@ export interface PartyRespondMessage {
   accept: boolean;
 }
 
+// Unlike party (ephemeral Colyseus room state, wiped on disconnect - see partyId's own doc
+// comment), friends and guild membership are real DB-persisted player data: they must survive a
+// relog, and must reach someone who's offline or in a different room entirely (overworld vs. a
+// dungeon instance). Targeting is by character name (a text input) rather than only "right-click
+// someone visible nearby" for the same reason - party invites can get away with sessionId
+// targeting since both sides are already in the same room; these can't assume that.
+export interface FriendRequestMessage {
+  targetName: string;
+}
+
+export interface FriendRespondMessage {
+  requestId: number;
+  accept: boolean;
+}
+
+export interface FriendRemoveMessage {
+  characterId: number;
+}
+
+// friend_request auto-accepts instead of creating a second row if the target already sent *you*
+// one - see WorldRoom.handleFriendRequest.
+export const GUILD_NAME_MAX_LENGTH = 32; // mirrors characters.name's own VARCHAR(32)
+
+export interface GuildCreateMessage {
+  name: string;
+}
+
+export interface GuildInviteMessage {
+  targetName: string;
+}
+
+export interface GuildRespondMessage {
+  inviteId: number;
+  accept: boolean;
+}
+
+export interface GuildKickMessage {
+  characterId: number;
+}
+
+export interface GuildPromoteMessage {
+  characterId: number;
+}
+
+// guild_leave/guild_disband/guild_roster_request carry no payload - mirrors party_leave.
+
+// Server -> client, pushed after a guild_roster_request (and proactively after this client's own
+// mutating guild action) - not synced schema state, same reasoning as TradeSnapshot below: a full
+// roster (including offline members) is too large/situational to duplicate onto every guild
+// member's own Player schema. Player.guildId/guildName/guildRole (small, always-relevant fields)
+// stay on the synced schema; the roster itself is pulled on demand.
+export interface GuildRosterEntry {
+  characterId: number;
+  name: string;
+  level: number;
+  classId: string;
+  role: "leader" | "member";
+  online: boolean;
+}
+
+export interface GuildRosterSnapshot {
+  guildId: number;
+  guildName: string;
+  members: GuildRosterEntry[];
+}
+
 export let PORTAL_POSITION = { x: -24, z: -24 }; // clear of every existing spawn/quest/arena position
 
 export let DUNGEON_HALF_EXTENT = 16; // the active dungeon's own ground, purely decorative sizing for the client
+
+// The active dungeon's own hex-terrain content, mirroring STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/
+// HEX_TILE_OVERRIDES but scoped to ACTIVE_DUNGEON.mapId instead of ACTIVE_MAP.id (see
+// loadGameContent) - structures/npcs/waypoints/spawns are already placeable on a dungeon map via
+// the admin editor today, so including them here means a dungeon's own walls/props/NPCs get the
+// same "never drop a lake under this" land protection the overworld already gets for free.
+export let DUNGEON_STRUCTURES: StructureDef[] = [];
+export let DUNGEON_NPCS: Record<string, NpcDef> = {};
+export let DUNGEON_WAYPOINTS: WaypointDef[] = [];
+export let DUNGEON_SPAWN_POINTS: EnemySpawnDef[] = [];
+export let DUNGEON_HEX_TILE_OVERRIDES: HexTileOverrideDef[] = [];
+
+// Assembled fresh on every call from the globals above rather than cached, since it's only ever
+// used for ground-mesh construction (once per dungeon load) and client-visual elevation lookups -
+// see getTerrainHeight's "dungeon" branch. No boss-arena/portal land-forcing for dungeons yet
+// (both left at a harmless {0,0}/0 - a dungeon-kind map's own bossArena/portal columns aren't used
+// today), unlike the overworld's equivalent live content.
+export function dungeonHexContent(): HexTerrainContent {
+  return {
+    structures: DUNGEON_STRUCTURES,
+    npcs: Object.values(DUNGEON_NPCS),
+    waypoints: DUNGEON_WAYPOINTS,
+    spawns: DUNGEON_SPAWN_POINTS,
+    bossArenaCenter: { x: 0, z: 0 },
+    bossArenaRadius: 0,
+    portalPosition: { x: 0, z: 0 },
+    overrides: DUNGEON_HEX_TILE_OVERRIDES,
+  };
+}
 
 export const DUNGEON_ROOM_NAME = "dungeon_room";
 export let DUNGEON_PARTY_SIZE = 4;
@@ -614,7 +851,7 @@ export interface DungeonJoinListingMessage {
 
 export const CHAT_MAX_LENGTH = 200;
 
-export type ChatChannel = "say" | "party";
+export type ChatChannel = "say" | "party" | "guild";
 
 // Chat is deliberately not part of synced schema state (see server/src/rooms/chat.ts) -
 // these are plain onMessage/broadcast payloads, not @type fields.
@@ -629,6 +866,21 @@ export interface ChatBroadcast {
   senderSessionId: string;
   text: string;
   sentAt: number;
+}
+
+// Sent by the client's "/time" chat command (see main.ts's handleSlashCommand) - server-side
+// admin-role check happens fresh per-request (WorldRoom.handleSetTimeOfDay), same "not embedded in
+// a client-trusted flag" posture as the HTTP admin routes' own requireAdmin. Overworld-only, same
+// as DayNightCycle itself - a dungeon has no sky to set the time of.
+export interface SetTimeOfDayMessage {
+  fraction: number; // 0..1, wraps like DayNightCycle's own timeOfDay() - 0/1 = midnight, 0.5 = noon
+}
+
+// Broadcast to every client in the room once an admin's SetTimeOfDayMessage passes the role check -
+// see GameScene.setTimeOfDay/DayNightCycle.setTimeOverride for how a client applies it (a one-time
+// jump, then the cycle keeps flowing forward from there at its normal speed).
+export interface TimeOfDaySetBroadcast {
+  fraction: number;
 }
 
 export const TRADE_RANGE = 5; // slightly larger than LOOT_PICKUP_RADIUS/NPC_INTERACT_RADIUS since it targets a moving player
@@ -686,6 +938,26 @@ export interface EnemySpawnDef {
 
 export let SPAWN_POINTS: EnemySpawnDef[] = [];
 
+// An alternative to EnemySpawnDef's one-row-one-fixed-point model: a circular area that the
+// server keeps populated with up to maxPopulation enemies at once, each randomly drawn from
+// enemyTypeIds and randomly positioned within the circle (see WorldRoom's spawnZoneMember) -
+// for "populate this forest with wolves" instead of hand-placing every wolf. Overworld only;
+// dungeons keep their own hand-curated, non-wandering DungeonSpawnDef encounters.
+export interface EnemySpawnZoneDef {
+  id: string;
+  mapId: MapId;
+  x: number;
+  z: number;
+  radius: number;
+  enemyTypeIds: EnemyTypeId[];
+  maxPopulation: number;
+  respawnMs?: number;
+  wanderRadius?: number; // per-zone override of ENEMY_WANDER_RADIUS; unset = the global default
+  leashRange?: number; // per-zone override of ENEMY_LEASH_RANGE; unset = the global default
+}
+
+export let SPAWN_ZONES: EnemySpawnZoneDef[] = [];
+
 // kind is a closed union selecting a hardcoded procedural shape builder client-side
 // (client/src/game/Structure.ts); everything else is open admin content. Walls/pillars are
 // solid (see getStructureColliders below) - only players collide with them, blocking movement
@@ -704,7 +976,10 @@ export let SPAWN_POINTS: EnemySpawnDef[] = [];
 // findStructureLoops. It still blocks movement like every other structure kind - see
 // getStructureColliders' "building" case and BUILDING_FOOTPRINT below - just via a single
 // computed-footprint box per model instead of a hand-placed wall/pillar shape.
-export type StructureKind = "wall" | "door" | "tower" | "gate" | "building";
+// "lamp" has no dedicated getStructureColliders case below - it falls through to the same
+// non-blocking default a door/gateless building already gets, which is exactly right for a thin
+// decorative post nobody should ever collide with.
+export type StructureKind = "wall" | "door" | "tower" | "gate" | "building" | "lamp";
 
 export interface StructureDef {
   id: string;
@@ -719,7 +994,8 @@ export interface StructureDef {
   height: number;
   color: string; // hex, e.g. "#8a6d4b"
   yOffset: number; // added on top of the auto-computed terrain height - see getTerrainHeight
-  modelId?: string; // "building" kind only - key into client/src/game/Structure.ts's BUILDING_MODELS
+  modelId?: string; // "building"/"lamp" kind only - key into client/src/game/Structure.ts's BUILDING_MODELS/buildLamp
+  lightIntensity?: number; // "lamp" kind only - scales the light/glow strength; unset = client's own built-in default
 }
 
 export let STRUCTURES: StructureDef[] = [];
@@ -1378,29 +1654,32 @@ export function findStructureLoops(
 // bridging the one boundary case, not an arbitrary analytic height sampled independently per tile.
 // ---------------------------------------------------------------------------------------------
 
-// Set once per client session (client/src/game/Scene.ts, alongside the same isDungeon that
-// already keeps a dungeon's render mesh a flat, undisplaced quad) - dungeons have no elevation at
-// all, so entities there need to sit at a flat 0 instead of riding the overworld's hex elevation,
-// which doesn't know or care that it's being evaluated at "dungeon (3, -2)" instead of "overworld
-// (3, -2)" (the two coordinate spaces overlap numerically, so the function can't tell them apart
-// from x/z alone).
-export let TERRAIN_FLAT = false;
-export function setTerrainFlat(flat: boolean) {
-  TERRAIN_FLAT = flat;
+// Set once per client session (client/src/game/Scene.ts) - "overworld (3, -2)" and "dungeon
+// (3, -2)" are numerically indistinguishable from x/z alone, so getTerrainHeight below needs to
+// know which content to reclassify against (or that there's no elevation at all, e.g. the
+// character-select/login scenes). "dungeon" always reclassifies fresh against dungeonHexContent()
+// rather than ever touching the overworld's live-cached hex state - see that function's own
+// comment for why the two dungeon-scoped globals it reads from exist.
+export type TerrainMode = "flat" | "overworld" | "dungeon";
+export let TERRAIN_MODE: TerrainMode = "flat";
+export function setTerrainMode(mode: TerrainMode) {
+  TERRAIN_MODE = mode;
 }
 
 // `structures`/`regionHalfExtent` are accepted for source compatibility with existing call sites
-// but no longer used - elevation now comes from hex.ts's live-cached getHexElevation, which reads
-// the full live content (not just structures) on its own. The admin map editor, which previews
-// maps that may not be the currently-active one, calls getHexElevation directly with its own
-// fetched-and-filtered content instead of through this function - see MapEditor.tsx.
+// but no longer used - elevation now comes from hex.ts's live-cached getHexElevation (overworld)
+// or dungeonHexContent() (dungeon), which read their own full live content (not just structures)
+// on their own. The admin map editor, which previews maps that may not be the currently-active
+// one, calls getHexElevation directly with its own fetched-and-filtered content instead of through
+// this function - see MapEditor.tsx.
 export function getTerrainHeight(
   x: number,
   z: number,
   _structures: StructureDef[] = STRUCTURES,
   _regionHalfExtent: number = MAP_HALF_EXTENT,
 ): number {
-  if (TERRAIN_FLAT) return 0;
+  if (TERRAIN_MODE === "flat") return 0;
+  if (TERRAIN_MODE === "dungeon") return getHexElevation(x, z, dungeonHexContent()) * HEX_ELEVATION_STEP_WORLD;
   return getHexElevation(x, z) * HEX_ELEVATION_STEP_WORLD;
 }
 
@@ -1460,6 +1739,7 @@ export interface ContentSnapshot {
   maps: GameMapDef[];
   dungeons: DungeonDef[];
   spawns: EnemySpawnDef[];
+  spawnZones: EnemySpawnZoneDef[];
   structures: StructureDef[];
   waypoints: WaypointDef[];
   furniture: FurnitureDef[];
@@ -1499,10 +1779,19 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   // it leaking into the live game (only one overworld map is ever active at a time).
   NPCS = Object.fromEntries(snapshot.npcs.filter((n) => n.mapId === ACTIVE_MAP?.id).map((n) => [n.id, n]));
   SPAWN_POINTS = snapshot.spawns.filter((s) => s.mapId === ACTIVE_MAP?.id);
+  SPAWN_ZONES = snapshot.spawnZones.filter((z) => z.mapId === ACTIVE_MAP?.id);
   STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_MAP?.id);
   WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_MAP?.id);
   FURNITURE = snapshot.furniture.filter((f) => f.mapId === ACTIVE_MAP?.id);
   HEX_TILE_OVERRIDES = snapshot.hexTiles.filter((h) => h.mapId === ACTIVE_MAP?.id);
+
+  // Same shape as the ACTIVE_MAP-scoped bindings just above, but scoped to the active dungeon's
+  // own map row instead - see DUNGEON_STRUCTURES's own doc comment.
+  DUNGEON_STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_DUNGEON?.mapId);
+  DUNGEON_NPCS = Object.fromEntries(snapshot.npcs.filter((n) => n.mapId === ACTIVE_DUNGEON?.mapId).map((n) => [n.id, n]));
+  DUNGEON_WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_DUNGEON?.mapId);
+  DUNGEON_SPAWN_POINTS = snapshot.spawns.filter((s) => s.mapId === ACTIVE_DUNGEON?.mapId);
+  DUNGEON_HEX_TILE_OVERRIDES = snapshot.hexTiles.filter((h) => h.mapId === ACTIVE_DUNGEON?.mapId);
 
   if (ACTIVE_MAP) {
     MAP_HALF_EXTENT = ACTIVE_MAP.halfExtent;

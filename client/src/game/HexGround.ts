@@ -8,6 +8,7 @@ import {
   GRASS_MODEL_PATH,
   GRASS_RAMP_MODEL_PATH,
   HexCellPlacement,
+  HexTerrainContent,
   HexTerrainKind,
   HEX_ELEVATION_STEP_WORLD,
   HEX_TILE_SCALE,
@@ -26,8 +27,8 @@ const COAST_TILE_KINDS: CoastTileKind[] = ["coastCornerLight", "coastNarrowEdge"
 // just visual) axial coordinate system, terrain classifier, road-piece connectivity logic, and
 // elevation-ramp connectivity logic - grass/water/road/elevation are a genuine gameplay layer
 // (water blocks movement, see CombatEngine's blockWaterTerrain), not just paint, and can be
-// hand-painted per cell via the admin map editor's tile palette (elevation is procedural-only for
-// now). Different kinds/pieces need different geometry/material, so each gets its own
+// hand-painted per cell (kind and/or elevation, independently) via the admin map editor's tile
+// palette. Different kinds/pieces need different geometry/material, so each gets its own
 // THREE.InstancedMesh.
 
 // The six 60-degree rotations a regular hexagon's outline is invariant under - applying one per
@@ -40,16 +41,31 @@ function deterministicRotation(x: number, z: number): number {
   return ROTATION_STEPS[Math.abs(Math.round(x * 3 + z * 7)) % ROTATION_STEPS.length];
 }
 
+// Elevation applies to any kind, not just grass (see HexTileOverrideDef's own doc comment) - a
+// hand-painted water/road/river/coast tile sits at its own height like a raised pond or an
+// elevated road, same as grass. Only the RAMP mesh (grassRamp below) is grass-specific, since
+// that's the only sloped piece the asset pack has - every other elevated kind just renders as a
+// flat instance translated up, with a plain (unramped) edge toward a lower neighbor.
+function elevationY(cell: HexCellPlacement): number {
+  return cell.elevation * HEX_ELEVATION_STEP_WORLD;
+}
+
 function buildKindMesh(
   geometry: THREE.BufferGeometry,
   material: THREE.Material,
   cells: HexCellPlacement[],
-  rotationOf: (cell: HexCellPlacement) => number,
-  yOf: (cell: HexCellPlacement) => number = () => 0,
+  // Index is passed alongside the cell (most callers ignore it) so a caller whose `cells` array
+  // can legitimately contain the SAME cell object more than once - the elevation ramp mesh below,
+  // one entry per qualifying low-facing side - can still tell those repeated entries apart. A
+  // plain cell->value Map would collapse them all into whichever one was inserted last.
+  rotationOf: (cell: HexCellPlacement, index: number) => number,
+  yOf: (cell: HexCellPlacement, index: number) => number = () => 0,
 ): THREE.InstancedMesh {
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(cells.length, 1));
   mesh.count = cells.length;
   mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+  mesh.receiveShadow = true;
+  mesh.castShadow = true; // elevation ramps/coast edges have real height variation that can shadow their lower neighbors
 
   const matrix = new THREE.Matrix4();
   const quaternion = new THREE.Quaternion();
@@ -58,8 +74,8 @@ function buildKindMesh(
   const position = new THREE.Vector3();
 
   cells.forEach((cell, i) => {
-    position.set(cell.x, yOf(cell), cell.z);
-    euler.set(0, rotationOf(cell), 0);
+    position.set(cell.x, yOf(cell, i), cell.z);
+    euler.set(0, rotationOf(cell, i), 0);
     quaternion.setFromEuler(euler);
     matrix.compose(position, quaternion, scale);
     mesh.setMatrixAt(i, matrix);
@@ -70,7 +86,12 @@ function buildKindMesh(
   return mesh;
 }
 
-export async function buildHexGround(halfExtent: number): Promise<THREE.Object3D> {
+// `content` omitted: the live overworld terrain (unchanged, existing behavior). `content`
+// provided: a freshly-computed terrain against that content instead - see getHexElevation's own
+// doc comment on the same content-optional pattern. Used to build a dungeon's own hex ground from
+// dungeonHexContent() (types.ts), which is never the same coordinate space as the live overworld
+// cache this function would otherwise touch.
+export async function buildHexGround(halfExtent: number, content?: HexTerrainContent): Promise<THREE.Object3D> {
   const [
     grass,
     grassRamp,
@@ -177,13 +198,16 @@ export async function buildHexGround(halfExtent: number): Promise<THREE.Object3D
     crossing: riverCrossing,
   };
 
-  const grid = computeHexTerrainGrid(halfExtent);
+  const grid = computeHexTerrainGrid(halfExtent, content);
 
+  // A cell can appear more than once in `ramps` (one entry per qualifying low-facing side - see
+  // classifyElevationRamps' own doc comment), so rotation is read back by INDEX into this same
+  // array below, not through a cell->rotation Map, which would collapse repeated entries for the
+  // same cell into whichever one happened to be inserted last.
   const ramps = classifyElevationRamps(grid);
   const rampCellKeys = new Set(ramps.map(({ cell }) => `${cell.q},${cell.r}`));
-  const rampRotationByCell = new Map(ramps.map(({ cell, rotationRadians }) => [cell, rotationRadians]));
 
-  const rivers = classifyRiverPieces(grid);
+  const rivers = classifyRiverPieces(grid, content);
   const riverByCell = new Map(rivers.map((r) => [r.cell, r]));
 
   const byKind: Record<HexTerrainKind, HexCellPlacement[]> = {
@@ -247,34 +271,44 @@ export async function buildHexGround(halfExtent: number): Promise<THREE.Object3D
       grass.material,
       byKind.grass,
       (cell) => deterministicRotation(cell.x, cell.z),
-      (cell) => cell.elevation * HEX_ELEVATION_STEP_WORLD,
+      elevationY,
     ),
   );
   group.add(
-    buildKindMesh(grassRamp.geometry, grassRamp.material, ramps.map(({ cell }) => cell), (cell) => rampRotationByCell.get(cell) ?? 0),
+    buildKindMesh(
+      grassRamp.geometry,
+      grassRamp.material,
+      ramps.map(({ cell }) => cell),
+      (_cell, i) => ramps[i].rotationRadians,
+      // The ramp mesh spans from the LOWER of the two levels it bridges up to the cell's own
+      // elevation (see getHexElevation's identical "elevation - 1" math) - not just cell.elevation
+      // like every other kind's flat instance, or a ramp between (say) level 2 and 3 would sit at
+      // the wrong height, floating at ground level instead of one level up.
+      (cell) => (cell.elevation - 1) * HEX_ELEVATION_STEP_WORLD,
+    ),
   );
   // Unlike grass's plain symmetric hexagon, hex_water's mesh has an off-center wave-crest detail
   // baked in - randomizing its rotation per tile (as grass does for variety) sends that crest
   // pointing a different direction on every tile, fracturing a lake into a field of stray dark
   // spikes instead of one continuous surface. A single fixed orientation for every water tile
   // keeps the crest direction consistent across a whole body of water instead.
-  group.add(buildKindMesh(water.geometry, water.material, byKind.water, () => 0));
+  group.add(buildKindMesh(water.geometry, water.material, byKind.water, () => 0, elevationY));
   for (const kind of Object.keys(roadCellsByPiece) as RoadPieceKind[]) {
     const placed = roadCellsByPiece[kind];
     const { geometry, material } = roadGeometry[kind];
     const rotationByCell = new Map(placed.map(({ cell, rotation }) => [cell, rotation]));
-    group.add(buildKindMesh(geometry, material, placed.map((p) => p.cell), (cell) => rotationByCell.get(cell) ?? 0));
+    group.add(buildKindMesh(geometry, material, placed.map((p) => p.cell), (cell) => rotationByCell.get(cell) ?? 0, elevationY));
   }
   // Coast tiles are hand-placed and hand-rotated (see HexTerrainKind's own doc comment) - each
   // cell already carries its own stored rotation directly, no piece-selection/connectivity step
   // needed at all.
   for (const kind of COAST_TILE_KINDS) {
-    group.add(buildKindMesh(coastGeometry[kind].geometry, coastGeometry[kind].material, byKind[kind], (cell) => cell.rotation));
+    group.add(buildKindMesh(coastGeometry[kind].geometry, coastGeometry[kind].material, byKind[kind], (cell) => cell.rotation, elevationY));
   }
   for (const kind of Object.keys(riverCellsByPiece) as RiverPieceKind[]) {
     const cells = riverCellsByPiece[kind];
     const { geometry, material } = riverGeometry[kind];
-    group.add(buildKindMesh(geometry, material, cells, (cell) => riverByCell.get(cell)?.rotationRadians ?? 0));
+    group.add(buildKindMesh(geometry, material, cells, (cell) => riverByCell.get(cell)?.rotationRadians ?? 0, elevationY));
   }
   return group;
 }

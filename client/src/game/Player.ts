@@ -1,12 +1,15 @@
 import * as THREE from "three";
 import { ChatBubble } from "./ChatBubble";
-import { HealthBar } from "./HealthBar";
+import { DEFAULT_Y_OFFSET, HealthBar } from "./HealthBar";
+import { LevelBadge } from "./LevelBadge";
+import { NameLabel } from "./NameLabel";
 import { fitHeight, hideMeshesByName, ModelAnimator, spawnModel, spawnRiggedModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
 
 const INTERPOLATION_LERP = 0.25;
 const SELECTION_RING_COLOR = 0x6ee7ff;
 const MOVING_THRESHOLD = 0.02; // group.position-to-target distance above which the walk clip plays
+const NAME_LABEL_GAP = 0.4; // clearance above the health bar so the two never overlap - matches Enemy.ts's own constant
 
 // One CC0 KayKit character (kaylousberg.com, "Adventurers Character Pack") per class. Warrior/
 // Rogue/Mage/Oracle use the older v1 export, which ships its own baked Idle/Walking_A per file -
@@ -65,13 +68,17 @@ const MODEL_HEIGHT = 1.7;
 export class PlayerAvatar {
   readonly group = new THREE.Group();
   readonly healthBar = new HealthBar();
+  readonly levelBadge = new LevelBadge(DEFAULT_Y_OFFSET);
+  readonly nameLabel: NameLabel;
   readonly chatBubble = new ChatBubble();
   private readonly selectionRing: THREE.Mesh;
   private animator?: ModelAnimator;
   private targetPosition = new THREE.Vector3();
   private targetRotationY = 0;
+  private currentRotationY = 0;
 
-  constructor(classId: string) {
+  constructor(classId: string, name: string) {
+    this.nameLabel = new NameLabel(name, DEFAULT_Y_OFFSET + NAME_LABEL_GAP);
     // The model loads async (see models.ts) - the group starts with just the selection ring
     // until it resolves, the same "empty until first real content arrives" pattern every other
     // avatar in this game already tolerates before its first setTarget/setPosition call.
@@ -111,9 +118,23 @@ export class PlayerAvatar {
     this.healthBar.setFraction(maxHp > 0 ? hp / maxHp : 0);
   }
 
+  setLevel(level: number) {
+    this.levelBadge.setLevel(level);
+  }
+
+  // guildName is "" for a guildless player - rendered as no subtitle line at all (see
+  // NameLabel.setText), not an empty bracket. Called every time this player's schema changes
+  // (see main.ts), same "diff internally, redraw only when it actually changed" contract as
+  // setLevel/LevelBadge, so a name that never changes and a guild that rarely does stay cheap.
+  setName(name: string, guildName: string) {
+    this.nameLabel.setText(name, guildName ? `<${guildName}>` : undefined);
+  }
+
   addTo(scene: THREE.Scene) {
     scene.add(this.group);
     scene.add(this.healthBar.group);
+    scene.add(this.levelBadge.group);
+    scene.add(this.nameLabel.group);
     scene.add(this.chatBubble.group);
     this.syncOverheadPositions();
   }
@@ -121,15 +142,31 @@ export class PlayerAvatar {
   removeFrom(scene: THREE.Scene) {
     scene.remove(this.group);
     scene.remove(this.healthBar.group);
+    scene.remove(this.levelBadge.group);
+    scene.remove(this.nameLabel.group);
     scene.remove(this.chatBubble.group);
+  }
+
+  // Turns smoothly toward targetRotationY instead of snapping straight to it - shared by
+  // snapToTarget/update below. atan2(sin,cos) of the raw delta always turns the short way around,
+  // never the long way past the back (a plain lerp between two raw angles can spin almost a full
+  // turn the wrong way right when crossing the +-pi wrap boundary) - mirrors Enemy.ts/Npc.ts's own
+  // rotation smoothing exactly, for the same reason.
+  private lerpRotationTowardTarget(lerpFactor: number) {
+    const delta = Math.atan2(Math.sin(this.targetRotationY - this.currentRotationY), Math.cos(this.targetRotationY - this.currentRotationY));
+    this.currentRotationY += delta * lerpFactor;
+    this.group.rotation.y = this.currentRotationY;
   }
 
   // Used by the local player, which snaps straight to its client-predicted position every frame
   // instead of lerping (see main.ts) - so "moving" can't be derived from position delta like
   // update() does for remote avatars, and is passed in from the actual input state instead.
+  // Rotation still turns smoothly rather than snapping (position prediction needs to be instant to
+  // avoid input lag; the visual heading doesn't, and snapping it produced a jarring instant pop
+  // every time the movement direction changed instead of a natural turn).
   snapToTarget(dt: number, moving: boolean) {
     this.group.position.copy(this.targetPosition);
-    this.group.rotation.y = this.targetRotationY;
+    this.lerpRotationTowardTarget(INTERPOLATION_LERP);
     this.syncOverheadPositions();
     this.animator?.setMoving(moving);
     this.animator?.update(dt);
@@ -138,7 +175,7 @@ export class PlayerAvatar {
   update(dt: number) {
     const distance = this.group.position.distanceTo(this.targetPosition);
     this.group.position.lerp(this.targetPosition, INTERPOLATION_LERP);
-    this.group.rotation.y = THREE.MathUtils.lerp(this.group.rotation.y, this.targetRotationY, INTERPOLATION_LERP);
+    this.lerpRotationTowardTarget(INTERPOLATION_LERP);
     this.syncOverheadPositions();
     this.animator?.setMoving(distance > MOVING_THRESHOLD);
     this.animator?.update(dt);
@@ -146,6 +183,8 @@ export class PlayerAvatar {
 
   private syncOverheadPositions() {
     this.healthBar.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
+    this.levelBadge.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
+    this.nameLabel.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
     this.chatBubble.setPosition(this.group.position.x, this.group.position.y, this.group.position.z);
   }
 }

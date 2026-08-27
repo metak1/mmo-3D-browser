@@ -3,6 +3,50 @@ import { BASE_STATS, DEFAULT_CLASS_ID, VITALITY_TO_HP } from "@mmo/shared";
 
 const BASE_MAX_HP = BASE_STATS.vitality * VITALITY_TO_HP;
 
+// Unlike party (derived on demand from state.players, wiped on disconnect - see Player.partyId's
+// own doc comment), friends/guild membership are real DB-persisted player data that must stay
+// meaningful even when everyone relevant is offline - so these live as actual synced fields,
+// hydrated from the DB at onJoin (see WorldRoom.onJoin), the same way inventory/questProgress
+// already are, rather than computed from currently-connected sessions.
+export class FriendEntry extends Schema {
+  @type("number") characterId = 0;
+  @type("string") name = "";
+  @type("number") level = 1;
+  @type("string") classId = "";
+  @type("boolean") online = false;
+}
+
+// Pending requests/invites are lists, not a single "pendingXFrom" string field like party/trade
+// use - unlike those (which only ever need to track one live in-room inviter at a time), these can
+// legitimately queue: multiple people can friend-request you while you're offline, multiple
+// guilds can invite the same guildless character.
+export class FriendRequestEntry extends Schema {
+  @type("number") requestId = 0;
+  @type("number") fromCharacterId = 0;
+  @type("string") fromName = "";
+}
+
+export class GuildInviteEntry extends Schema {
+  @type("number") inviteId = 0;
+  @type("number") guildId = 0;
+  @type("string") guildName = "";
+  @type("string") invitedByName = "";
+}
+
+// One stack of damage-over-time, from the composable EffectAction "dot" kind (see shared's
+// EffectDef) - the first ticked/periodic effect in the codebase; everything else (AilmentKind/
+// BuffKind) is a lazy multiplier read once at damage-calculation time, never applied on its own
+// schedule. Lives on both Player and Enemy (unlike ailments/buffs, which are Player-only) since a
+// player-cast DOT spell needs somewhere to write on an enemy target. See
+// CombatEngine.addDot/tickDots for how these are written/swept.
+export class DotStack extends Schema {
+  @type("string") sourceId = ""; // sessionId or enemyId that applied it - kill credit/threat on each tick
+  @type("number") damagePerTick = 0;
+  @type("number") tickIntervalMs = 0;
+  @type("number") nextTickAt = 0; // epoch ms
+  @type("number") expiresAt = 0; // epoch ms
+}
+
 export class Player extends Schema {
   @type("number") x = 0;
   @type("number") y = 0;
@@ -23,7 +67,16 @@ export class Player extends Schema {
   @type("number") gold = 0;
 
   @type("string") equippedWeapon = "";
+  @type("string") equippedOffHand = "";
+  @type("string") equippedHead = "";
+  @type("string") equippedNeck = "";
+  @type("string") equippedShoulders = "";
   @type("string") equippedArmor = "";
+  @type("string") equippedHands = "";
+  @type("string") equippedWaist = "";
+  @type("string") equippedLegs = "";
+  @type("string") equippedFeet = "";
+  @type("string") equippedRing = "";
   @type("string") equippedTrinket = "";
   @type(["string"]) inventory = new ArraySchema<string>();
 
@@ -32,6 +85,7 @@ export class Player extends Schema {
 
   @type({ map: "number" }) ailments = new MapSchema<number>(); // ailment kind -> expiresAt (epoch ms)
   @type({ map: "number" }) buffs = new MapSchema<number>(); // buff kind -> expiresAt (epoch ms) - mirrors ailments, but caster-beneficial (see BuffKind)
+  @type([DotStack]) dots = new ArraySchema<DotStack>(); // see DotStack's own doc comment; capped at MAX_DOT_STACKS (CombatEngine.addDot)
 
   @type({ map: "number" }) questProgress = new MapSchema<number>(); // questId -> kill count
   @type({ map: "number" }) questCompleted = new MapSchema<number>(); // questId -> completedAt (epoch ms)
@@ -41,6 +95,14 @@ export class Player extends Schema {
   @type("string") partyId = "";
   @type("string") pendingPartyInviteFrom = ""; // sessionId of pending inviter, or ""
   @type("string") pendingTradeRequestFrom = ""; // sessionId of pending trade requester, or ""
+
+  @type({ map: FriendEntry }) friends = new MapSchema<FriendEntry>(); // keyed by characterId (as string)
+  @type([FriendRequestEntry]) pendingFriendRequests = new ArraySchema<FriendRequestEntry>();
+
+  @type("number") guildId = 0; // 0 = no guild
+  @type("string") guildName = "";
+  @type("string") guildRole = ""; // "leader" | "member" | "" when guildId is 0
+  @type([GuildInviteEntry]) pendingGuildInvites = new ArraySchema<GuildInviteEntry>();
 }
 
 export class Enemy extends Schema {
@@ -50,12 +112,15 @@ export class Enemy extends Schema {
   @type("number") z = 0;
   @type("number") homeX = 0; // spawn position - the center an idle enemy wanders around and leashes back to
   @type("number") homeZ = 0;
+  @type("number") wanderRadius = 0; // 0 = use the room's global ENEMY_WANDER_RADIUS; set from EnemySpawnZoneDef.wanderRadius for zone-spawned enemies
+  @type("number") leashRange = 0; // 0 = use the room's global ENEMY_LEASH_RANGE; set from EnemySpawnZoneDef.leashRange for zone-spawned enemies
   @type("number") hp = 0;
   @type("number") maxHp = 0;
   @type("boolean") isCasting = false;
   @type("number") enragesAt = 0; // epoch ms; 0 = boss not yet engaged, set on first damage taken
   @type("string") aggroTargetId = ""; // sessionId of whoever this enemy is currently attacking, "" if not engaged yet
   @type("string") castAbilityName = ""; // display name while isCasting, only set for a named special-spell windup (see BossAbilityDef); "" for melee/the unnamed phase-2 attack
+  @type([DotStack]) dots = new ArraySchema<DotStack>(); // see DotStack's own doc comment - a player-cast DOT spell writes here
 }
 
 export class Projectile extends Schema {

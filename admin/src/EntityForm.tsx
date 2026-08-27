@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
+import { EffectDef } from "@mmo/shared";
 import { EntitySchema, FieldSchema } from "./entities";
 import { listEntities } from "./api";
+import { EffectListEditor } from "./EffectListEditor";
 
 type RowData = Record<string, unknown>;
 
@@ -198,6 +200,13 @@ function renderField(
           className="json-field"
           defaultValue={value !== undefined ? JSON.stringify(value, null, 2) : ""}
           onChange={(e) => handleJsonChange(field.key, e.target.value)}
+        />
+      );
+    case "effectList":
+      return (
+        <EffectListEditor
+          value={Array.isArray(value) ? (value as EffectDef[]) : []}
+          onChange={(next) => setValue(next.length > 0 ? next : undefined)}
         />
       );
   }

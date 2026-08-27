@@ -5,7 +5,7 @@ const structureSchema = z.object({
   id: z.string().min(1).max(32),
   name: z.string().min(1).max(64),
   map_id: z.string().min(1).max(32),
-  kind: z.enum(["wall", "door", "tower", "gate", "building"]),
+  kind: z.enum(["wall", "door", "tower", "gate", "building", "lamp"]),
   x: z.number(),
   z: z.number(),
   rotation_y: z.number().default(0),
@@ -14,10 +14,15 @@ const structureSchema = z.object({
   height: z.number().positive(),
   color: z.string().min(1).max(16),
   y_offset: z.number().default(0),
-  // "building" kind only - see shared's StructureKind and client/src/game/Structure.ts's
-  // BUILDING_MODELS. width/depth/height above are unused for this kind (still required, so a
-  // building row just gets nominal placeholder values) since the model has its own fixed shape.
+  // "building"/"lamp" kind only - see shared's StructureKind and client/src/game/Structure.ts's
+  // BUILDING_MODELS/buildLamp. width/depth/height above are unused for "building" (still
+  // required, so a building row just gets nominal placeholder values) since the model has its
+  // own fixed shape.
   model_id: z.string().max(64).nullable().optional(),
+  // "lamp" kind only - scales the light/glow strength; null/unset means "use the client's own
+  // built-in default" (see LAMP_MAX_LIGHT_INTENSITY), same nullable-means-default convention
+  // model_id already uses.
+  light_intensity: z.number().min(0).max(10).nullable().optional(),
 });
 const updateSchema = structureSchema.omit({ id: true }).partial();
 

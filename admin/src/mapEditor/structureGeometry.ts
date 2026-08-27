@@ -11,6 +11,20 @@ import { fitHeight, loadStaticModel } from "./modelLoader";
 // correctness (those stay single-sourced in @mmo/shared).
 const ROOF_COLOR = 0x4a3626;
 const FLOOR_COLOR = 0x6b4a30;
+const LAMP_FRAME_COLOR = 0x2a2a2a;
+const LAMP_GEM_COLOR = 0xb356e0;
+const LAMP_GEM_EMISSIVE_INTENSITY = 0.7;
+// The editor has no day/night cycle to fade this against (see client's StructureAvatar.update) -
+// shown at a fixed, always-on glow instead, purely so a lamp reads as "a lamp" while placing it.
+// Both are still scaled by the admin's own def.lightIntensity (see lampIntensityScale) so the
+// preview actually shows what adjusting that field does, not just a constant regardless of it.
+const LAMP_EDITOR_EMISSIVE_INTENSITY = 0.9;
+const LAMP_EDITOR_HALO_OPACITY = 0.3;
+
+// Mirrors client/src/game/Structure.ts's own lampIntensityScale exactly - see its comment for why.
+function lampIntensityScale(def: StructureDef): number {
+  return Math.max(0, Math.min(3, def.lightIntensity ?? 1));
+}
 
 function towerCap(width: number, depth: number, height: number): THREE.Mesh {
   // flatShading matters here even more than on the client: this is a bare, untextured cone, and
@@ -88,6 +102,178 @@ function buildGate(def: StructureDef): THREE.Object3D {
   lintel.position.y = def.height + lintelHeight / 2;
   group.add(lintel);
   return group;
+}
+
+// Mirrors client/src/game/Structure.ts's buildLampPost exactly (same base/post/arm/lantern
+// proportions) minus its wood/stone texture maps - the editor's other structures (wall/door/
+// tower/gate above) are flat def.color boxes with no texture support at all, so this stays
+// consistent with that rather than introducing texture loading just for one kind. See the
+// client's own comment for why def.color tints only the lantern's glow (not the post/arm), why
+// the gems stay a fixed color, and why the roof cap stays narrower than the lantern body.
+function buildLampPost(def: StructureDef): THREE.Object3D {
+  const group = new THREE.Group();
+  const baseRadius = Math.max(def.width, def.depth);
+  const intensityScale = lampIntensityScale(def);
+
+  const stoneMaterial = new THREE.MeshStandardMaterial({ color: 0x8a8a8a });
+  const woodMaterial = new THREE.MeshStandardMaterial({ color: 0x6b4a30 });
+  const frameMaterial = new THREE.MeshStandardMaterial({ color: LAMP_FRAME_COLOR, metalness: 0.6, roughness: 0.35 });
+  const gemMaterial = new THREE.MeshStandardMaterial({ color: 0x0d0e12, emissive: LAMP_GEM_COLOR, emissiveIntensity: LAMP_GEM_EMISSIVE_INTENSITY });
+
+  let y = 0;
+  const tier1Height = def.height * 0.07;
+  const tier1 = new THREE.Mesh(new THREE.BoxGeometry(baseRadius * 1.7, tier1Height, baseRadius * 1.7), stoneMaterial);
+  tier1.position.y = y + tier1Height / 2;
+  group.add(tier1);
+  y += tier1Height;
+
+  const tier2Height = def.height * 0.07;
+  const tier2 = new THREE.Mesh(new THREE.BoxGeometry(baseRadius * 1.15, tier2Height, baseRadius * 1.15), stoneMaterial);
+  tier2.position.y = y + tier2Height / 2;
+  group.add(tier2);
+  y += tier2Height;
+
+  const postWidth = baseRadius * 0.55;
+  const postHeight = def.height * 0.6;
+  const post = new THREE.Mesh(new THREE.BoxGeometry(postWidth, postHeight, postWidth), woodMaterial);
+  post.position.y = y + postHeight / 2;
+  group.add(post);
+  y += postHeight;
+
+  const armLength = baseRadius * 3.2;
+  const armHeight = postWidth * 0.55;
+  const armDepth = postWidth * 0.85;
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(armLength, armHeight, armDepth), woodMaterial);
+  arm.position.set(armLength / 2, y - armHeight / 2, 0);
+  group.add(arm);
+
+  const gemSize = postWidth * 0.7;
+  const junctionGem = new THREE.Mesh(new THREE.BoxGeometry(gemSize, gemSize, gemSize * 0.4), gemMaterial);
+  junctionGem.position.set(0, y - armHeight / 2, postWidth / 2 + gemSize * 0.18);
+  group.add(junctionGem);
+  const tipGem = new THREE.Mesh(new THREE.BoxGeometry(gemSize, gemSize, gemSize * 0.4), gemMaterial);
+  tipGem.position.set(armLength - gemSize * 0.7, y - armHeight / 2, armDepth / 2 + gemSize * 0.18);
+  group.add(tipGem);
+
+  const hangX = armLength - baseRadius * 0.4;
+  y -= armHeight;
+
+  const chainHeight = def.height * 0.14;
+  const chain = new THREE.Mesh(new THREE.CylinderGeometry(baseRadius * 0.05, baseRadius * 0.05, chainHeight, 6), frameMaterial);
+  y -= chainHeight / 2;
+  chain.position.set(hangX, y, 0);
+  group.add(chain);
+  y -= chainHeight / 2;
+
+  const glassRadius = baseRadius * 0.5;
+  const capRadius = glassRadius * 0.5;
+  const capHeight = glassRadius * 0.8;
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(capRadius, capHeight, 6), frameMaterial);
+  y -= capHeight / 2;
+  cap.position.set(hangX, y, 0);
+  group.add(cap);
+  y -= capHeight / 2;
+
+  const glowColor = new THREE.Color(def.color);
+  const glassMaterial = new THREE.MeshStandardMaterial({
+    color: glowColor,
+    emissive: glowColor,
+    emissiveIntensity: LAMP_EDITOR_EMISSIVE_INTENSITY * intensityScale,
+  });
+  y -= glassRadius;
+  const glassY = y;
+  const glass = new THREE.Mesh(new THREE.CylinderGeometry(glassRadius, glassRadius * 0.75, glassRadius * 1.8, 6), glassMaterial);
+  glass.position.set(hangX, glassY, 0);
+  group.add(glass);
+
+  const haloMaterial = new THREE.MeshBasicMaterial({
+    color: glowColor,
+    transparent: true,
+    opacity: LAMP_EDITOR_HALO_OPACITY * intensityScale,
+    depthWrite: false,
+  });
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(glassRadius * 1.7, 16, 16), haloMaterial);
+  halo.position.set(hangX, glassY, 0);
+  group.add(halo);
+
+  const rimHeight = glassRadius * 0.18;
+  const rim = new THREE.Mesh(new THREE.CylinderGeometry(glassRadius * 0.75, glassRadius * 0.6, rimHeight, 6), frameMaterial);
+  y -= glassRadius * 0.9 + rimHeight / 2;
+  rim.position.set(hangX, y, 0);
+  group.add(rim);
+
+  return group;
+}
+
+// Mirrors client/src/game/Structure.ts's buildLampCeiling exactly - a hook/chain/lantern with no
+// base/post, meant to be lifted off the ground via yOffset. See its own comment for why.
+function buildLampCeiling(def: StructureDef): THREE.Object3D {
+  const group = new THREE.Group();
+  const frameMaterial = new THREE.MeshStandardMaterial({ color: LAMP_FRAME_COLOR, metalness: 0.6, roughness: 0.35 });
+  const baseRadius = Math.max(def.width, def.depth);
+  const glassRadius = baseRadius * 0.45;
+  const intensityScale = lampIntensityScale(def);
+
+  const hookRadius = baseRadius * 0.35;
+  const hookTube = baseRadius * 0.09;
+  const hook = new THREE.Mesh(new THREE.TorusGeometry(hookRadius, hookTube, 8, 12), frameMaterial);
+  hook.rotation.x = Math.PI / 2;
+  let y = def.height - hookRadius - hookTube;
+  hook.position.y = y;
+  group.add(hook);
+
+  const chainHeight = def.height * 0.14;
+  y -= hookRadius + hookTube;
+  const chain = new THREE.Mesh(new THREE.CylinderGeometry(baseRadius * 0.05, baseRadius * 0.05, chainHeight, 6), frameMaterial);
+  y -= chainHeight / 2;
+  chain.position.y = y;
+  group.add(chain);
+  y -= chainHeight / 2;
+
+  const capRadius = glassRadius * 0.5;
+  const capHeight = glassRadius * 0.8;
+  const cap = new THREE.Mesh(new THREE.ConeGeometry(capRadius, capHeight, 6), frameMaterial);
+  y -= capHeight / 2;
+  cap.position.y = y;
+  group.add(cap);
+  y -= capHeight / 2;
+
+  const glowColor = new THREE.Color(def.color);
+  const glassMaterial = new THREE.MeshStandardMaterial({
+    color: glowColor,
+    emissive: glowColor,
+    emissiveIntensity: LAMP_EDITOR_EMISSIVE_INTENSITY * intensityScale,
+  });
+  y -= glassRadius;
+  const glassY = y;
+  const glass = new THREE.Mesh(new THREE.SphereGeometry(glassRadius, 16, 16), glassMaterial);
+  glass.position.y = glassY;
+  group.add(glass);
+
+  const haloMaterial = new THREE.MeshBasicMaterial({
+    color: glowColor,
+    transparent: true,
+    opacity: LAMP_EDITOR_HALO_OPACITY * intensityScale,
+    depthWrite: false,
+  });
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(glassRadius * 1.8, 16, 16), haloMaterial);
+  halo.position.y = glassY;
+  group.add(halo);
+
+  y -= glassRadius;
+  const tipHeight = glassRadius * 0.6;
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(capRadius * 0.6, tipHeight, 6), frameMaterial);
+  tip.rotation.x = Math.PI;
+  y -= tipHeight / 2;
+  tip.position.y = y;
+  group.add(tip);
+
+  return group;
+}
+
+// "lamp" covers two visual variants selected by def.modelId - see client's own comment on why.
+function buildLamp(def: StructureDef): THREE.Object3D {
+  return def.modelId === "lampCeiling" ? buildLampCeiling(def) : buildLampPost(def);
 }
 
 // Mirrors client/src/game/Structure.ts's BUILDING_MODELS exactly (same paths + target heights) -
@@ -312,6 +498,8 @@ export function buildStructureShape(def: StructureDef): THREE.Object3D {
       return buildTower(def);
     case "gate":
       return buildGate(def);
+    case "lamp":
+      return buildLamp(def);
     default:
       return new THREE.Group(); // "building" kind, or an unrecognized kind (e.g. stale data)
   }

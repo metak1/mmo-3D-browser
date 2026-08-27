@@ -111,6 +111,12 @@
         border-color: #c9a63c;
         background: rgba(40, 36, 20, 0.85);
       }
+      .overlay-button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        border-color: #4a5578;
+        background: rgba(20, 22, 32, 0.85);
+      }
       .overlay-link {
         background: none;
         border: none;
@@ -166,9 +172,11 @@
         top: 12px;
         right: 12px;
         width: 240px;
-        height: 240px;
         cursor: grab;
         user-select: none;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
       }
       #minimap-panel.locked {
         cursor: default;
@@ -179,11 +187,25 @@
       }
       #minimap {
         width: 100%;
-        height: 100%;
+        height: 240px;
         border-radius: 50%;
         border: 2px solid #4a5578;
         background: rgba(20, 22, 32, 0.85);
         display: block;
+      }
+      #minimap-clock {
+        margin-top: 6px;
+        padding: 3px 12px;
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid #4a5578;
+        color: #e6e6e6;
+        font: 600 12px -apple-system, system-ui, sans-serif;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+      }
+      #minimap-clock[hidden] {
+        display: none;
       }
       #big-map-panel {
         position: fixed;
@@ -227,6 +249,7 @@
         width: 100%;
         min-height: 0;
         background: rgba(20, 22, 32, 0.85);
+        cursor: grab;
       }
       .big-map-resize-handle {
         position: absolute;
@@ -317,6 +340,18 @@
         margin-bottom: 4px;
         text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
       }
+      .panel-divider {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(74, 85, 120, 0.6);
+      }
+      .bar.thin {
+        height: 5px;
+        margin-top: 5px;
+      }
+      .bar.thin .bar-label {
+        display: none;
+      }
       .bar {
         position: relative;
         height: 14px;
@@ -348,7 +383,7 @@
         display: none;
       }
       #inventory-panel {
-        top: 420px;
+        top: 560px;
       }
       #inventory-panel[hidden] {
         display: none;
@@ -376,9 +411,14 @@
         border-color: #c9a63c;
         background: rgba(40, 36, 20, 0.5);
       }
-      .item-row .item-slot-tag {
+      .item-row .item-slot-tag,
+      .social-row-top .item-slot-tag {
         color: #a7b0c8;
         font-size: 10px;
+      }
+      .social-row-top .item-slot-tag {
+        white-space: nowrap;
+        flex-shrink: 0;
       }
       .item-slot {
         position: relative;
@@ -405,8 +445,9 @@
         background: rgba(40, 36, 20, 0.5);
       }
       .equip-slots {
-        display: flex;
-        gap: 10px;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px 6px;
         margin-top: 6px;
       }
       .equip-slot-wrap {
@@ -414,7 +455,6 @@
         flex-direction: column;
         align-items: center;
         gap: 3px;
-        width: 44px;
       }
       .equip-slot-wrap .item-slot {
         width: 44px;
@@ -518,10 +558,25 @@
         left: auto;
         right: 12px;
         top: 48px;
-        width: 220px;
+        width: 420px;
       }
       #waypoint-panel[hidden] {
         display: none;
+      }
+      #waypoint-map {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 1 / 1;
+        display: block;
+        border-radius: 6px;
+        border: 1px solid #4a5578;
+        cursor: pointer;
+      }
+      .waypoint-map-hint {
+        margin: 6px 0 0;
+        font-size: 11px;
+        color: #9099ab;
+        text-align: center;
       }
       #talent-panel {
         left: auto;
@@ -717,7 +772,7 @@
         display: none;
       }
       #party-panel {
-        top: 660px;
+        top: 800px;
       }
       #party-panel[hidden] {
         display: none;
@@ -795,6 +850,194 @@
       }
       #party-invite-prompt[hidden] {
         display: none;
+      }
+      #friends-panel {
+        left: auto;
+        right: 12px;
+        top: 700px;
+      }
+      #friends-panel[hidden] {
+        display: none;
+      }
+      #guild-panel {
+        left: auto;
+        right: 540px;
+        top: 300px;
+        width: 260px;
+      }
+      #guild-panel[hidden] {
+        display: none;
+      }
+      .name-input {
+        width: 100%;
+        padding: 4px 6px;
+        border: 2px solid #4a5578;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.3);
+        color: #e6e6e6;
+        font: 11px/1.3 -apple-system, system-ui, sans-serif;
+      }
+      .name-input:focus {
+        outline: none;
+        border-color: #c9a63c;
+      }
+      .social-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px 8px;
+        border: 1px solid #4a5578;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.3);
+        font-size: 11px;
+        transition: border-color 0.12s, background 0.12s;
+      }
+      .social-row:hover {
+        border-color: #c9a63c;
+        background: rgba(40, 36, 20, 0.35);
+      }
+      .social-row.leader-row {
+        border-color: rgba(201, 166, 60, 0.55);
+        background: rgba(46, 38, 16, 0.35);
+      }
+      .social-row-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 6px;
+      }
+      .social-row-name {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+      }
+      .social-row-name-text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .social-row-badges {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      .social-row-actions {
+        display: flex;
+        gap: 4px;
+      }
+      .social-row-actions .overlay-button {
+        flex: 1;
+        padding: 3px 6px;
+        font-size: 10px;
+      }
+      .status-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .status-dot.online {
+        background: #4fd166;
+        box-shadow: 0 0 4px rgba(79, 209, 102, 0.85);
+      }
+      .status-dot.offline {
+        background: #5a6178;
+      }
+      .role-badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 9px;
+        font-size: 9px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        flex-shrink: 0;
+      }
+      .role-badge.leader {
+        background: rgba(201, 166, 60, 0.2);
+        color: #fff6d5;
+        border: 1px solid #c9a63c;
+      }
+      .role-badge.member {
+        background: rgba(74, 85, 120, 0.3);
+        color: #a7b0c8;
+        border: 1px solid #4a5578;
+      }
+      .role-badge.complete {
+        background: rgba(79, 209, 102, 0.18);
+        color: #b7f0c2;
+        border: 1px solid #4fd166;
+      }
+      .overlay-button.accent {
+        border-color: #c9a63c;
+        background: rgba(201, 166, 60, 0.16);
+        color: #fff6d5;
+      }
+      .overlay-button.accent:hover {
+        background: rgba(201, 166, 60, 0.3);
+      }
+      .overlay-button.danger {
+        border-color: #7a3630;
+        color: #ffb4ac;
+      }
+      .overlay-button.danger:hover {
+        border-color: #e0503c;
+        background: rgba(224, 80, 60, 0.18);
+      }
+      .guild-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(74, 85, 120, 0.6);
+      }
+      .guild-emblem {
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, rgba(201, 166, 60, 0.22), rgba(20, 22, 32, 0.6));
+        border: 2px solid #c9a63c;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        flex-shrink: 0;
+      }
+      .guild-header-info {
+        min-width: 0;
+      }
+      .guild-title {
+        font-weight: 700;
+        font-size: 14px;
+        color: #fff6d5;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .panel-meta {
+        font-size: 10px;
+        color: #a7b0c8;
+        margin-top: 2px;
+      }
+      .guild-empty-state {
+        text-align: center;
+        padding: 12px 6px 16px;
+        color: #a7b0c8;
+        font-size: 11px;
+      }
+      .guild-empty-icon {
+        display: block;
+        font-size: 22px;
+        margin-bottom: 6px;
+        opacity: 0.75;
       }
       #trade-invite-prompt {
         left: auto;
@@ -878,6 +1121,27 @@
         bottom: 20px;
         left: 50%;
         transform: translateX(-50%);
+      }
+      #action-feedback {
+        /* left/top are driven every frame in main.ts (see syncActionFeedbackPosition) to track the
+           local player's projected screen position, 100px above them - translate(-50%, -100%)
+           anchors the text block's bottom-center at that (left, top) point, so it grows upward
+           and stays centered over the player regardless of how many characters the message is. */
+        position: fixed;
+        left: 0;
+        top: 0;
+        transform: translate(-50%, -100%);
+        z-index: 30;
+        color: #ff5a5a;
+        font: 700 15px -apple-system, system-ui, sans-serif;
+        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+        white-space: nowrap;
+      }
+      #action-feedback.visible {
+        opacity: 1;
       }
       #hotbar {
         display: flex;
@@ -972,6 +1236,15 @@
       .buff-tag[hidden] {
         display: none;
       }
+      .dot-tag {
+        margin-top: 4px;
+        font-size: 10px;
+        color: #e08a3c;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      }
+      .dot-tag[hidden] {
+        display: none;
+      }
       #app.ground-target-pending canvas {
         cursor: crosshair;
       }
@@ -1017,6 +1290,9 @@
       }
       .chat-message.party .chat-sender {
         color: #c9a63c;
+      }
+      .chat-message.guild .chat-sender {
+        color: #4fd166;
       }
       #chat-input {
         width: 100%;
@@ -1079,14 +1355,19 @@
     </div>
 
     <div id="hud">Connecting…</div>
+    <div id="action-feedback"></div>
     <div id="minimap-panel">
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <canvas id="minimap" width="300" height="300"></canvas>
+      <div id="minimap-clock" hidden></div>
     </div>
 
     <div id="big-map-panel" hidden>
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
-      <div class="big-map-title">Map <span class="big-map-hint">(press M to close · drag title to move · drag corner to resize)</span></div>
+      <div class="big-map-title">
+        Map
+        <span class="big-map-hint">(press M to close · drag title to move · drag corner to resize · scroll map to zoom · drag map to pan)</span>
+      </div>
       <canvas id="big-map" width="900" height="600" data-no-drag></canvas>
       <div id="big-map-resize-handle" class="big-map-resize-handle" data-no-drag></div>
     </div>
@@ -1100,6 +1381,7 @@
       </div>
       <div class="ailment-tag" data-player-ailments hidden></div>
       <div class="buff-tag" data-player-buffs hidden></div>
+      <div class="dot-tag" data-player-dots hidden></div>
       <div class="bar cast-bar" data-player-cast-bar hidden>
         <div class="bar-fill" data-player-cast-fill></div>
         <span class="bar-label" data-player-cast-label></span>
@@ -1111,20 +1393,56 @@
       <div class="unit-name">Character</div>
       <div class="stat-row"><span class="stat-label">Class</span><span data-character-class></span></div>
       <div class="stat-grid">
-        <div class="stat-row"><span class="stat-label" data-stat-main-label>Main Stat</span><span data-stat-main></span></div>
-        <div class="stat-row"><span class="stat-label">Vitality</span><span data-stat-vitality></span></div>
-        <div class="stat-row"><span class="stat-label">Luck</span><span data-stat-luck></span></div>
-        <div class="stat-row"><span class="stat-label">Armor</span><span data-stat-armor></span></div>
+        <div class="stat-row"><span class="stat-label" data-stat-main-label>⚡ Main Stat</span><span data-stat-main></span></div>
+        <div class="stat-row"><span class="stat-label">❤️ Vitality</span><span data-stat-vitality></span></div>
+        <div class="stat-row"><span class="stat-label">🍀 Luck</span><span data-stat-luck></span></div>
+        <div class="stat-row"><span class="stat-label">🛡️ Armor</span><span data-stat-armor></span></div>
       </div>
-      <div class="unit-name" style="margin-top: 8px">Equipment</div>
+      <div class="unit-name panel-divider">Equipment</div>
       <div class="equip-slots">
         <div class="equip-slot-wrap">
-          <button class="item-slot empty" data-equip-row="weapon"></button>
-          <span class="slot-caption">Weapon</span>
+          <button class="item-slot empty" data-equip-row="head"></button>
+          <span class="slot-caption">Head</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="neck"></button>
+          <span class="slot-caption">Neck</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="shoulders"></button>
+          <span class="slot-caption">Shoulders</span>
         </div>
         <div class="equip-slot-wrap">
           <button class="item-slot empty" data-equip-row="armor"></button>
-          <span class="slot-caption">Armor</span>
+          <span class="slot-caption">Chest</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="hands"></button>
+          <span class="slot-caption">Hands</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="waist"></button>
+          <span class="slot-caption">Waist</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="legs"></button>
+          <span class="slot-caption">Legs</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="feet"></button>
+          <span class="slot-caption">Feet</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="weapon"></button>
+          <span class="slot-caption">Main Hand</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="offHand"></button>
+          <span class="slot-caption">Off Hand</span>
+        </div>
+        <div class="equip-slot-wrap">
+          <button class="item-slot empty" data-equip-row="ring"></button>
+          <span class="slot-caption">Ring</span>
         </div>
         <div class="equip-slot-wrap">
           <button class="item-slot empty" data-equip-row="trinket"></button>
@@ -1135,7 +1453,7 @@
 
     <div id="inventory-panel" class="unit-panel" hidden>
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
-      <div class="unit-name">Inventory</div>
+      <div class="unit-name">Inventory <span class="panel-meta" data-inventory-count style="display: inline"></span></div>
       <div class="gold-tag" data-player-gold></div>
       <div class="item-grid" id="inventory-list"></div>
     </div>
@@ -1194,15 +1512,16 @@
       <div class="unit-name">Loot</div>
       <div class="item-list" id="loot-list"></div>
       <div class="loot-actions">
-        <button type="button" class="overlay-button" data-loot-take-all>Take All</button>
+        <button type="button" class="overlay-button accent" data-loot-take-all>Take All</button>
         <button type="button" class="overlay-button" data-loot-close>Close</button>
       </div>
     </div>
 
     <div id="waypoint-panel" class="unit-panel" hidden>
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
-      <div class="unit-name">Waypoint</div>
-      <div class="item-list" id="waypoint-list"></div>
+      <div class="unit-name">Waypoint Travel</div>
+      <canvas id="waypoint-map" width="560" height="560" data-no-drag></canvas>
+      <p class="waypoint-map-hint">Click a waypoint to travel there</p>
       <div class="loot-actions">
         <button type="button" class="overlay-button" data-waypoint-close>Close</button>
       </div>
@@ -1225,6 +1544,7 @@
     <div id="party-panel" class="unit-panel" hidden>
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <div class="unit-name">Party</div>
+      <div class="panel-meta" data-party-count style="margin-bottom: 4px"></div>
       <div class="item-list" id="party-member-list" data-no-drag></div>
       <button type="button" class="overlay-button" data-party-leave style="margin-top: 8px; width: 100%">
         Leave Party
@@ -1235,8 +1555,64 @@
       <div class="unit-name">Party Invite</div>
       <div data-party-invite-text style="font-size: 12px; margin-bottom: 8px"></div>
       <div class="loot-actions">
-        <button type="button" class="overlay-button" data-party-invite-accept>Accept</button>
-        <button type="button" class="overlay-button" data-party-invite-decline>Decline</button>
+        <button type="button" class="overlay-button accent" data-party-invite-accept>Accept</button>
+        <button type="button" class="overlay-button danger" data-party-invite-decline>Decline</button>
+      </div>
+    </div>
+
+    <div id="friends-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Friends</div>
+      <div class="dungeon-section-label">Requests</div>
+      <div class="item-list" id="friend-request-list" data-no-drag></div>
+      <div class="dungeon-section-label">Friends</div>
+      <div class="item-list" id="friend-list" data-no-drag></div>
+      <div class="dungeon-section-label">Add Friend</div>
+      <input type="text" id="friend-add-input" class="name-input" placeholder="Character name" maxlength="32" data-no-drag />
+      <button type="button" class="overlay-button accent" data-friend-add style="margin-top: 6px; width: 100%">Add Friend</button>
+    </div>
+
+    <div id="guild-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+
+      <div id="guild-no-guild-section" data-no-drag>
+        <div class="unit-name">Guild</div>
+
+        <div id="guild-invites-section" hidden>
+          <div class="dungeon-section-label">Invites</div>
+          <div class="item-list" id="guild-invite-list" data-no-drag></div>
+        </div>
+
+        <div id="guild-empty-state" class="guild-empty-state">
+          <span class="guild-empty-icon">🛡️</span>
+          Not in a guild yet.<br />Create one below, or wait for an invite.
+        </div>
+
+        <div class="dungeon-section-label">Create a Guild</div>
+        <input type="text" id="guild-name-input" class="name-input" placeholder="Guild name" maxlength="32" data-no-drag />
+        <button type="button" class="overlay-button accent" data-guild-create style="margin-top: 6px; width: 100%">Create Guild</button>
+      </div>
+
+      <div id="guild-roster-section" hidden data-no-drag>
+        <div class="guild-header">
+          <div class="guild-emblem">🛡️</div>
+          <div class="guild-header-info">
+            <div class="guild-title" data-guild-name-label></div>
+            <div class="panel-meta" data-guild-member-count></div>
+          </div>
+        </div>
+
+        <div id="guild-invite-section" hidden>
+          <div class="dungeon-section-label">Invite</div>
+          <input type="text" id="guild-invite-input" class="name-input" placeholder="Character name" maxlength="32" data-no-drag />
+          <button type="button" class="overlay-button accent" data-guild-invite style="margin-top: 6px; width: 100%">Invite</button>
+        </div>
+        <div class="dungeon-section-label">Members</div>
+        <div class="item-list" id="guild-member-list" data-no-drag></div>
+        <div class="loot-actions" style="margin-top: 8px">
+          <button type="button" class="overlay-button" data-guild-leave>Leave Guild</button>
+          <button type="button" class="overlay-button danger" data-guild-disband hidden>Disband</button>
+        </div>
       </div>
     </div>
 
@@ -1244,8 +1620,8 @@
       <div class="unit-name">Trade Request</div>
       <div data-trade-invite-text style="font-size: 12px; margin-bottom: 8px"></div>
       <div class="loot-actions">
-        <button type="button" class="overlay-button" data-trade-invite-accept>Accept</button>
-        <button type="button" class="overlay-button" data-trade-invite-decline>Decline</button>
+        <button type="button" class="overlay-button accent" data-trade-invite-accept>Accept</button>
+        <button type="button" class="overlay-button danger" data-trade-invite-decline>Decline</button>
       </div>
     </div>
 
@@ -1272,7 +1648,7 @@
       <div class="item-grid" id="trade-inventory-list" data-no-drag></div>
 
       <div class="loot-actions" style="margin-top: 8px">
-        <button type="button" class="overlay-button" data-trade-accept>Accept</button>
+        <button type="button" class="overlay-button accent" data-trade-accept>Accept</button>
         <button type="button" class="overlay-button" data-trade-cancel>Cancel</button>
       </div>
     </div>
@@ -1286,7 +1662,7 @@
       <div class="dungeon-role-checklist" id="dungeon-role-checklist"></div>
       <div class="loot-actions" style="margin-top: 6px">
         <button type="button" class="overlay-button" data-dungeon-open-listing>Open Group</button>
-        <button type="button" class="overlay-button" data-dungeon-start disabled>Start Dungeon</button>
+        <button type="button" class="overlay-button accent" data-dungeon-start disabled>Start Dungeon</button>
       </div>
 
       <div class="dungeon-section-label">Open Groups</div>
@@ -1336,6 +1712,7 @@
       <div class="chat-tabs" data-no-drag>
         <button type="button" class="chat-tab active" data-chat-channel="say">Say</button>
         <button type="button" class="chat-tab" data-chat-channel="party">Party</button>
+        <button type="button" class="chat-tab" data-chat-channel="guild">Guild</button>
       </div>
       <div id="chat-log" data-no-drag></div>
       <input type="text" id="chat-input" placeholder="Press Enter to chat…" maxlength="200" data-no-drag />
