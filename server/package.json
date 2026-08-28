@@ -9,11 +9,13 @@
     "db:deploy": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
     "make-admin": "node scripts/make-admin.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@colyseus/core": "0.16.24",
     "@colyseus/schema": "^3.0.43",
+    "@colyseus/tools": "^0.16.20",
     "@colyseus/ws-transport": "^0.16.5",
     "@mmo/shared": "*",
     "bcryptjs": "^3.0.3",
@@ -24,12 +26,15 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@colyseus/testing": "^0.16.3",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.5",
     "@types/pg": "^8.11.10",
+    "colyseus.js": "^0.16.20",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.11"
   }
 }
