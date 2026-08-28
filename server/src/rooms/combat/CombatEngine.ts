@@ -33,8 +33,12 @@ import {
   MAIN_STAT_PER_LEVEL,
   MAP_HALF_EXTENT,
   MAX_LEVEL,
+  MAX_PROFESSION_LEVEL,
   MeleeStats,
   PLAYER_SPEED,
+  MOUNT_SPEED_MULTIPLIER,
+  ProfessionId,
+  professionXpForNextLevel,
   PROJECTILE_HIT_RADIUS,
   PROJECTILE_MAX_LIFETIME_MS,
   hasLineOfSight,
@@ -453,6 +457,24 @@ export class CombatEngine {
     }
   }
 
+  // Mirrors grantXp's exact stored-level/loop pattern, on the separate professionXp/
+  // professionLevel maps instead - only meaningful for a professionId already present in both
+  // (i.e. learned - see WorldRoom.handleLearnProfession), capped at MAX_PROFESSION_LEVEL with no
+  // further rewards (no talent points/stat gains, professions are a side-progression track).
+  grantProfessionXp(player: Player, professionId: ProfessionId, amount: number) {
+    if (!player.professionLevel.has(professionId)) return;
+    let level = player.professionLevel.get(professionId) ?? 1;
+    let xp = (player.professionXp.get(professionId) ?? 0) + amount;
+
+    while (level < MAX_PROFESSION_LEVEL && xp >= professionXpForNextLevel(level)) {
+      xp -= professionXpForNextLevel(level);
+      level += 1;
+    }
+
+    player.professionXp.set(professionId, xp);
+    player.professionLevel.set(professionId, level);
+  }
+
   computePlayerDamage(player: Player, baseDamage: number, spellId?: SpellId): { amount: number; isCrit: boolean } {
     const effective = this.getEffectiveStatsFor(player);
     const bonus = this.getCombinedBonusFor(player, spellId);
@@ -531,6 +553,7 @@ export class CombatEngine {
     const mitigated = Math.max(1, amount - (effective.armor + armorBonus));
     this.config.onCombatText({ targetId: sessionId, targetKind: "player", amount: mitigated, kind: "damage", isCrit: false });
     player.hp = Math.max(0, player.hp - mitigated);
+    player.mounted = false; // taking a hit always dismounts, same convention as classic MMO mounts
     if (player.hp === 0) {
       this.cancelPlayerCast(sessionId);
       player.hp = player.maxHp;
@@ -604,6 +627,16 @@ export class CombatEngine {
 
   private makePlayerCasterCtx(player: Player, sessionId: string, spellId?: SpellId): CasterContext {
     return { isPlayer: true, casterX: player.x, casterZ: player.z, sourceId: sessionId, casterPlayer: player, spellId, enrageMultiplier: 1 };
+  }
+
+  // Applies a consumable material's useEffects (see ItemDef.useEffects) - always a self-cast
+  // (drinking a potion has no separate target to pick), through the exact same resolveEffect()
+  // interpreter spells/boss abilities already go through. Public - WorldRoom.handleUseItem is the
+  // only caller, same "one narrow public entry point" shape as grantXp/grantProfessionXp above.
+  consumeItem(player: Player, sessionId: string, effects: EffectDef[]) {
+    const casterCtx = this.makePlayerCasterCtx(player, sessionId);
+    const impact = { x: player.x, z: player.z };
+    for (const effect of effects) this.resolveEffect(casterCtx, effect, impact, sessionId);
   }
 
   // The unit id a composable EffectDef's shape:"singleTarget" should resolve to - "ground" has no
@@ -1014,9 +1047,10 @@ export class CombatEngine {
 
       const normalizedX = input.moveX / length;
       const normalizedZ = input.moveZ / length;
+      const speed = player.mounted ? PLAYER_SPEED * MOUNT_SPEED_MULTIPLIER : PLAYER_SPEED;
 
-      let nextX = clamp(player.x + normalizedX * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
-      let nextZ = clamp(player.z + normalizedZ * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      let nextX = clamp(player.x + normalizedX * speed * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+      let nextZ = clamp(player.z + normalizedZ * speed * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
 
       if (this.config.collidableStructures) {
         const resolved = resolveStructureCollisions(nextX, nextZ, STRUCTURES);

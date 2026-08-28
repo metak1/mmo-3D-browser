@@ -4,6 +4,7 @@ import {
   AcceptQuestMessage,
   ActionFailedMessage,
   ActionFailReason,
+  ALL_PROFESSIONS,
   BOSS_PHASE_2_HP_FRACTION,
   BossStats,
   BUFFS,
@@ -22,6 +23,8 @@ import {
   ClassRole,
   CombatTextEvent,
   ContentSnapshot,
+  CraftRecipeMessage,
+  CRAFTING_PROFESSIONS,
   DUNGEON_COMPOSITION,
   DUNGEON_PARTY_SIZE,
   DungeonJoinListingMessage,
@@ -31,10 +34,15 @@ import {
   EquipMessage,
   EquipSlot,
   EQUIP_SLOT_LABEL,
+  ForgetProfessionMessage,
   FriendRemoveMessage,
   FriendRequestMessage,
   FriendRespondMessage,
   FURNITURE,
+  GatherNodeMessage,
+  GATHER_INTERACT_RADIUS,
+  GATHERING_NODE_TYPES,
+  GATHERING_PROFESSIONS,
   GuildCreateMessage,
   GuildInviteMessage,
   GuildKickMessage,
@@ -45,25 +53,33 @@ import {
   InputMessage,
   INVENTORY_SIZE,
   ITEMS,
+  LearnProfessionMessage,
   loadGameContent,
   LOOT_PICKUP_RADIUS,
   LootTakeMessage,
   MAP_HALF_EXTENT,
   MainStat,
+  MAX_LEARNED_PROFESSIONS,
   NPCS,
   NPC_INTERACT_RADIUS,
   NPC_QUEST_IDS,
   NpcDef,
   PARTY_MAX_SIZE,
   PLAYER_SPEED,
+  MOUNT_SPEED_MULTIPLIER,
   PORTAL_POSITION,
   PartyInviteMessage,
   PartyRespondMessage,
   PlayerStats,
+  ProfessionId,
+  PROFESSION_ICONS,
+  PROFESSION_LABELS,
+  professionXpForNextLevel,
   QUESTS,
   QuestDef,
   RARITY_COLOR,
   RARITY_MULTIPLIER,
+  RECIPES,
   RefundTalentMessage,
   isHexPassable,
   resolveStructureCollisions,
@@ -77,6 +93,8 @@ import {
   TALENTS,
   TalentDef,
   TimeOfDaySetBroadcast,
+  UseItemMessage,
+  SwapInventorySlotsMessage,
   TradeOfferMessage,
   TradeRequestMessage,
   TradeRespondMessage,
@@ -111,6 +129,7 @@ import { Minimap, QuestAreaMarker } from "./game/Minimap";
 import { PortalAvatar } from "./game/Portal";
 import { ProjectileAvatar } from "./game/Projectile";
 import { LootBagAvatar } from "./game/LootBagAvatar";
+import { GatheringNodeAvatar } from "./game/GatheringNode";
 import { InputController } from "./game/InputController";
 import { connectToWorld, consumeDungeonReservation } from "./network/connection";
 import * as api from "./network/api";
@@ -331,8 +350,15 @@ const npcDialogueBuyLabelEl = document.querySelector<HTMLElement>("[data-npc-dia
 const npcDialogueBuyListEl = document.getElementById("npc-dialogue-buy-list")!;
 const npcDialogueSellLabelEl = document.querySelector<HTMLElement>("[data-npc-dialogue-sell-label]")!;
 const npcDialogueSellListEl = document.getElementById("npc-dialogue-sell-list")!;
+const npcDialogueTrainerLabelEl = document.querySelector<HTMLElement>("[data-npc-dialogue-trainer-label]")!;
+const npcDialogueTrainerEl = document.getElementById("npc-dialogue-trainer")!;
 const questLogPanel = document.getElementById("quest-log-panel")!;
 const questLogListEl = document.getElementById("quest-log-list")!;
+
+const professionsPanel = document.getElementById("professions-panel")!;
+const professionSummaryEl = document.querySelector<HTMLElement>("[data-profession-summary]")!;
+const professionTabsEl = document.getElementById("profession-tabs")!;
+const professionTabContentEl = document.getElementById("profession-tab-content")!;
 
 const actionFeedbackEl = document.getElementById("action-feedback")!;
 
@@ -430,7 +456,7 @@ function showItemTooltip(token: string, event: MouseEvent) {
   const multiplier = RARITY_MULTIPLIER[rarity];
   itemTooltipNameEl.textContent = item.name;
   itemTooltipNameEl.style.color = RARITY_COLOR[rarity];
-  itemTooltipSlotEl.textContent = EQUIP_SLOT_LABEL[item.slot];
+  itemTooltipSlotEl.textContent = item.slot ? EQUIP_SLOT_LABEL[item.slot] : "Material";
   itemTooltipStatsEl.innerHTML = Object.entries(item.bonuses)
     .map(([stat, value]) => `<span>+${Math.round((value ?? 0) * multiplier)} ${labelForStat(stat as keyof PlayerStats)}</span>`)
     .join("");
@@ -502,12 +528,13 @@ makeDraggable(document.getElementById("target-panel")!, "target");
 makeDraggable(document.getElementById("spell-panel")!, "spells");
 makeDraggable(document.getElementById("character-panel")!, "character");
 makeDraggable(document.getElementById("xp-panel")!, "xp");
-makeDraggable(inventoryPanel, "inventory");
+makeDraggable(inventoryPanel, "inventory", inventoryPanel.querySelector<HTMLElement>(".unit-name")!);
 makeDraggable(lootWindow, "loot");
 makeDraggable(waypointPanel, "waypoint");
 makeDraggable(talentPanel, "talents");
 makeDraggable(npcDialoguePanel, "npc-dialogue");
 makeDraggable(questLogPanel, "quest-log");
+makeDraggable(professionsPanel, "professions");
 makeDraggable(partyPanel, "party");
 makeDraggable(friendsPanel, "friends");
 makeDraggable(guildPanel, "guild");
@@ -555,6 +582,9 @@ interface PlayerStatsSnapshot {
   talentRanks: Iterable<[string, number]>;
   questProgress: Iterable<[string, number]>;
   questCompleted: Iterable<[string, number]>;
+  professionXp: Iterable<[string, number]>;
+  professionLevel: Iterable<[string, number]>;
+  materials: Iterable<[string, number]>;
   partyId: string;
   friends: Iterable<[string, { characterId: number; name: string; level: number; classId: string; online: boolean }]>;
   pendingFriendRequests: Iterable<{ requestId: number; fromCharacterId: number; fromName: string }>;
@@ -562,6 +592,8 @@ interface PlayerStatsSnapshot {
   guildName: string;
   guildRole: string;
   pendingGuildInvites: Iterable<{ inviteId: number; guildId: number; guildName: string; invitedByName: string }>;
+  hasMount: boolean;
+  mounted: boolean;
 }
 
 function renderEquipment(player: PlayerStatsSnapshot) {
@@ -593,28 +625,440 @@ function renderEquipment(player: PlayerStatsSnapshot) {
   }
 }
 
+// Refreshed every time real inventory data flows through renderInventory - lets top-level code
+// (the action-bar override system) know whether an equip token dragged onto a hotbar slot is
+// still actually owned, the same role lastKnownMaterials plays for materials.
+let lastKnownInventoryTokens = new Set<string>();
+
 function renderInventory(player: PlayerStatsSnapshot) {
   inventoryListEl.innerHTML = "";
   const tokens = [...player.inventory];
-  inventoryCountEl.textContent = `(${tokens.length} / ${INVENTORY_SIZE})`;
-  for (let i = 0; i < INVENTORY_SIZE; i++) {
-    const token = tokens[i];
-    const decoded = token ? decodeItemToken(token) : undefined;
-    const item = decoded ? ITEMS[decoded.itemId] : undefined;
+  lastKnownInventoryTokens = new Set(tokens);
+  const materials = new Map(player.materials);
+  // Materials share the same 20-slot pool as equipment now (one material type = one slot,
+  // regardless of stack size) - see hasInventorySpaceFor server-side. The count/grid below
+  // reflect that shared total rather than treating materials as unlimited extras.
+  const usedSlots = tokens.length + materials.size;
+  inventoryCountEl.textContent = `(${usedSlots} / ${INVENTORY_SIZE})`;
+
+  tokens.forEach((token, index) => {
+    const decoded = decodeItemToken(token);
+    const item = ITEMS[decoded.itemId];
 
     const slotEl = document.createElement("button");
-    slotEl.className = item ? "item-slot" : "item-slot empty";
+    slotEl.className = "item-slot";
     slotEl.textContent = item ? item.icon : "";
-    if (item && decoded) slotEl.style.borderColor = RARITY_COLOR[decoded.rarity];
-    if (item && token) {
-      slotEl.addEventListener("click", () => {
-        const message: EquipMessage = { itemId: token };
-        activeRoom?.send("equip", message);
-      });
-      attachItemTooltip(slotEl, token);
-    }
+    if (item) slotEl.style.borderColor = RARITY_COLOR[decoded.rarity];
+    slotEl.addEventListener("click", () => {
+      const message: EquipMessage = { itemId: token };
+      activeRoom?.send("equip", message);
+    });
+    attachItemTooltip(slotEl, token);
+
+    // Draggable two ways: onto another bag slot to swap positions (application/x-inventory-index,
+    // read by the drop handler below), or onto an action-bar slot to assign it there (text/plain,
+    // the same contract materials already use - see buildShopSlot/appendMaterialSlots).
+    slotEl.draggable = true;
+    slotEl.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/plain", token);
+      event.dataTransfer?.setData("application/x-inventory-index", String(index));
+    });
+    slotEl.addEventListener("dragover", (event) => event.preventDefault());
+    slotEl.addEventListener("dragenter", () => slotEl.classList.add("drag-over"));
+    slotEl.addEventListener("dragleave", () => slotEl.classList.remove("drag-over"));
+    slotEl.addEventListener("drop", (event) => {
+      event.preventDefault();
+      slotEl.classList.remove("drag-over");
+      const fromIndexRaw = event.dataTransfer?.getData("application/x-inventory-index");
+      if (!fromIndexRaw) return;
+      const fromIndex = Number(fromIndexRaw);
+      if (Number.isNaN(fromIndex) || fromIndex === index) return;
+      const message: SwapInventorySlotsMessage = { fromIndex, toIndex: index };
+      activeRoom?.send("swap_inventory_slots", message);
+    });
+
     inventoryListEl.appendChild(slotEl);
+  });
+
+  // Consumables/materials land in the same grid, right after the equip slots - not a visually
+  // separate section, so the panel reads as one continuous "everything you're carrying" list.
+  appendMaterialSlots(inventoryListEl, materials);
+
+  for (let i = usedSlots; i < INVENTORY_SIZE; i++) {
+    const emptyEl = document.createElement("button");
+    emptyEl.className = "item-slot empty";
+    inventoryListEl.appendChild(emptyEl);
   }
+}
+
+// Top-level (not nested in the room-connection closure, unlike most of this file's other render
+// helpers) since it has no closure dependencies beyond attachItemTooltip (also top-level) - both
+// renderVendorShop (inside the closure) and renderProfessionsPanel's Materials tab (top-level)
+// need it, and a plain function declaration is visible from either direction once it lives here.
+// stackCount switches the slot from the vendor-style icon+price-caption layout to a plain square
+// with the count as a small badge in the corner of the icon itself (materials/consumables) -
+// matches how equipment slots in the same grid look (see appendMaterialSlots), instead of an
+// extra text line underneath that made mixed grids read inconsistently.
+function buildShopSlot(
+  icon: string,
+  borderColor: string,
+  tooltipToken: string,
+  priceLabel: string,
+  disabled: boolean,
+  onClick: () => void,
+  draggableItemId?: string,
+  stackCount?: number,
+): HTMLElement {
+  const slotEl = document.createElement("button");
+  slotEl.className = "item-slot";
+  slotEl.textContent = icon;
+  slotEl.style.borderColor = borderColor;
+  slotEl.disabled = disabled;
+  if (!disabled) {
+    slotEl.addEventListener("click", onClick);
+    // Right-click also uses it - a quick-use gesture, same as left-click, not a menu. Assigning
+    // to an action-bar slot is drag-and-drop instead (see draggableItemId below), not a
+    // right-click menu - the two gestures don't compete for the same click.
+    slotEl.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      onClick();
+    });
+  }
+  if (draggableItemId) {
+    slotEl.draggable = true;
+    slotEl.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/plain", draggableItemId);
+    });
+  }
+  attachItemTooltip(slotEl, tooltipToken);
+
+  if (stackCount !== undefined) {
+    const badge = document.createElement("span");
+    badge.className = "item-slot-stack";
+    badge.textContent = `${stackCount}`;
+    slotEl.appendChild(badge);
+    return slotEl;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "shop-slot-wrap";
+  wrap.appendChild(slotEl);
+
+  const caption = document.createElement("span");
+  caption.className = "price-caption";
+  caption.textContent = priceLabel;
+  wrap.appendChild(caption);
+
+  return wrap;
+}
+
+// A dedicated 7th hotbar button (alongside the 3 spell + 3 item slots) for mounting/dismounting
+// with a click, not just the "H" keybind - same message either gesture sends.
+const mountToggleBtn = document.querySelector<HTMLButtonElement>("[data-mount-toggle]")!;
+const mountToggleNameEl = document.querySelector<HTMLElement>("[data-mount-name]")!;
+mountToggleBtn.addEventListener("click", () => activeRoom?.send("toggle_mount"));
+
+function updateMountButton(player: PlayerStatsSnapshot) {
+  mountToggleBtn.disabled = !player.hasMount;
+  mountToggleBtn.classList.toggle("mounted", player.mounted);
+  mountToggleNameEl.textContent = player.mounted ? "Dismount" : "Mount";
+}
+
+// A small always-visible action bar extension (see index.html's #hotbar - slots 4-6, alongside
+// the 3 class-spell slots) so a consumable material can sit at a numbered quick-access slot the
+// same way a spell does, not just be click-to-use buried in the inventory grid. Assignment is
+// per-browser (not per-character) via localStorage - a deliberately simple scope for what's a
+// convenience shortcut, not game state; losing it on a fresh browser/profile just means
+// reassigning once.
+const ITEM_SLOT_COUNT = 3;
+const ITEM_SLOT_STORAGE_KEY = "mmo:itemHotbar";
+
+function loadItemSlotAssignments(): (string | null)[] {
+  try {
+    const raw = localStorage.getItem(ITEM_SLOT_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.from({ length: ITEM_SLOT_COUNT }, (_, i) =>
+      Array.isArray(parsed) && typeof parsed[i] === "string" ? (parsed[i] as string) : null,
+    );
+  } catch {
+    return Array.from({ length: ITEM_SLOT_COUNT }, () => null);
+  }
+}
+
+let itemSlotAssignments: (string | null)[] = loadItemSlotAssignments();
+// Refreshed every time real materials data flows through renderInventory/renderMaterialsGrid -
+// setItemSlot needs *some* current count to render against even though assigning a slot doesn't
+// itself carry fresh player data with it (it's a context-menu click, not a schema update).
+let lastKnownMaterials = new Map<string, number>();
+
+const itemSlotEls: HTMLElement[] = [];
+const itemSlotNameEls: HTMLElement[] = [];
+for (let i = 0; i < ITEM_SLOT_COUNT; i++) {
+  const el = document.querySelector<HTMLElement>(`[data-item-slot="${i}"]`)!;
+  itemSlotEls.push(el);
+  itemSlotNameEls.push(document.querySelector(`[data-item-name="${i}"]`)!);
+  // Right-click an assigned slot to clear it - mirrors the talent tree's own right-click-to-
+  // refund convention (also the only other "right-click a small persistent UI element" gesture
+  // in this game), rather than inventing a new one just for this.
+  const index = i;
+  el.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    if (!itemSlotAssignments[index]) return;
+    setItemSlot(index, null);
+  });
+  // A material's slot (see appendMaterialSlots) is draggable with its itemId as the payload -
+  // dropping it here assigns this slot, dragover must preventDefault or the browser refuses the
+  // drop entirely (native HTML5 drag-and-drop's own contract, not something we can skip).
+  el.addEventListener("dragover", (event) => event.preventDefault());
+  el.addEventListener("dragenter", () => el.classList.add("drag-over"));
+  el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+  el.addEventListener("drop", (event) => {
+    event.preventDefault();
+    el.classList.remove("drag-over");
+    const itemId = event.dataTransfer?.getData("text/plain");
+    if (itemId) setItemSlot(index, itemId);
+  });
+}
+
+// An assigned slot (see setItemSlot/setSpellSlotOverride) holds either a bare material itemId or
+// a full equip token ("itemId@rarity") - decodeItemToken handles both (a bare id falls back to
+// "common"), and ITEMS[itemId].slot tells them apart (only equipment has an equip slot).
+function isEquipAssignment(id: string): boolean {
+  return !!ITEMS[decodeItemToken(id).itemId]?.slot;
+}
+
+// The spell-slot override system (slots 1-3) lives inside the room-connection closure - see
+// setSpellSlotOverride - since it needs closure-scoped DOM refs the class's spells share. This
+// lets top-level code (which owns lastKnownMaterials/lastKnownInventoryTokens, the data an
+// override's "unusable" state depends on) ask it to refresh without reaching into the closure.
+let refreshSpellSlotOverrides: (() => void) | null = null;
+
+function renderItemHotbar() {
+  for (let i = 0; i < ITEM_SLOT_COUNT; i++) {
+    const assigned = itemSlotAssignments[i];
+    const el = itemSlotEls[i];
+    const nameEl = itemSlotNameEls[i];
+    if (!assigned) {
+      el.classList.add("empty");
+      el.classList.remove("unusable");
+      nameEl.textContent = "—";
+      continue;
+    }
+    const decoded = decodeItemToken(assigned);
+    const item = ITEMS[decoded.itemId];
+    const depleted = isEquipAssignment(assigned) ? !lastKnownInventoryTokens.has(assigned) : (lastKnownMaterials.get(assigned) ?? 0) <= 0;
+    el.classList.remove("empty");
+    el.classList.toggle("unusable", depleted);
+    nameEl.textContent = item ? `${item.icon} ${item.name}` : assigned;
+  }
+  refreshSpellSlotOverrides?.();
+}
+
+function setItemSlot(index: number, itemId: string | null) {
+  itemSlotAssignments[index] = itemId;
+  try {
+    localStorage.setItem(ITEM_SLOT_STORAGE_KEY, JSON.stringify(itemSlotAssignments));
+  } catch {
+    // best-effort - a private/blocked storage context just means the assignment doesn't survive reload
+  }
+  renderItemHotbar();
+}
+
+// Shared trigger for any action-bar slot assigned to an item/equip token - used by the item
+// slots (4-6) directly, and by the spell slots (1-3) when overridden with an item (see
+// spellSlotOverrides). Equipment equips itself; a material/consumable uses itself.
+function useOverrideItem(id: string) {
+  if (isEquipAssignment(id)) {
+    if (!lastKnownInventoryTokens.has(id)) return;
+    const message: EquipMessage = { itemId: id };
+    activeRoom?.send("equip", message);
+  } else {
+    if ((lastKnownMaterials.get(id) ?? 0) <= 0) return;
+    const message: UseItemMessage = { itemId: id };
+    activeRoom?.send("use_item", message);
+  }
+}
+
+function useItemSlot(index: number) {
+  const itemId = itemSlotAssignments[index];
+  if (!itemId) return;
+  useOverrideItem(itemId);
+}
+
+// Shared by the Inventory panel's own grid and the Professions panel's Materials tab - a
+// consumable/material sits in the *same* grid as equipment items now, not a visually separate
+// section, so "everything you're carrying" reads as one continuous list. A usable one (has
+// useEffects) is draggable onto an action-bar item slot to assign it there (see the drop
+// handlers on itemSlotEls below) - left/right click both use it immediately either way.
+function appendMaterialSlots(container: HTMLElement, materials: Map<string, number>) {
+  lastKnownMaterials = materials;
+  for (const [itemId, count] of materials) {
+    if (count <= 0) continue;
+    const item = ITEMS[itemId];
+    if (!item) continue;
+    const usable = !!item.useEffects?.length;
+    container.appendChild(
+      buildShopSlot(
+        item.icon,
+        RARITY_COLOR.common,
+        itemId,
+        "",
+        !usable,
+        () => {
+          const message: UseItemMessage = { itemId };
+          activeRoom?.send("use_item", message);
+        },
+        usable ? itemId : undefined,
+        count,
+      ),
+    );
+  }
+  renderItemHotbar();
+}
+
+type ProfessionTabKey = ProfessionId | "materials";
+// Persists across renders (module state, not panel-local) so a re-render (e.g. gaining xp) never
+// silently bounces the player back to another tab - only reset when the currently-active tab
+// itself stops existing (a forgotten profession's tab disappearing).
+let activeProfessionTab: ProfessionTabKey = "materials";
+
+// Rebuilds the whole panel from scratch every call (same "innerHTML from scratch" pattern
+// renderInventory/renderTalents already use). One tab per LEARNED profession (status + Forget +
+// that profession's own recipes if it's a crafting one) plus a shared Materials tab (materials
+// aren't cleanly owned by one profession - a lumberjack's logs can feed an alchemist's recipe -
+// so the bag stays one shared view rather than being split up). Learn only happens via a trainer
+// NPC's dialogue now (see renderNpcTrainerSection) - an *unlearned* profession has no tab here at
+// all, matching how a player actually discovers professions (visiting trainers, not browsing a menu).
+function renderProfessionsPanel(player: PlayerStatsSnapshot) {
+  const professionXp = new Map(player.professionXp);
+  const professionLevel = new Map(player.professionLevel);
+  const materials = new Map(player.materials);
+
+  professionSummaryEl.textContent =
+    professionXp.size === 0
+      ? "0 professions known - visit a trainer NPC to learn one!"
+      : `${professionXp.size} / ${MAX_LEARNED_PROFESSIONS} professions known`;
+
+  const learnedProfessions = ALL_PROFESSIONS.filter((p) => professionXp.has(p));
+  const tabs: ProfessionTabKey[] = [...learnedProfessions, "materials"];
+  if (!tabs.includes(activeProfessionTab)) activeProfessionTab = tabs[0];
+
+  professionTabsEl.innerHTML = "";
+  for (const tab of tabs) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = tab === activeProfessionTab ? "chat-tab active" : "chat-tab";
+    btn.textContent = tab === "materials" ? "Materials" : `${PROFESSION_ICONS[tab]} ${PROFESSION_LABELS[tab]}`;
+    btn.addEventListener("click", () => {
+      activeProfessionTab = tab;
+      renderProfessionsPanel(player);
+    });
+    professionTabsEl.appendChild(btn);
+  }
+
+  professionTabContentEl.innerHTML = "";
+  if (activeProfessionTab === "materials") {
+    renderMaterialsTab(materials);
+  } else {
+    renderProfessionTabContent(activeProfessionTab, professionXp, professionLevel, materials);
+  }
+}
+
+// Shared by the Professions panel's Materials tab and the Inventory panel's own Materials
+// section (see renderInventory) - a consumable (a material with useEffects, e.g. a crafted
+// potion) needs to be visible/usable from the *inventory* too, not just tucked away under
+// Professions, since that's the first place a player actually looks for "stuff I'm carrying".
+function renderMaterialsGrid(container: HTMLElement, materials: Map<string, number>, emptyMessage: string) {
+  container.innerHTML = "";
+  const materialEntries = [...materials].filter(([, count]) => count > 0);
+  if (materialEntries.length === 0) {
+    container.innerHTML = `<p class="panel-empty-state">${emptyMessage}</p>`;
+    lastKnownMaterials = materials;
+    renderItemHotbar();
+    return;
+  }
+  appendMaterialSlots(container, materials);
+}
+
+function renderMaterialsTab(materials: Map<string, number>) {
+  const grid = document.createElement("div");
+  grid.className = "item-grid";
+  renderMaterialsGrid(grid, materials, "No materials yet - gather some from the world!");
+  professionTabContentEl.appendChild(grid);
+}
+
+function renderProfessionTabContent(
+  professionId: ProfessionId,
+  professionXp: Map<string, number>,
+  professionLevel: Map<string, number>,
+  materials: Map<string, number>,
+) {
+  const level = professionLevel.get(professionId) ?? 1;
+  const xp = professionXp.get(professionId) ?? 0;
+  const next = professionXpForNextLevel(level);
+  const fraction = next > 0 ? Math.min(1, xp / next) : 1;
+
+  const header = document.createElement("div");
+  header.className = "profession-row";
+  header.innerHTML = `
+    <div class="profession-row-main">
+      <div>${PROFESSION_ICONS[professionId]} ${PROFESSION_LABELS[professionId]} <span class="level-tag">Lv ${level}</span></div>
+      <div class="bar"><div class="bar-fill" style="width: ${fraction * 100}%"></div><span class="bar-label">${xp} / ${next} XP</span></div>
+    </div>
+  `;
+  const forgetBtn = document.createElement("button");
+  forgetBtn.className = "overlay-button";
+  forgetBtn.textContent = "Forget";
+  forgetBtn.addEventListener("click", () => {
+    const message: ForgetProfessionMessage = { professionId };
+    activeRoom?.send("forget_profession", message);
+  });
+  header.appendChild(forgetBtn);
+  professionTabContentEl.appendChild(header);
+
+  if (!CRAFTING_PROFESSIONS.includes(professionId)) {
+    const hint = document.createElement("p");
+    hint.className = "panel-empty-state";
+    hint.textContent = "Gather nodes out in the world to collect materials for this profession.";
+    professionTabContentEl.appendChild(hint);
+    return;
+  }
+
+  const recipes = Object.values(RECIPES).filter((r) => r.profession === professionId);
+  const recipeList = document.createElement("div");
+  recipeList.className = "item-list";
+  if (recipes.length === 0) {
+    recipeList.innerHTML = `<p class="panel-empty-state">No recipes exist for this profession yet.</p>`;
+  }
+  for (const recipe of recipes) {
+    const meetsLevel = level >= recipe.requiredLevel;
+    const hasAll = recipe.ingredients.every((ing) => (materials.get(ing.itemId) ?? 0) >= ing.quantity);
+
+    const row = document.createElement("div");
+    row.className = "item-row recipe-row";
+    const ingredientsHtml = recipe.ingredients
+      .map((ing) => {
+        const have = materials.get(ing.itemId) ?? 0;
+        const ingItem = ITEMS[ing.itemId];
+        return `<span class="${have < ing.quantity ? "insufficient" : ""}">${ingItem?.icon ?? ""} ${ingItem?.name ?? ing.itemId} ${have}/${ing.quantity}</span>`;
+      })
+      .join("");
+    row.innerHTML = `
+      <div class="recipe-row-header"><span>${recipe.name}${meetsLevel ? "" : ` (req. Lv ${recipe.requiredLevel})`}</span></div>
+      <div class="recipe-ingredients">${ingredientsHtml}</div>
+    `;
+    const craftBtn = document.createElement("button");
+    craftBtn.className = "overlay-button";
+    craftBtn.textContent = "Craft";
+    craftBtn.disabled = !meetsLevel || !hasAll;
+    craftBtn.addEventListener("click", () => {
+      const message: CraftRecipeMessage = { recipeId: recipe.id };
+      activeRoom?.send("craft_recipe", message);
+    });
+    row.appendChild(craftBtn);
+    recipeList.appendChild(row);
+  }
+  professionTabContentEl.appendChild(recipeList);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -804,6 +1248,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const projectiles = new Map<string, ProjectileAvatar>();
   const lootBags = new Map<string, LootBagAvatar>();
   const lootBagSchemaById = new Map<string, { x: number; z: number; items: Iterable<string> }>();
+  const gatheringNodes = new Map<string, GatheringNodeAvatar>();
+  const gatheringNodeSchemaById = new Map<string, { x: number; z: number; available: boolean }>();
   const dungeonListingSchemaById = new Map<string, { partyId: string; leaderSessionId: string; createdAt: number }>();
 
   // NPCs are static shared data (no hp, no server-synced position), so they're spawned once
@@ -814,11 +1260,12 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   // authored x/z, unaffected by wherever the avatar has currently wandered to.
   const npcs = new Map<string, NpcAvatar>();
   for (const def of Object.values(NPCS)) {
-    const wander = !def.vendorItemIds?.length && !(NPC_QUEST_IDS[def.id]?.length);
+    const wander = !def.vendorItemIds?.length && !(NPC_QUEST_IDS[def.id]?.length) && !def.teachesProfessionId;
     const avatar = new NpcAvatar(def.name, wander);
     avatar.group.userData.npcId = def.id;
     avatar.setPosition(def.x, def.z, def.yOffset);
     avatar.setVendorIndicator(!!def.vendorItemIds);
+    avatar.setTrainerIndicator(!!def.teachesProfessionId);
     avatar.addTo(gameScene.scene);
     npcs.set(def.id, avatar);
   }
@@ -933,6 +1380,91 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       const id = slotSpellIds[i];
       nameEls[i].textContent = id ? SPELLS[id].name : "";
     }
+    renderSpellSlotOverrides();
+  }
+
+  // Slots 1-3 default to the class's own spells, but can be overridden with an item/equip token
+  // dragged from the bag - same drag contract item slots 4-6 already use (text/plain payload),
+  // just a second possible destination for it. Right-click reverts to the spell (there's always
+  // one underneath, unlike slots 4-6 which just go empty). Persisted per-browser like the item
+  // hotbar - see ITEM_SLOT_STORAGE_KEY's own reasoning for why that scope is fine here too.
+  const SPELL_SLOT_OVERRIDE_KEY = "mmo:spellHotbarOverrides";
+  function loadSpellSlotOverrides(): (string | null)[] {
+    try {
+      const raw = localStorage.getItem(SPELL_SLOT_OVERRIDE_KEY);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      return Array.from({ length: HOTBAR_SLOT_COUNT }, (_, i) =>
+        Array.isArray(parsed) && typeof parsed[i] === "string" ? (parsed[i] as string) : null,
+      );
+    } catch {
+      return Array.from({ length: HOTBAR_SLOT_COUNT }, () => null);
+    }
+  }
+  let spellSlotOverrides: (string | null)[] = loadSpellSlotOverrides();
+
+  function renderSpellSlotOverrides() {
+    for (let i = 0; i < HOTBAR_SLOT_COUNT; i++) {
+      const overrideId = spellSlotOverrides[i];
+      const slotEl = spellSlotEls[i];
+      const nameEl = nameEls[i];
+      if (!overrideId) {
+        slotEl?.classList.remove("overridden", "unusable");
+        const id = slotSpellIds[i];
+        nameEl.textContent = id ? SPELLS[id].name : "";
+        continue;
+      }
+      const decoded = decodeItemToken(overrideId);
+      const item = ITEMS[decoded.itemId];
+      const depleted = isEquipAssignment(overrideId) ? !lastKnownInventoryTokens.has(overrideId) : (lastKnownMaterials.get(overrideId) ?? 0) <= 0;
+      slotEl?.classList.add("overridden");
+      slotEl?.classList.toggle("unusable", depleted);
+      slotEl?.classList.remove("too-far");
+      nameEl.textContent = item ? `${item.icon} ${item.name}` : overrideId;
+      // The per-frame loop skips overridden slots entirely (see the animate loop's own guard),
+      // so any cooldown sweep/charge badge that was mid-animation when the override landed would
+      // otherwise freeze in place behind the item's name - clear it here instead.
+      cooldownEls[i].style.height = "0%";
+      if (chargesEls[i]) chargesEls[i].hidden = true;
+    }
+  }
+  refreshSpellSlotOverrides = renderSpellSlotOverrides;
+
+  function setSpellSlotOverride(index: number, itemId: string | null) {
+    spellSlotOverrides[index] = itemId;
+    try {
+      localStorage.setItem(SPELL_SLOT_OVERRIDE_KEY, JSON.stringify(spellSlotOverrides));
+    } catch {
+      // best-effort - a private/blocked storage context just means the assignment doesn't survive reload
+    }
+    renderSpellSlotOverrides();
+  }
+
+  for (let i = 0; i < HOTBAR_SLOT_COUNT; i++) {
+    const el = spellSlotEls[i];
+    const index = i;
+    el.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      if (!spellSlotOverrides[index]) return;
+      setSpellSlotOverride(index, null);
+    });
+    el.addEventListener("dragover", (event) => event.preventDefault());
+    el.addEventListener("dragenter", () => el.classList.add("drag-over"));
+    el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+    el.addEventListener("drop", (event) => {
+      event.preventDefault();
+      el.classList.remove("drag-over");
+      const itemId = event.dataTransfer?.getData("text/plain");
+      if (itemId) setSpellSlotOverride(index, itemId);
+    });
+  }
+
+  function triggerSpellSlot(slotIndex: number) {
+    const overrideId = spellSlotOverrides[slotIndex];
+    if (overrideId) {
+      useOverrideItem(overrideId);
+      return;
+    }
+    castSpell(slotIndex);
   }
 
   function updateHud() {
@@ -1488,6 +2020,13 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     name_taken: "Name Taken",
     not_leader: "Not the Guild Leader",
     not_admin: "Admins Only",
+    profession_not_learned: "Profession Not Learned",
+    profession_slots_full: "Already Know 2 Professions",
+    profession_already_learned: "Already Known",
+    level_too_low: "Level Too Low",
+    insufficient_materials: "Not Enough Materials",
+    not_usable: "Can't Use That",
+    no_mount: "No Mount Owned",
   };
 
   // One shared toast for every reason a player-initiated action can fail - started out cast-only
@@ -1675,7 +2214,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
       const row = document.createElement("button");
       row.className = "item-row";
-      row.innerHTML = `<span style="color: ${RARITY_COLOR[rarity]}">${item.name}</span><span class="item-slot-tag">${EQUIP_SLOT_LABEL[item.slot]}</span>`;
+      row.innerHTML = `<span style="color: ${RARITY_COLOR[rarity]}">${item.name}</span><span class="item-slot-tag">${item.slot ? EQUIP_SLOT_LABEL[item.slot] : "Material"}</span>`;
       row.addEventListener("click", () => {
         const message: LootTakeMessage = { bagId: currentLootBagId!, itemId: token };
         room?.send("loot_take", message);
@@ -1777,6 +2316,23 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
   document.querySelector("[data-waypoint-close]")!.addEventListener("click", () => closeWaypointPanel());
 
+  // Gathering has no panel - a click is the whole interaction (server resolves range/availability/
+  // profession-learned/level itself; this is just the same "predict the obvious failure locally so
+  // the toast is instant" pre-check openWaypointPanel/openLootWindow already do).
+  function handleGatherClick(nodeId: string) {
+    const node = gatheringNodeSchemaById.get(nodeId);
+    if (node && !isNearWorldPoint(node.x, node.z, GATHER_INTERACT_RADIUS)) {
+      showActionFeedback(ACTION_FAIL_LABEL.too_far);
+      return;
+    }
+    if (node && !node.available) {
+      showActionFeedback(ACTION_FAIL_LABEL.not_available);
+      return;
+    }
+    const message: GatherNodeMessage = { nodeId };
+    room?.send("gather_node", message);
+  }
+
   type QuestState = "available" | "active" | "ready" | "completed";
 
   function questStateFor(questId: string): QuestState {
@@ -1791,6 +2347,18 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     const noun = quest.objectiveCount === 1 ? "Enemy" : "Enemies";
     const enemyName = ENEMY_TYPES[quest.objectiveEnemyTypeId]?.name ?? quest.objectiveEnemyTypeId;
     return `Kill ${quest.objectiveCount} ${enemyName} ${noun}`;
+  }
+
+  // Every reward a quest grants, shown wherever a quest itself is shown (the log and an NPC's
+  // dialogue) - not just XP, which used to be the only one never actually surfaced anywhere.
+  function questRewardLabel(quest: QuestDef): string {
+    const parts = [`${quest.rewardXp} XP`];
+    if (quest.rewardItemId) {
+      const item = ITEMS[quest.rewardItemId];
+      if (item) parts.push(`${item.icon} ${item.name}`);
+    }
+    if (quest.rewardGrantsMount) parts.push("🐴 Mount");
+    return parts.join("  ·  ");
   }
 
   // Stable per-player numbering for every quest currently in the log (accepted, whether still
@@ -1887,6 +2455,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         <div class="talent-card-top"><span>${numberBadge}${quest.name}</span></div>
         <span class="talent-desc">${quest.description}</span>
         <span class="quest-objective">${questObjectiveLabel(quest)}</span>
+        <span class="quest-reward">${questRewardLabel(quest)}</span>
       `;
 
       if (state === "available") {
@@ -1932,34 +2501,52 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       npcDialogueBuyListEl.innerHTML = "";
       npcDialogueSellListEl.innerHTML = "";
     }
+
+    if (npc.teachesProfessionId) {
+      npcDialogueTrainerLabelEl.hidden = false;
+      renderNpcTrainerSection(npc.teachesProfessionId, npc.id);
+    } else {
+      npcDialogueTrainerLabelEl.hidden = true;
+      npcDialogueTrainerEl.innerHTML = "";
+    }
   }
 
-  function buildShopSlot(
-    icon: string,
-    borderColor: string,
-    tooltipToken: string,
-    priceLabel: string,
-    disabled: boolean,
-    onClick: () => void,
-  ): HTMLElement {
-    const wrap = document.createElement("div");
-    wrap.className = "shop-slot-wrap";
+  // A trainer NPC's whole offer is one profession - mirrors the quest card's own shape/status
+  // states (Accept/in-progress/Turn In/Completed) but simpler, since there's only ever one of
+  // these per trainer and no in-between progress state, just known-or-not.
+  function renderNpcTrainerSection(professionId: ProfessionId, npcId: string) {
+    npcDialogueTrainerEl.innerHTML = "";
+    const professionXp = localPlayerSchema ? new Map(localPlayerSchema.professionXp) : new Map<string, number>();
+    const learned = professionXp.has(professionId);
+    const slotsFull = professionXp.size >= MAX_LEARNED_PROFESSIONS;
 
-    const slotEl = document.createElement("button");
-    slotEl.className = "item-slot";
-    slotEl.textContent = icon;
-    slotEl.style.borderColor = borderColor;
-    slotEl.disabled = disabled;
-    if (!disabled) slotEl.addEventListener("click", onClick);
-    attachItemTooltip(slotEl, tooltipToken);
-    wrap.appendChild(slotEl);
+    const card = document.createElement("div");
+    card.className = "talent-card";
+    card.innerHTML = `<div class="talent-card-top"><span>${PROFESSION_ICONS[professionId]} ${PROFESSION_LABELS[professionId]}</span></div>`;
 
-    const caption = document.createElement("span");
-    caption.className = "price-caption";
-    caption.textContent = priceLabel;
-    wrap.appendChild(caption);
-
-    return wrap;
+    if (learned) {
+      const status = document.createElement("span");
+      status.className = "role-badge complete";
+      status.textContent = "✓ Learned";
+      card.appendChild(status);
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "overlay-button accent";
+      btn.textContent = "Learn";
+      btn.disabled = slotsFull;
+      btn.addEventListener("click", () => {
+        const message: LearnProfessionMessage = { professionId, npcId };
+        activeRoom?.send("learn_profession", message);
+      });
+      card.appendChild(btn);
+      if (slotsFull) {
+        const hint = document.createElement("span");
+        hint.className = "talent-desc";
+        hint.textContent = "Forget a profession first to learn a new one.";
+        card.appendChild(hint);
+      }
+    }
+    npcDialogueTrainerEl.appendChild(card);
   }
 
   // Buy always previews at common rarity (that's what a purchase actually yields, see
@@ -2118,7 +2705,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       row.style.alignItems = "stretch";
       row.innerHTML = `
         <div style="display: flex; justify-content: space-between; width: 100%">
-          <span><span class="quest-number">${number}</span>${quest.name}<span class="quest-objective">${questObjectiveLabel(quest)}</span></span>
+          <span><span class="quest-number">${number}</span>${quest.name}<span class="quest-objective">${questObjectiveLabel(quest)}</span><span class="quest-reward">${questRewardLabel(quest)}</span></span>
           <span class="item-slot-tag">${progress} / ${quest.objectiveCount}</span>
         </div>
         <div class="bar thin"><div class="bar-fill" style="width: ${fraction * 100}%; background: #c9a63c"></div></div>
@@ -2293,9 +2880,12 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
   window.addEventListener("keydown", (e) => {
     if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) return;
-    if (e.code === "Digit1") castSpell(0);
-    else if (e.code === "Digit2") castSpell(1);
-    else if (e.code === "Digit3") castSpell(2);
+    if (e.code === "Digit1") triggerSpellSlot(0);
+    else if (e.code === "Digit2") triggerSpellSlot(1);
+    else if (e.code === "Digit3") triggerSpellSlot(2);
+    else if (e.code === "Digit4") useItemSlot(0);
+    else if (e.code === "Digit5") useItemSlot(1);
+    else if (e.code === "Digit6") useItemSlot(2);
     else if (e.code === "Escape") {
       cancelPendingGroundTarget();
       closeContextMenu();
@@ -2310,6 +2900,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       if (!talentPanel.hidden && localPlayerSchema) renderTalents(localPlayerSchema);
     }
     else if (e.code === "KeyL") questLogPanel.hidden = !questLogPanel.hidden;
+    else if (e.code === "KeyR") {
+      professionsPanel.hidden = !professionsPanel.hidden;
+      if (!professionsPanel.hidden && localPlayerSchema) renderProfessionsPanel(localPlayerSchema);
+    }
     else if (e.code === "KeyO") friendsPanel.hidden = !friendsPanel.hidden;
     else if (e.code === "KeyG") {
       const opening = guildPanel.hidden;
@@ -2323,6 +2917,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       // toggle other panels while the map stays open.
       if (!bigMapPanel.hidden) bigMap.resetView();
     }
+    else if (e.code === "KeyH") room?.send("toggle_mount");
   });
 
   const raycaster = new THREE.Raycaster();
@@ -2358,6 +2953,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       ...[...lootBags.values()].map((avatar) => avatar.group),
       ...[...npcs.values()].map((avatar) => avatar.group),
       ...[...waypoints.values()].map((avatar) => avatar.group),
+      ...[...gatheringNodes.values()].map((avatar) => avatar.group),
       ...(portal ? [portal.group] : []),
     ];
     const hits = raycaster.intersectObjects(clickable, true);
@@ -2375,6 +2971,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       !obj.userData.sessionId &&
       !obj.userData.npcId &&
       !obj.userData.waypointId &&
+      !obj.userData.gatheringNodeId &&
       !obj.userData.isPortal
     ) {
       obj = obj.parent;
@@ -2390,6 +2987,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     }
     if (obj?.userData.waypointId) {
       openWaypointPanel(obj.userData.waypointId as string);
+      return;
+    }
+    if (obj?.userData.gatheringNodeId) {
+      handleGatherClick(obj.userData.gatheringNodeId as string);
       return;
     }
     if (obj?.userData.isPortal) {
@@ -2604,6 +3205,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         updateAilmentIndicator(player);
         updateBuffIndicator(player);
         updateDotIndicator(player);
+        updateMountButton(player);
         setupHotbarForClass(player.classId);
         updateNpcQuestIndicators();
         renderPartyPanel();
@@ -2659,6 +3261,27 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         // was staying stale until something unrelated (equip, loot, reconnect) forced a re-render.
         $(player.inventory).onAdd(() => renderInventory(player));
         $(player.inventory).onRemove(() => renderInventory(player));
+        // Same nested-MapSchema reasoning as questProgress/ailments above - professionXp/
+        // professionLevel/materials each need their own explicit listeners to keep the
+        // Professions panel (all its tabs depend on all 3 maps at once) AND an open trainer NPC
+        // dialogue (its Learn button's disabled/Learned state) live.
+        const rerenderProfessionsUi = () => {
+          renderProfessionsPanel(player);
+          renderNpcDialogue();
+        };
+        $(player.professionXp).onAdd(rerenderProfessionsUi);
+        $(player.professionXp).onChange(rerenderProfessionsUi);
+        $(player.professionXp).onRemove(rerenderProfessionsUi);
+        $(player.professionLevel).onChange(rerenderProfessionsUi);
+        // Materials also render inside the Inventory panel now (see renderInventory) - that's
+        // the one place professionXp/professionLevel changes never need to reach.
+        const rerenderMaterialsUi = () => {
+          rerenderProfessionsUi();
+          renderInventory(player);
+        };
+        $(player.materials).onAdd(rerenderMaterialsUi);
+        $(player.materials).onChange(rerenderMaterialsUi);
+        $(player.materials).onRemove(rerenderMaterialsUi);
       }
 
       $(player).onChange(() => {
@@ -2670,6 +3293,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         avatar.setHp(player.hp, player.maxHp);
         avatar.setLevel(player.level);
         avatar.setName(player.name, player.guildName);
+        avatar.setMounted(player.mounted);
 
         if (sessionId === currentTargetId) {
           updateHpBar(targetHpFill, targetHpLabel, player.hp, player.maxHp);
@@ -2693,6 +3317,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
           updateAilmentIndicator(player);
           updateBuffIndicator(player);
           updateDotIndicator(player);
+          updateMountButton(player);
           renderNpcDialogue();
           renderQuestLog();
           renderPartyInvitePrompt(player);
@@ -2836,6 +3461,21 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       if (currentLootBagId === bagId) closeLootWindow();
     });
 
+    // Gathering nodes are seeded once at room init and live for the room's whole lifetime (unlike
+    // loot bags) - only `available` ever flips, on gather/respawn (WorldRoom.handleGatherNode) -
+    // so onAdd is the only lifecycle event that matters here, no onRemove.
+    $(room.state).gatheringNodes.onAdd((node, nodeId) => {
+      const nodeType = GATHERING_NODE_TYPES[node.nodeTypeId];
+      const avatar = new GatheringNodeAvatar(nodeType?.modelId ?? "", nodeType?.name ?? "", node.x, node.z);
+      avatar.group.userData.gatheringNodeId = nodeId;
+      avatar.setAvailable(node.available);
+      avatar.addTo(gameScene.scene);
+      gatheringNodes.set(nodeId, avatar);
+      gatheringNodeSchemaById.set(nodeId, node);
+
+      $(node).onChange(() => avatar.setAvailable(node.available));
+    });
+
     room.onLeave(() => {
       hud.textContent = "Disconnected from server";
     });
@@ -2902,8 +3542,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     if (localSessionId) {
       const { moveX, moveZ } = input.getMovement();
       if (moveX !== 0 || moveZ !== 0) {
-        let nextX = clamp(localPredicted.x + moveX * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
-        let nextZ = clamp(localPredicted.z + moveZ * PLAYER_SPEED * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        // Mirrors CombatEngine.tickPlayerMovement's effective-speed calc exactly - see that
+        // function's own comment for why prediction must match the server's math bit for bit.
+        const speed = localPlayerSchema?.mounted ? PLAYER_SPEED * MOUNT_SPEED_MULTIPLIER : PLAYER_SPEED;
+        let nextX = clamp(localPredicted.x + moveX * speed * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
+        let nextZ = clamp(localPredicted.z + moveZ * speed * dt, -MAP_HALF_EXTENT, MAP_HALF_EXTENT);
         // Mirrors CombatEngine.tickPlayerMovement's server-authoritative collision exactly (same
         // shared function/data) so prediction never drifts from the server and rubber-bands at
         // walls - STRUCTURES is skipped in a dungeon since it always holds the overworld's rows.
@@ -2936,6 +3579,16 @@ async function main(token: string, characterId: number, connectOverride?: Connec
         localPredicted.copy(localServerPosition);
       } else {
         localPredicted.lerp(localServerPosition, SERVER_RECONCILE_LERP);
+      }
+
+      // The NPC dialogue panel (quests/vendor/trainer sections all live inside it - see
+      // renderNpcDialogue) only ever opens while in range (openNpcDialogue's own check), but
+      // nothing closed it again if the player then walked away mid-conversation - every actual
+      // action inside it was already range-gated server-side regardless, this just keeps the UI
+      // honest about it too.
+      if (currentNpcDialogueId && !npcDialoguePanel.hidden) {
+        const npc = NPCS[currentNpcDialogueId];
+        if (npc && !isNearWorldPoint(npc.x, npc.z, NPC_INTERACT_RADIUS)) closeNpcDialogue();
       }
 
       const groundY = getTerrainHeight(localPredicted.x, localPredicted.z);
@@ -3018,6 +3671,9 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       const chargesEl = chargesEls[i];
       const slotEl = spellSlotEls[i];
       if (!cooldownEl || !spellId) continue;
+      // An item-overridden slot shows the item's own static state (see renderSpellSlotOverrides)
+      // instead of a spell cooldown sweep - skip the per-frame spell update entirely for it.
+      if (spellSlotOverrides[i]) continue;
 
       const now = performance.now();
       const active = activeCastsFor(spellId, now);

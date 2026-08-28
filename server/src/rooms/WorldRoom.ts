@@ -3,8 +3,10 @@ import {
   AcceptQuestMessage,
   ActionFailedMessage,
   ActionFailReason,
+  ALL_PROFESSIONS,
   BuyItemMessage,
   ChatMessage,
+  CraftRecipeMessage,
   DUNGEON_PARTY_SIZE,
   DUNGEON_ROOM_NAME,
   DungeonJoinListingMessage,
@@ -14,9 +16,14 @@ import {
   EnemySpawnZoneDef,
   EquipMessage,
   EQUIP_SLOTS,
+  ForgetProfessionMessage,
   FriendRemoveMessage,
   FriendRequestMessage,
   FriendRespondMessage,
+  GatherNodeMessage,
+  GATHER_INTERACT_RADIUS,
+  GATHERING_NODES,
+  GATHERING_NODE_TYPES,
   GuildCreateMessage,
   GuildInviteMessage,
   GuildKickMessage,
@@ -28,11 +35,13 @@ import {
   ITEM_IDS,
   ITEMS,
   InputMessage,
+  LearnProfessionMessage,
   LOOT_BAG_AGGREGATE_RADIUS,
   LOOT_BAG_DESPAWN_MS,
   LOOT_DROP_CHANCE,
   LOOT_PICKUP_RADIUS,
   LootTakeMessage,
+  MAX_LEARNED_PROFESSIONS,
   MAX_LEVEL,
   NPCS,
   NPC_INTERACT_RADIUS,
@@ -40,8 +49,10 @@ import {
   PARTY_XP_SHARE_RADIUS,
   PartyInviteMessage,
   PartyRespondMessage,
+  ProfessionId,
   QUESTS,
   RARITY_MULTIPLIER,
+  RECIPES,
   RefundTalentMessage,
   SetTimeOfDayMessage,
   SPAWN_POINTS,
@@ -57,6 +68,8 @@ import {
   TurnInQuestMessage,
   UnequipMessage,
   VENDOR_SELL_FRACTION,
+  UseItemMessage,
+  SwapInventorySlotsMessage,
   WAYPOINTS,
   WAYPOINT_INTERACT_RADIUS,
   WaypointTravelMessage,
@@ -79,7 +92,7 @@ import { getOnlineEntry, isOnline, notifyCharacter, registerOnline, SocialCapabl
 import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
 import { getEquippedItemId, setEquippedItemId } from "./equipment.js";
-import { DungeonListing, Enemy, FriendEntry, FriendRequestEntry, GuildInviteEntry, LootBag, Player, WorldState } from "./schema/WorldState.js";
+import { DungeonListing, Enemy, FriendEntry, FriendRequestEntry, GatheringNode, GuildInviteEntry, LootBag, Player, WorldState } from "./schema/WorldState.js";
 import { TradeManager } from "./trade.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
@@ -135,6 +148,15 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
       }
     }
 
+    for (const point of GATHERING_NODES) {
+      if (!GATHERING_NODE_TYPES[point.nodeTypeId]) continue; // admin deleted/renamed the type after this node was placed
+      const node = new GatheringNode();
+      node.nodeTypeId = point.nodeTypeId;
+      node.x = point.x;
+      node.z = point.z;
+      this.state.gatheringNodes.set(point.id, node);
+    }
+
     this.onMessage("input", (client, message: InputMessage) => this.combat.handleInput(client.sessionId, message));
     this.onMessage("cast", (client, message: CastMessage) => this.combat.handleCast(client, message));
     this.onMessage("loot_take", (client, message: LootTakeMessage) => this.handleLootTake(client, message));
@@ -163,6 +185,13 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     this.onMessage("trade_accept", (client) => this.trade.handleAccept(client));
     this.onMessage("trade_cancel", (client) => this.trade.handleCancel(client));
     this.onMessage("waypoint_travel", (client, message: WaypointTravelMessage) => this.handleWaypointTravel(client, message));
+    this.onMessage("learn_profession", (client, message: LearnProfessionMessage) => this.handleLearnProfession(client, message));
+    this.onMessage("forget_profession", (client, message: ForgetProfessionMessage) => this.handleForgetProfession(client, message));
+    this.onMessage("gather_node", (client, message: GatherNodeMessage) => this.handleGatherNode(client, message));
+    this.onMessage("craft_recipe", (client, message: CraftRecipeMessage) => this.handleCraftRecipe(client, message));
+    this.onMessage("use_item", (client, message: UseItemMessage) => this.handleUseItem(client, message));
+    this.onMessage("swap_inventory_slots", (client, message: SwapInventorySlotsMessage) => this.handleSwapInventorySlots(client, message));
+    this.onMessage("toggle_mount", (client) => this.handleToggleMount(client));
     this.onMessage("friend_request", (client, message: FriendRequestMessage) => this.handleFriendRequest(client, message));
     this.onMessage("friend_respond", (client, message: FriendRespondMessage) => this.handleFriendRespond(client, message));
     this.onMessage("friend_remove", (client, message: FriendRemoveMessage) => this.handleFriendRemove(client, message));
@@ -230,6 +259,19 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     for (const [questId, completedAt] of Object.entries(savedQuestCompleted)) {
       player.questCompleted.set(questId, completedAt);
     }
+    const savedProfessionXp = (character.profession_xp as Record<string, number>) ?? {};
+    for (const [professionId, xp] of Object.entries(savedProfessionXp)) {
+      player.professionXp.set(professionId, xp);
+    }
+    const savedProfessionLevel = (character.profession_level as Record<string, number>) ?? {};
+    for (const [professionId, level] of Object.entries(savedProfessionLevel)) {
+      player.professionLevel.set(professionId, level);
+    }
+    const savedMaterials = (character.materials as Record<string, number>) ?? {};
+    for (const [itemId, count] of Object.entries(savedMaterials)) {
+      player.materials.set(itemId, count);
+    }
+    player.hasMount = character.has_mount ?? false; // mounted itself never persists - always starts dismounted
 
     const items = await listCharacterItems(character.id);
     for (const row of items) {
@@ -348,6 +390,10 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
           talentRanks: Object.fromEntries(player.talentRanks),
           questProgress: Object.fromEntries(player.questProgress),
           questCompleted: Object.fromEntries(player.questCompleted),
+          professionXp: Object.fromEntries(player.professionXp),
+          professionLevel: Object.fromEntries(player.professionLevel),
+          materials: Object.fromEntries(player.materials),
+          hasMount: player.hasMount,
         });
       } catch (err) {
         console.error(`[WorldRoom] failed to save character ${characterId}:`, err);
@@ -1006,7 +1052,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     if (!player) return;
 
     const item = ITEMS[decodeItemToken(message.itemId).itemId];
-    if (!item) return;
+    if (!item || !item.slot) return; // materials have no equip slot - not equippable
 
     const index = player.inventory.indexOf(message.itemId);
     if (index === -1) return;
@@ -1072,6 +1118,14 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     this.combat.recomputeMaxHp(player);
   }
 
+  // Materials share the same 20-slot pool as equipment: one map key = one slot, regardless of
+  // stack size, so gaining more of a material type you already carry never needs a new slot -
+  // only a brand-new material type does (mirrors how a new equipment item always needs one).
+  private hasInventorySpaceFor(player: Player, materialItemId: string): boolean {
+    if (player.materials.has(materialItemId)) return true;
+    return player.inventory.length + player.materials.size < INVENTORY_SIZE;
+  }
+
   private isNearNpc(player: Player, npcId: string): boolean {
     const npc = NPCS[npcId];
     if (!npc) return false;
@@ -1094,6 +1148,145 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     player.x = target.x;
     player.y = 0;
     player.z = target.z;
+  }
+
+  private handleLearnProfession(client: Client, message: LearnProfessionMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+    if (!ALL_PROFESSIONS.includes(message.professionId)) return;
+
+    const npc = NPCS[message.npcId];
+    if (!npc || npc.teachesProfessionId !== message.professionId) return this.rejectAction(client, "not_available");
+    if (!this.isNearNpc(player, message.npcId)) return this.rejectAction(client, "too_far");
+
+    if (player.professionXp.has(message.professionId)) return this.rejectAction(client, "profession_already_learned");
+    if (player.professionXp.size >= MAX_LEARNED_PROFESSIONS) return this.rejectAction(client, "profession_slots_full");
+
+    player.professionXp.set(message.professionId, 0);
+    player.professionLevel.set(message.professionId, 1);
+  }
+
+  // Free respec - no cost/confirmation. Materials already gathered/crafted stay in the bag either
+  // way (only the xp/level track resets), so there's nothing destructive to gate here.
+  private handleForgetProfession(client: Client, message: ForgetProfessionMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    player.professionXp.delete(message.professionId);
+    player.professionLevel.delete(message.professionId);
+  }
+
+  private handleGatherNode(client: Client, message: GatherNodeMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) return;
+
+    const node = this.state.gatheringNodes.get(message.nodeId);
+    if (!node) return;
+
+    const nodeType = GATHERING_NODE_TYPES[node.nodeTypeId];
+    if (!nodeType) return; // content deleted/renamed after this node was placed
+
+    if (Math.hypot(player.x - node.x, player.z - node.z) > GATHER_INTERACT_RADIUS) return this.rejectAction(client, "too_far");
+    if (!node.available) return this.rejectAction(client, "not_available");
+    if (!player.professionXp.has(nodeType.profession)) return this.rejectAction(client, "profession_not_learned");
+    if ((player.professionLevel.get(nodeType.profession) ?? 0) < nodeType.requiredLevel) return this.rejectAction(client, "level_too_low");
+    if (!this.hasInventorySpaceFor(player, nodeType.outputItemId)) return this.rejectAction(client, "inventory_full");
+
+    node.available = false;
+    player.materials.set(nodeType.outputItemId, (player.materials.get(nodeType.outputItemId) ?? 0) + nodeType.outputQuantity);
+    this.combat.grantProfessionXp(player, nodeType.profession, nodeType.xpAward);
+
+    this.clock.setTimeout(() => {
+      node.available = true;
+    }, nodeType.respawnMs);
+  }
+
+  private handleCraftRecipe(client: Client, message: CraftRecipeMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const recipe = RECIPES[message.recipeId];
+    if (!recipe) return;
+    const outputItem = ITEMS[recipe.outputItemId];
+    if (!outputItem) return;
+
+    if (!player.professionXp.has(recipe.profession)) return this.rejectAction(client, "profession_not_learned");
+    if ((player.professionLevel.get(recipe.profession) ?? 0) < recipe.requiredLevel) return this.rejectAction(client, "level_too_low");
+
+    for (const ingredient of recipe.ingredients) {
+      if ((player.materials.get(ingredient.itemId) ?? 0) < ingredient.quantity) return this.rejectAction(client, "insufficient_materials");
+    }
+    // Checked before consuming anything, so a full inventory never eats the ingredients on a
+    // failed craft.
+    if (outputItem.category === "equipment") {
+      if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
+    } else if (!this.hasInventorySpaceFor(player, recipe.outputItemId)) {
+      return this.rejectAction(client, "inventory_full");
+    }
+
+    for (const ingredient of recipe.ingredients) {
+      const remaining = (player.materials.get(ingredient.itemId) ?? 0) - ingredient.quantity;
+      if (remaining > 0) player.materials.set(ingredient.itemId, remaining);
+      else player.materials.delete(ingredient.itemId);
+    }
+
+    if (outputItem.category === "equipment") {
+      player.inventory.push(encodeItemToken(recipe.outputItemId, "common"));
+      this.persistItems(client.sessionId);
+    } else {
+      player.materials.set(recipe.outputItemId, (player.materials.get(recipe.outputItemId) ?? 0) + recipe.outputQuantity);
+    }
+
+    this.combat.grantProfessionXp(player, recipe.profession, recipe.xpAward);
+  }
+
+  private handleUseItem(client: Client, message: UseItemMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) return;
+
+    const item = ITEMS[message.itemId];
+    if (!item || item.category !== "material" || !item.useEffects?.length) return this.rejectAction(client, "not_usable");
+
+    const count = player.materials.get(message.itemId) ?? 0;
+    if (count < 1) return this.rejectAction(client, "not_available");
+
+    if (count > 1) player.materials.set(message.itemId, count - 1);
+    else player.materials.delete(message.itemId);
+
+    this.combat.consumeItem(player, client.sessionId, item.useEffects);
+  }
+
+  // Reorders the bag by swapping two equip-item positions - only equipment has a stable index to
+  // swap (the array is packed/no gaps); materials are a stack-count map with no positional
+  // concept, so they aren't part of this.
+  private handleSwapInventorySlots(client: Client, message: SwapInventorySlotsMessage) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const { fromIndex, toIndex } = message;
+    if (fromIndex === toIndex) return;
+    if (fromIndex < 0 || toIndex < 0 || fromIndex >= player.inventory.length || toIndex >= player.inventory.length) return;
+
+    // Rebuilt via clear+push rather than two splice-replace calls - back-to-back splices at
+    // overlapping indices didn't produce a real swap (both slots ended up holding the same
+    // token), so this computes the final order plainly first and only then replays it into the
+    // schema array, avoiding any ambiguity about how ArraySchema's own diffing sees intermediate
+    // states.
+    const items = [...player.inventory];
+    const tmp = items[fromIndex];
+    items[fromIndex] = items[toIndex];
+    items[toIndex] = tmp;
+    player.inventory.clear();
+    for (const item of items) player.inventory.push(item);
+    this.persistItems(client.sessionId);
+  }
+
+  private handleToggleMount(client: Client) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+    if (!player.hasMount) return this.rejectAction(client, "no_mount");
+
+    player.mounted = !player.mounted;
   }
 
   private handleAcceptQuest(client: Client, message: AcceptQuestMessage) {
@@ -1127,6 +1320,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     if (quest.rewardItemId) {
       player.inventory.push(encodeItemToken(quest.rewardItemId, "common"));
       this.persistItems(client.sessionId);
+    }
+
+    if (quest.rewardGrantsMount) {
+      player.hasMount = true;
+      this.saveCharacter(client.sessionId);
     }
   }
 

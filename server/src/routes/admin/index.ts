@@ -16,6 +16,9 @@ import { structuresRouter } from "./structures.js";
 import { waypointsRouter } from "./waypoints.js";
 import { furnitureRouter } from "./furniture.js";
 import { hexTilesRouter } from "./hexTiles.js";
+import { recipesRouter } from "./recipes.js";
+import { gatheringNodeTypesRouter } from "./gatheringNodeTypes.js";
+import { gatheringNodesRouter } from "./gatheringNodes.js";
 
 export const adminRouter = Router();
 
@@ -34,6 +37,9 @@ adminRouter.use("/structures", structuresRouter);
 adminRouter.use("/waypoints", waypointsRouter);
 adminRouter.use("/furniture", furnitureRouter);
 adminRouter.use("/hex-tiles", hexTilesRouter);
+adminRouter.use("/recipes", recipesRouter);
+adminRouter.use("/gathering-node-types", gatheringNodeTypesRouter);
+adminRouter.use("/gathering-nodes", gatheringNodesRouter);
 
 // Manual escape hatch - every CRUD mutation already reloads on its own, but this is useful
 // after a direct DB edit or for the admin UI to force-refresh the live server's view of content.

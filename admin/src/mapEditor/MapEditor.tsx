@@ -28,7 +28,15 @@ import { loadModelGeometry } from "./modelLoader";
 import { buildHexTerrainPreview } from "./hexTerrainPreview";
 
 type RowData = Record<string, unknown>;
-type SelectableType = "structures" | "npcs" | "enemy-spawns" | "enemy-spawn-zones" | "waypoints" | "furniture" | "hex-tiles";
+type SelectableType =
+  | "structures"
+  | "npcs"
+  | "enemy-spawns"
+  | "enemy-spawn-zones"
+  | "waypoints"
+  | "furniture"
+  | "hex-tiles"
+  | "gathering-nodes";
 type GizmoMode = "translate" | "rotate" | "scale";
 
 interface Selected {
@@ -46,7 +54,7 @@ type ActiveTool =
   | { mode: "structure"; structureModelId: string }
   | { mode: "lamp"; lampModelId: string }
   | { mode: "wallKind"; wallKind: (typeof STRUCTURE_KINDS)[number] }
-  | { mode: "marker"; markerKind: "npc" | "enemy-spawn" | "waypoint" }
+  | { mode: "marker"; markerKind: "npc" | "enemy-spawn" | "waypoint" | "gathering-node" }
   | { mode: "zone" }
   | { mode: "elevation"; level: number }
   | { mode: "ramp" }
@@ -249,10 +257,11 @@ const WALL_PALETTE: { wallKind: (typeof STRUCTURE_KINDS)[number]; label: string 
 // NPCs/enemy spawns/waypoints are just a position - no footprint, no visual variety of their own -
 // so this palette mirrors their in-scene marker balls (buildMarker/NPC_MARKER_COLOR etc.) with a
 // round swatch instead of a thumbnail, same reasoning WALL_PALETTE uses flat swatches over renders.
-const MARKER_PALETTE: { markerKind: "npc" | "enemy-spawn" | "waypoint"; label: string; color: string }[] = [
+const MARKER_PALETTE: { markerKind: "npc" | "enemy-spawn" | "waypoint" | "gathering-node"; label: string; color: string }[] = [
   { markerKind: "npc", label: "NPC", color: "#f5d76e" },
   { markerKind: "enemy-spawn", label: "Enemy Spawn", color: "#e05a4e" },
   { markerKind: "waypoint", label: "Waypoint", color: "#f5c451" },
+  { markerKind: "gathering-node", label: "Gathering Node", color: "#7bc47f" },
 ];
 
 // A zone is placed with these defaults and then configured in the inspector (pick its enemy type
@@ -303,6 +312,7 @@ const LAMP_PALETTE: { modelId: string; label: string; thumbnail: string; width: 
 const NPC_MARKER_COLOR = 0xf5d76e;
 const SPAWN_MARKER_COLOR = 0xe05a4e;
 const WAYPOINT_MARKER_COLOR = 0xf5c451;
+const GATHERING_NODE_MARKER_COLOR = 0x7bc47f;
 const GRID_COLOR = 0x4a5578;
 const GRID_COLOR_DARK = 0x3a4260;
 
@@ -522,6 +532,8 @@ export function MapEditor() {
   const [furniture, setFurniture] = useState<RowData[]>([]);
   const [hexTiles, setHexTiles] = useState<RowData[]>([]);
   const [enemyTypes, setEnemyTypes] = useState<RowData[]>([]);
+  const [gatheringNodes, setGatheringNodes] = useState<RowData[]>([]);
+  const [gatheringNodeTypes, setGatheringNodeTypes] = useState<RowData[]>([]);
   const [selected, setSelected] = useState<Selected | null>(null);
   const [gizmoMode, setGizmoMode] = useState<GizmoMode>("translate");
   const [activeTool, setActiveTool] = useState<ActiveTool>(null);
@@ -556,6 +568,7 @@ export function MapEditor() {
       if (active) setMapId(String(active.id));
     });
     listEntities<RowData>("enemy-types").then((res) => setEnemyTypes(res.items));
+    listEntities<RowData>("gathering-node-types").then((res) => setGatheringNodeTypes(res.items));
   }, []);
 
   const reloadContent = useCallback(() => {
@@ -567,6 +580,7 @@ export function MapEditor() {
     listEntities<RowData>("waypoints").then((res) => setWaypoints(res.items.filter((w) => w.map_id === mapId)));
     listEntities<RowData>("furniture").then((res) => setFurniture(res.items.filter((f) => f.map_id === mapId)));
     listEntities<RowData>("hex-tiles").then((res) => setHexTiles(res.items.filter((h) => h.map_id === mapId)));
+    listEntities<RowData>("gathering-nodes").then((res) => setGatheringNodes(res.items.filter((n) => n.map_id === mapId)));
   }, [mapId]);
 
   useEffect(() => {
@@ -716,6 +730,7 @@ export function MapEditor() {
   const waypointsRef = useRef<RowData[]>([]);
   const furnitureRef = useRef<RowData[]>([]);
   const hexTilesRef = useRef<RowData[]>([]);
+  const gatheringNodesRef = useRef<RowData[]>([]);
   // Session-local overlay of hex-tile row ids not yet confirmed by a reload - see its one use
   // site, the "elevation" tool branch in placeAtRef, for why this exists (fixes a real race a
   // rapid click sequence on the same cell can hit against hexTilesRef alone: a second click
@@ -741,6 +756,7 @@ export function MapEditor() {
   waypointsRef.current = waypoints;
   furnitureRef.current = furniture;
   hexTilesRef.current = hexTiles;
+  gatheringNodesRef.current = gatheringNodes;
 
   function refsByType(type: SelectableType): RowData[] {
     switch (type) {
@@ -758,6 +774,8 @@ export function MapEditor() {
         return furnitureRef.current;
       case "hex-tiles":
         return hexTilesRef.current;
+      case "gathering-nodes":
+        return gatheringNodesRef.current;
     }
   }
 
@@ -1037,11 +1055,24 @@ export function MapEditor() {
           reloadContent();
           setSelected({ type: "enemy-spawns", row });
         });
-      } else {
+      } else if (tool.markerKind === "waypoint") {
         const row: RowData = { id: `waypoint_${Date.now()}`, name: "New Waypoint", map_id: mapId, x: round(x), z: round(z) };
         createEntity("waypoints", row).then(() => {
           reloadContent();
           setSelected({ type: "waypoints", row });
+        });
+      } else {
+        if (gatheringNodeTypes.length === 0) return;
+        const row: RowData = {
+          id: `gathernode_${Date.now()}`,
+          map_id: mapId,
+          node_type_id: String(gatheringNodeTypes[0].id),
+          x: round(x),
+          z: round(z),
+        };
+        createEntity("gathering-nodes", row).then(() => {
+          reloadContent();
+          setSelected({ type: "gathering-nodes", row });
         });
       }
       return;
@@ -1201,6 +1232,15 @@ export function MapEditor() {
       three.content.add(marker);
     }
 
+    for (const row of gatheringNodes) {
+      const marker = buildMarker(GATHERING_NODE_MARKER_COLOR);
+      const x = Number(row.x);
+      const z = Number(row.z);
+      marker.position.set(x, terrainY(x, z), z);
+      marker.userData = { entityType: "gathering-nodes", entityId: String(row.id) };
+      three.content.add(marker);
+    }
+
     for (const row of furniture) {
       const group = new THREE.Group();
       const x = Number(row.x);
@@ -1232,7 +1272,9 @@ export function MapEditor() {
                   ? waypoints
                   : type === "hex-tiles"
                     ? hexTiles
-                    : furniture;
+                    : type === "gathering-nodes"
+                      ? gatheringNodes
+                      : furniture;
       const freshRow = list.find((r) => String(r.id) === String(row.id));
       if (freshRow) {
         const match = three.content.children.find(
@@ -1245,7 +1287,7 @@ export function MapEditor() {
         setSelected(null);
       }
     }
-  }, [structures, npcs, spawns, zones, waypoints, furniture, hexTiles, activeMap]);
+  }, [structures, npcs, spawns, zones, waypoints, furniture, hexTiles, gatheringNodes, activeMap]);
 
   // --- Attach the gizmo to the current selection + set its mode/axis constraints ---
   // (Separate from the scene-sync effect below: that one only re-runs when the fetched content
@@ -1436,7 +1478,7 @@ export function MapEditor() {
     setActiveTool((prev) => (prev?.mode === "wallKind" && prev.wallKind === wallKind ? null : { mode: "wallKind", wallKind }));
   }
 
-  function toggleMarkerTool(markerKind: "npc" | "enemy-spawn" | "waypoint") {
+  function toggleMarkerTool(markerKind: "npc" | "enemy-spawn" | "waypoint" | "gathering-node") {
     setSelected(null);
     setActiveTool((prev) => (prev?.mode === "marker" && prev.markerKind === markerKind ? null : { mode: "marker", markerKind }));
   }
@@ -1528,8 +1570,16 @@ export function MapEditor() {
     swatchColor: item.color,
     swatchClassName: "palette-swatch palette-swatch-circle",
     active: activeTool?.mode === "marker" && activeTool.markerKind === item.markerKind,
-    disabled: !mapId || (item.markerKind === "enemy-spawn" && enemyTypes.length === 0),
-    title: item.markerKind === "enemy-spawn" && enemyTypes.length === 0 ? "No enemy types defined yet" : undefined,
+    disabled:
+      !mapId ||
+      (item.markerKind === "enemy-spawn" && enemyTypes.length === 0) ||
+      (item.markerKind === "gathering-node" && gatheringNodeTypes.length === 0),
+    title:
+      item.markerKind === "enemy-spawn" && enemyTypes.length === 0
+        ? "No enemy types defined yet"
+        : item.markerKind === "gathering-node" && gatheringNodeTypes.length === 0
+          ? "No gathering node types defined yet"
+          : undefined,
     onClick: () => toggleMarkerTool(item.markerKind),
   }));
 

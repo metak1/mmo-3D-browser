@@ -22,7 +22,10 @@ function pinToTopLeft(panel: HTMLElement, left: number, top: number) {
   panel.style.transform = "none";
 }
 
-export function makeDraggable(panel: HTMLElement, key: string) {
+// `handle` restricts what mousedown starts a drag (defaults to the whole panel). Inventory passes
+// its title bar so mousedown on an item slot starts native HTML5 drag-and-drop instead of moving
+// the panel - the two gestures were fighting over the same mousedown on the panel body otherwise.
+export function makeDraggable(panel: HTMLElement, key: string, handle: HTMLElement = panel) {
   const lockBtn = panel.querySelector<HTMLElement>("[data-lock]");
   const lockKey = `${STORAGE_PREFIX}${key}:locked`;
   const posKey = `${STORAGE_PREFIX}${key}:pos`;
@@ -58,7 +61,7 @@ export function makeDraggable(panel: HTMLElement, key: string) {
   let startLeft = 0;
   let startTop = 0;
 
-  panel.addEventListener("mousedown", (event) => {
+  handle.addEventListener("mousedown", (event) => {
     if (locked) return;
     if ((event.target as HTMLElement).closest("[data-lock], [data-no-drag]")) return;
 

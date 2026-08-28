@@ -21,6 +21,10 @@ export interface CharacterRow {
   talent_ranks: unknown;
   quest_progress: unknown;
   quest_completed: unknown;
+  profession_xp: unknown;
+  profession_level: unknown;
+  materials: unknown;
+  has_mount: boolean;
   created_at: Date;
 }
 
@@ -74,13 +78,18 @@ export async function saveCharacterProgress(
     talentRanks: Record<string, number>;
     questProgress: Record<string, number>;
     questCompleted: Record<string, number>;
+    professionXp: Record<string, number>;
+    professionLevel: Record<string, number>;
+    materials: Record<string, number>;
+    hasMount: boolean;
   },
 ): Promise<void> {
   await pool.query(
     `UPDATE characters SET
        level = $1, xp = $2, main_stat = $3, vitality = $4, luck = $5, armor = $6, gold = $7,
-       talent_points = $8, talent_ranks = $9, quest_progress = $10, quest_completed = $11
-     WHERE id = $12`,
+       talent_points = $8, talent_ranks = $9, quest_progress = $10, quest_completed = $11,
+       profession_xp = $12, profession_level = $13, materials = $14, has_mount = $15
+     WHERE id = $16`,
     [
       progress.level,
       progress.xp,
@@ -93,6 +102,10 @@ export async function saveCharacterProgress(
       JSON.stringify(progress.talentRanks),
       JSON.stringify(progress.questProgress),
       JSON.stringify(progress.questCompleted),
+      JSON.stringify(progress.professionXp),
+      JSON.stringify(progress.professionLevel),
+      JSON.stringify(progress.materials),
+      progress.hasMount,
       characterId,
     ],
   );

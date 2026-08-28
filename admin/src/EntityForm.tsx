@@ -3,6 +3,7 @@ import { EffectDef } from "@mmo/shared";
 import { EntitySchema, FieldSchema } from "./entities";
 import { listEntities } from "./api";
 import { EffectListEditor } from "./EffectListEditor";
+import { IngredientListEditor } from "./IngredientListEditor";
 
 type RowData = Record<string, unknown>;
 
@@ -207,6 +208,14 @@ function renderField(
         <EffectListEditor
           value={Array.isArray(value) ? (value as EffectDef[]) : []}
           onChange={(next) => setValue(next.length > 0 ? next : undefined)}
+        />
+      );
+    case "itemQuantityList":
+      return (
+        <IngredientListEditor
+          value={Array.isArray(value) ? (value as { itemId: string; quantity: number }[]) : []}
+          onChange={(next) => setValue(next)}
+          options={referenceOptions[field.referenceEntity!] ?? []}
         />
       );
   }

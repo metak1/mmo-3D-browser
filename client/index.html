@@ -388,6 +388,65 @@
       #inventory-panel[hidden] {
         display: none;
       }
+      #professions-panel {
+        top: 560px;
+        left: 250px;
+        width: 260px;
+      }
+      #professions-panel[hidden] {
+        display: none;
+      }
+      .profession-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        padding-bottom: 8px;
+        margin-bottom: 6px;
+        border-bottom: 1px solid rgba(74, 85, 120, 0.6);
+      }
+      .profession-row-main {
+        flex: 1;
+        min-width: 0;
+      }
+      .profession-row-main .bar {
+        width: 100%;
+      }
+      .profession-row .overlay-button {
+        flex-shrink: 0;
+        padding: 4px 8px;
+        font-size: 11px;
+      }
+      .panel-empty-state {
+        grid-column: 1 / -1;
+        margin-top: 6px;
+        font-size: 11px;
+        color: #a7b0c8;
+        text-align: center;
+        line-height: 1.4;
+      }
+      .recipe-row {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
+        cursor: default;
+      }
+      .recipe-row-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .recipe-ingredients {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        font-size: 10px;
+        color: #a7b0c8;
+      }
+      .recipe-ingredients .insufficient {
+        color: #e0503c;
+      }
       .item-list {
         display: flex;
         flex-direction: column;
@@ -444,6 +503,23 @@
         border-color: #c9a63c;
         background: rgba(40, 36, 20, 0.5);
       }
+      .item-slot[draggable="true"] {
+        cursor: grab;
+      }
+      .item-slot.drag-over {
+        border-color: #c9a63c;
+        box-shadow: 0 0 6px rgba(201, 166, 60, 0.7);
+      }
+      .item-slot-stack {
+        position: absolute;
+        bottom: 2px;
+        right: 3px;
+        font-size: 10px;
+        font-weight: 600;
+        color: #f0e6c8;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+        pointer-events: none;
+      }
       .equip-slots {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -469,6 +545,11 @@
       .item-grid {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
+        /* The Inventory panel mixes plain `.item-slot` cells (equipment/empty, square) with
+           `.shop-slot-wrap` cells (materials, icon + caption - taller). Without this, grid's
+           default row-stretch forces the shorter cells to stretch to match the tallest one in
+           their row, squashing their aspect-ratio square into a rectangle. */
+        align-items: start;
         gap: 5px;
         margin-top: 6px;
         max-height: 240px;
@@ -719,6 +800,13 @@
       .talent-desc {
         font-size: 10px;
         color: #a7b0c8;
+      }
+      .quest-reward {
+        display: block;
+        margin-top: 2px;
+        font-size: 10px;
+        font-weight: 600;
+        color: #4fd166;
       }
       .quest-objective {
         display: block;
@@ -1195,6 +1283,37 @@
         height: 0%;
         background: rgba(0, 0, 0, 0.65);
       }
+      .item-slot-hotbar.empty {
+        opacity: 0.4;
+      }
+      /* .unusable/.drag-over apply to spell slots too - dropping an item on slots 1-3 overrides
+         the class spell there (see spellSlotOverrides), so they need the same depleted/drop-hover
+         treatment slots 4-6 already had. */
+      .spell-slot.unusable .name {
+        color: #6b7492;
+      }
+      .mount-toggle {
+        cursor: pointer;
+      }
+      .mount-toggle .mount-icon {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -60%);
+        font-size: 22px;
+      }
+      .mount-toggle:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .mount-toggle.mounted {
+        border-color: #4fd166;
+        box-shadow: 0 0 6px rgba(79, 209, 102, 0.6);
+      }
+      .spell-slot.drag-over {
+        border-color: #c9a63c;
+        box-shadow: 0 0 6px rgba(201, 166, 60, 0.7);
+      }
       .spell-slot.too-far {
         border-color: #e0503c;
         box-shadow: 0 0 6px rgba(224, 80, 60, 0.55);
@@ -1485,6 +1604,9 @@
       <div class="dungeon-section-label" data-npc-dialogue-sell-label hidden>Sell</div>
       <div class="item-grid" id="npc-dialogue-sell-list" data-no-drag></div>
 
+      <div class="dungeon-section-label" data-npc-dialogue-trainer-label hidden>Training</div>
+      <div class="talent-list" id="npc-dialogue-trainer" data-no-drag></div>
+
       <button type="button" class="overlay-button" data-npc-dialogue-close style="margin-top: 8px; width: 100%">
         Close
       </button>
@@ -1494,6 +1616,14 @@
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
       <div class="unit-name">Quest Log</div>
       <div class="item-list" id="quest-log-list"></div>
+    </div>
+
+    <div id="professions-panel" class="unit-panel" hidden>
+      <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
+      <div class="unit-name">Professions</div>
+      <div class="panel-meta" data-profession-summary></div>
+      <div class="chat-tabs" data-no-drag id="profession-tabs"></div>
+      <div id="profession-tab-content"></div>
     </div>
 
     <div id="item-tooltip" class="item-tooltip" hidden>
@@ -1684,7 +1814,7 @@
 
     <div id="spell-panel" class="unit-panel">
       <button class="panel-lock" data-lock aria-label="Lock panel">🔓</button>
-      <div class="unit-name">Spells</div>
+      <div class="unit-name">Actions</div>
       <div id="hotbar">
         <div class="spell-slot" data-slot="0">
           <span class="key">1</span>
@@ -1704,6 +1834,23 @@
           <div class="cooldown" data-cooldown="2"></div>
           <span class="name" data-name="2"></span>
         </div>
+        <div class="spell-slot item-slot-hotbar" data-item-slot="0">
+          <span class="key">4</span>
+          <span class="name" data-item-name="0">—</span>
+        </div>
+        <div class="spell-slot item-slot-hotbar" data-item-slot="1">
+          <span class="key">5</span>
+          <span class="name" data-item-name="1">—</span>
+        </div>
+        <div class="spell-slot item-slot-hotbar" data-item-slot="2">
+          <span class="key">6</span>
+          <span class="name" data-item-name="2">—</span>
+        </div>
+        <button type="button" class="spell-slot mount-toggle" data-mount-toggle disabled>
+          <span class="key">H</span>
+          <span class="mount-icon">🐴</span>
+          <span class="name" data-mount-name>Mount</span>
+        </button>
       </div>
     </div>
 

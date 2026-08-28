@@ -9,11 +9,14 @@ import {
   EnemyStats,
   EnemyTypeDef,
   GameMapDef,
+  GatheringNodeDef,
+  GatheringNodeTypeDef,
   ItemDef,
   loadGameContent,
   NpcDef,
   PlayerStats,
   QuestDef,
+  RecipeDef,
   SpellDef,
   StructureDef,
   TalentDef,
@@ -56,11 +59,44 @@ interface SpellRow {
 interface ItemRow {
   id: string;
   name: string;
-  slot: string;
+  category: string;
+  slot: string | null;
   bonuses: unknown;
   icon: string;
   description: string;
   base_price: number;
+  use_effects: EffectDef[] | null;
+}
+
+interface RecipeRow {
+  id: string;
+  profession: string;
+  name: string;
+  required_level: number;
+  ingredients: unknown;
+  output_item_id: string;
+  output_quantity: number;
+  xp_award: number;
+}
+
+interface GatheringNodeTypeRow {
+  id: string;
+  profession: string;
+  name: string;
+  model_id: string;
+  output_item_id: string;
+  output_quantity: number;
+  xp_award: number;
+  respawn_ms: number;
+  required_level: number;
+}
+
+interface GatheringNodeRow {
+  id: string;
+  map_id: string;
+  node_type_id: string;
+  x: number;
+  z: number;
 }
 
 interface TalentRow {
@@ -92,6 +128,7 @@ interface NpcRow {
   z: number;
   map_id: string;
   y_offset: number;
+  teaches_profession_id: string | null;
 }
 
 interface NpcVendorItemRow {
@@ -108,6 +145,7 @@ interface QuestRow {
   objective_count: number;
   reward_xp: number;
   reward_item_id: string | null;
+  reward_grants_mount: boolean;
 }
 
 interface GameMapRow {
@@ -226,6 +264,9 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     waypointRows,
     furnitureRows,
     hexTileRows,
+    recipeRows,
+    gatheringNodeTypeRows,
+    gatheringNodeRows,
   ] = await Promise.all([
     pool.query<GameClassRow>("SELECT * FROM game_classes").then((r) => r.rows),
     pool.query<SpellRow>("SELECT * FROM spells").then((r) => r.rows),
@@ -244,6 +285,9 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     pool.query<WaypointRow>("SELECT * FROM waypoints").then((r) => r.rows),
     pool.query<FurnitureRow>("SELECT * FROM furniture").then((r) => r.rows),
     pool.query<HexTileRow>("SELECT * FROM hex_tiles").then((r) => r.rows),
+    pool.query<RecipeRow>("SELECT * FROM recipes").then((r) => r.rows),
+    pool.query<GatheringNodeTypeRow>("SELECT * FROM gathering_node_types").then((r) => r.rows),
+    pool.query<GatheringNodeRow>("SELECT * FROM gathering_nodes").then((r) => r.rows),
   ]);
 
   const vendorItemIdsByNpc = new Map<string, string[]>();
@@ -287,11 +331,13 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
   const items: ItemDef[] = itemRows.map((i) => ({
     id: i.id,
     name: i.name,
-    slot: i.slot as ItemDef["slot"],
+    category: i.category as ItemDef["category"],
+    slot: nullToUndefined(i.slot) as ItemDef["slot"],
     bonuses: i.bonuses as Partial<PlayerStats>,
     icon: i.icon,
     description: i.description,
     basePrice: i.base_price,
+    useEffects: nullToUndefined(i.use_effects),
   }));
 
   const talents: TalentDef[] = talentRows.map((t) => ({
@@ -324,6 +370,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     yOffset: n.y_offset,
     mapId: n.map_id,
     vendorItemIds: vendorItemIdsByNpc.get(n.id),
+    teachesProfessionId: nullToUndefined(n.teaches_profession_id) as NpcDef["teachesProfessionId"],
   }));
 
   const quests: QuestDef[] = questRows.map((q) => ({
@@ -335,6 +382,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     objectiveCount: q.objective_count,
     rewardXp: q.reward_xp,
     rewardItemId: nullToUndefined(q.reward_item_id),
+    rewardGrantsMount: q.reward_grants_mount,
   }));
 
   const maps: GameMapDef[] = mapRows.map((m) => ({
@@ -430,6 +478,37 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     rampRotation: nullToUndefined(h.ramp_rotation),
   }));
 
+  const recipes: RecipeDef[] = recipeRows.map((r) => ({
+    id: r.id,
+    profession: r.profession as RecipeDef["profession"],
+    name: r.name,
+    requiredLevel: r.required_level,
+    ingredients: r.ingredients as RecipeDef["ingredients"],
+    outputItemId: r.output_item_id,
+    outputQuantity: r.output_quantity,
+    xpAward: r.xp_award,
+  }));
+
+  const gatheringNodeTypes: GatheringNodeTypeDef[] = gatheringNodeTypeRows.map((t) => ({
+    id: t.id,
+    profession: t.profession as GatheringNodeTypeDef["profession"],
+    name: t.name,
+    modelId: t.model_id,
+    outputItemId: t.output_item_id,
+    outputQuantity: t.output_quantity,
+    xpAward: t.xp_award,
+    respawnMs: t.respawn_ms,
+    requiredLevel: t.required_level,
+  }));
+
+  const gatheringNodes: GatheringNodeDef[] = gatheringNodeRows.map((n) => ({
+    id: n.id,
+    mapId: n.map_id,
+    nodeTypeId: n.node_type_id,
+    x: n.x,
+    z: n.z,
+  }));
+
   return {
     classes,
     spells,
@@ -446,6 +525,9 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     waypoints,
     furniture,
     hexTiles,
+    recipes,
+    gatheringNodeTypes,
+    gatheringNodes,
   };
 }
 

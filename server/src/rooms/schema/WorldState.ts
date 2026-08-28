@@ -90,6 +90,15 @@ export class Player extends Schema {
   @type({ map: "number" }) questProgress = new MapSchema<number>(); // questId -> kill count
   @type({ map: "number" }) questCompleted = new MapSchema<number>(); // questId -> completedAt (epoch ms)
 
+  // Professions (see shared's ProfessionId/MAX_LEARNED_PROFESSIONS) - presence of a key in
+  // professionXp IS "learned" (same convention as talentRanks/questProgress above), capped at
+  // MAX_LEARNED_PROFESSIONS entries server-side (WorldRoom.handleLearnProfession).
+  @type({ map: "number" }) professionXp = new MapSchema<number>(); // professionId -> xp
+  @type({ map: "number" }) professionLevel = new MapSchema<number>(); // professionId -> level (only set once learned)
+  // Materials bag - separate from `inventory` above (which is equip-slot items only, rarity-
+  // tagged, INVENTORY_SIZE-capped). itemId -> stack count, uncapped, no rarity.
+  @type({ map: "number" }) materials = new MapSchema<number>();
+
   // partyId is the session id of whichever player anchored the group (first inviter);
   // two players are grouped iff both have the same non-empty partyId - no separate Party object.
   @type("string") partyId = "";
@@ -103,6 +112,12 @@ export class Player extends Schema {
   @type("string") guildName = "";
   @type("string") guildRole = ""; // "leader" | "member" | "" when guildId is 0
   @type([GuildInviteEntry]) pendingGuildInvites = new ArraySchema<GuildInviteEntry>();
+
+  // hasMount is the permanent unlock (persisted, granted by a quest reward - see
+  // handleTurnInQuest); mounted is the current on/off toggle (NOT persisted, always starts false
+  // on join, same as castSpellId/combat state never surviving a reconnect).
+  @type("boolean") hasMount = false;
+  @type("boolean") mounted = false;
 }
 
 export class Enemy extends Schema {
@@ -140,6 +155,16 @@ export class LootBag extends Schema {
   @type(["string"]) items = new ArraySchema<string>();
 }
 
+// One instance per GatheringNodeDef placement, seeded at room init (mirrors LootBag's schema-
+// sync-so-depletion-is-visible reasoning, unlike static Waypoint/Structure content) - `available`
+// flips false on gather, then true again after the node type's respawnMs (WorldRoom.handleGatherNode).
+export class GatheringNode extends Schema {
+  @type("string") nodeTypeId = "";
+  @type("number") x = 0;
+  @type("number") z = 0;
+  @type("boolean") available = true;
+}
+
 // A listing is just a party advertising itself for the dungeon finder - member list and
 // composition are derived on demand from players filtered by partyId, never duplicated here.
 export class DungeonListing extends Schema {
@@ -154,4 +179,5 @@ export class WorldState extends Schema {
   @type({ map: Projectile }) projectiles = new MapSchema<Projectile>();
   @type({ map: LootBag }) lootBags = new MapSchema<LootBag>();
   @type({ map: DungeonListing }) dungeonListings = new MapSchema<DungeonListing>();
+  @type({ map: GatheringNode }) gatheringNodes = new MapSchema<GatheringNode>();
 }

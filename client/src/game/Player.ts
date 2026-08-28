@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { ChatBubble } from "./ChatBubble";
 import { DEFAULT_Y_OFFSET, HealthBar } from "./HealthBar";
 import { LevelBadge } from "./LevelBadge";
+import { MountAvatar, MOUNT_RIDE_HEIGHT } from "./Mount";
 import { NameLabel } from "./NameLabel";
 import { fitHeight, hideMeshesByName, ModelAnimator, spawnModel, spawnRiggedModel, tintModel } from "./models";
 import { identityTint } from "./textureTint";
@@ -72,6 +73,10 @@ export class PlayerAvatar {
   readonly nameLabel: NameLabel;
   readonly chatBubble = new ChatBubble();
   private readonly selectionRing: THREE.Mesh;
+  // Wraps the loaded class model so it can be Y-offset (to sit on the mount's back) independently
+  // of the mount mesh, which is a sibling of this group rather than a child of it.
+  private readonly characterModelGroup = new THREE.Group();
+  private readonly mount = new MountAvatar();
   private animator?: ModelAnimator;
   private targetPosition = new THREE.Vector3();
   private targetRotationY = 0;
@@ -79,6 +84,7 @@ export class PlayerAvatar {
 
   constructor(classId: string, name: string) {
     this.nameLabel = new NameLabel(name, DEFAULT_Y_OFFSET + NAME_LABEL_GAP);
+    this.group.add(this.characterModelGroup);
     // The model loads async (see models.ts) - the group starts with just the selection ring
     // until it resolves, the same "empty until first real content arrives" pattern every other
     // avatar in this game already tolerates before its first setTarget/setPosition call.
@@ -91,9 +97,12 @@ export class PlayerAvatar {
       fitHeight(object, MODEL_HEIGHT);
       tintModel(object, identityTint(color));
       hideMeshesByName(object, CLASS_HIDE_MESHES[classId] ?? []);
-      this.group.add(object);
+      this.characterModelGroup.add(object);
       this.animator = animator;
     });
+
+    this.mount.group.visible = false;
+    this.group.add(this.mount.group);
 
     this.selectionRing = new THREE.Mesh(
       new THREE.RingGeometry(0.6, 0.75, 24),
@@ -107,6 +116,11 @@ export class PlayerAvatar {
 
   setSelected(selected: boolean) {
     this.selectionRing.visible = selected;
+  }
+
+  setMounted(mounted: boolean) {
+    this.mount.group.visible = mounted;
+    this.characterModelGroup.position.y = mounted ? MOUNT_RIDE_HEIGHT : 0;
   }
 
   setTarget(x: number, y: number, z: number, rotationY: number) {
@@ -170,6 +184,7 @@ export class PlayerAvatar {
     this.syncOverheadPositions();
     this.animator?.setMoving(moving);
     this.animator?.update(dt);
+    this.mount.update(dt, moving);
   }
 
   update(dt: number) {
@@ -177,8 +192,10 @@ export class PlayerAvatar {
     this.group.position.lerp(this.targetPosition, INTERPOLATION_LERP);
     this.lerpRotationTowardTarget(INTERPOLATION_LERP);
     this.syncOverheadPositions();
-    this.animator?.setMoving(distance > MOVING_THRESHOLD);
+    const moving = distance > MOVING_THRESHOLD;
+    this.animator?.setMoving(moving);
     this.animator?.update(dt);
+    this.mount.update(dt, moving);
   }
 
   private syncOverheadPositions() {

@@ -10,6 +10,7 @@ export * from "./hex.js";
 export const WORLD_ROOM_NAME = "world_room";
 
 export const PLAYER_SPEED = 4; // meters per second, server-authoritative
+export const MOUNT_SPEED_MULTIPLIER = 2; // applied to PLAYER_SPEED while Player.mounted is true
 
 // World/map constants below are `let`, not `const` - they're populated from the active
 // GameMap/Dungeon by loadGameContent() (see bottom of this file) rather than being fixed at
@@ -354,7 +355,14 @@ export type ActionFailReason =
   | "already_in_guild"
   | "name_taken"
   | "not_leader"
-  | "not_admin";
+  | "not_admin"
+  | "profession_not_learned"
+  | "profession_slots_full"
+  | "profession_already_learned"
+  | "level_too_low"
+  | "insufficient_materials"
+  | "not_usable"
+  | "no_mount";
 
 export interface ActionFailedMessage {
   reason: ActionFailReason;
@@ -409,14 +417,28 @@ export const EQUIP_SLOT_LABEL: Record<EquipSlot, string> = {
   trinket: "Trinket",
 };
 
+// "equipment" is every item that predates this field (all backfilled to it) - occupies an
+// EquipSlot, lives in a character's equip inventory array, carries rarity. "material" is
+// everything professions produce/consume: raw gathered resources AND crafted alchemist/cook
+// goods alike - it isn't specifically "a crafting input", just "not an equip-slot item". Stored
+// in its own stackable Player.materials map instead (see WorldState.ts), no rarity.
+export type ItemCategory = "equipment" | "material";
+
 export interface ItemDef {
   id: string;
   name: string;
-  slot: EquipSlot;
+  category: ItemCategory;
+  slot?: EquipSlot; // only meaningful (and required by the admin schema) for category "equipment"
   bonuses: Partial<PlayerStats>;
   icon: string;
   description: string;
   basePrice: number; // vendor buy price at common rarity - see VENDOR_SELL_FRACTION for sell price
+  // Only meaningful for category "material" - consuming one (see "use_item") resolves these
+  // effects against the consuming player, self-targeted, through the exact same resolveEffect()
+  // interpreter spells/boss abilities already use (CombatEngine.ts). Unset = not consumable, just
+  // a tradeable good sitting in the materials bag (e.g. raw ore, or a crafted item nobody's wired
+  // an effect for yet).
+  useEffects?: EffectDef[];
 }
 
 export let ITEMS: Record<string, ItemDef> = {};
@@ -461,6 +483,117 @@ export const INVENTORY_SIZE = 20;
 
 export type EquippedItems = Record<EquipSlot, string>;
 
+// Professions: lumberjack/miner gather raw materials from world nodes; alchemist/cook/blacksmith/
+// tailor/jeweler craft materials into items via recipes. A character may know at most
+// MAX_LEARNED_PROFESSIONS at once (one shared pool - any mix of gathering/crafting, classic-MMO-
+// style), tracked as presence of a key in Player.professionXp/professionLevel (see WorldState.ts -
+// same "map key presence is the source of truth" convention already used by talentRanks/
+// questProgress, no separate "known professions" list needed).
+export type ProfessionId = "lumberjack" | "miner" | "alchemist" | "cook" | "blacksmith" | "tailor" | "jeweler";
+
+export const GATHERING_PROFESSIONS: ProfessionId[] = ["lumberjack", "miner"];
+export const CRAFTING_PROFESSIONS: ProfessionId[] = ["alchemist", "cook", "blacksmith", "tailor", "jeweler"];
+export const ALL_PROFESSIONS: ProfessionId[] = [...GATHERING_PROFESSIONS, ...CRAFTING_PROFESSIONS];
+
+export const PROFESSION_LABELS: Record<ProfessionId, string> = {
+  lumberjack: "Lumberjack",
+  miner: "Miner",
+  alchemist: "Alchemist",
+  cook: "Cook",
+  blacksmith: "Blacksmith",
+  tailor: "Tailor",
+  jeweler: "Jeweler",
+};
+
+export const PROFESSION_ICONS: Record<ProfessionId, string> = {
+  lumberjack: "🪓",
+  miner: "⛏️",
+  alchemist: "🧪",
+  cook: "🍳",
+  blacksmith: "🔨",
+  tailor: "🧵",
+  jeweler: "💍",
+};
+
+export const MAX_LEARNED_PROFESSIONS = 2;
+
+// Separate, simpler curve from character leveling (xpForNextLevel/MAX_LEVEL below) - professions
+// are a side-progression system, not meant to take as long as the main character level track.
+export const BASE_PROFESSION_XP_PER_LEVEL = 40;
+export const MAX_PROFESSION_LEVEL = 30;
+
+export function professionXpForNextLevel(level: number): number {
+  return BASE_PROFESSION_XP_PER_LEVEL * level;
+}
+
+export const GATHER_INTERACT_RADIUS = 3; // mirrors WAYPOINT_INTERACT_RADIUS/LOOT_PICKUP_RADIUS
+
+// A recipe always draws its ingredients from the materials bag (never equip-inventory items) -
+// keeps craft-consumption to one code path (decrement a MapSchema<number>), no hunting through
+// rarity-tagged equip tokens. Output goes to the equip inventory array if outputItemId's item is
+// category "equipment", otherwise to the materials map - see WorldRoom.handleCraftRecipe.
+export interface RecipeDef {
+  id: string;
+  profession: ProfessionId; // must be one of CRAFTING_PROFESSIONS
+  name: string;
+  requiredLevel: number;
+  ingredients: { itemId: string; quantity: number }[];
+  outputItemId: string;
+  outputQuantity: number;
+  xpAward: number;
+}
+
+export let RECIPES: Record<string, RecipeDef> = {};
+
+// The "species" of a gathering node - what it produces, its model, its respawn timing. Mirrors
+// EnemyTypeDef vs EnemySpawnDef's type/placement split: many map placements typically share one
+// node type (e.g. many oak trees), so yield/respawn tuning lives in one place affecting all of them.
+export interface GatheringNodeTypeDef {
+  id: string;
+  profession: ProfessionId; // must be one of GATHERING_PROFESSIONS
+  name: string;
+  modelId: string;
+  outputItemId: string;
+  outputQuantity: number;
+  xpAward: number;
+  respawnMs: number;
+  requiredLevel: number;
+}
+
+export let GATHERING_NODE_TYPES: Record<string, GatheringNodeTypeDef> = {};
+
+// One map placement referencing a node type - mirrors EnemySpawnDef/WaypointDef exactly.
+export interface GatheringNodeDef {
+  id: string;
+  mapId: MapId;
+  nodeTypeId: string;
+  x: number;
+  z: number;
+}
+
+export let GATHERING_NODES: GatheringNodeDef[] = [];
+
+export interface LearnProfessionMessage {
+  professionId: ProfessionId;
+  npcId: string; // must be a trainer NPC that teaches this profession - see WorldRoom.handleLearnProfession
+}
+
+export interface ForgetProfessionMessage {
+  professionId: ProfessionId;
+}
+
+export interface GatherNodeMessage {
+  nodeId: string;
+}
+
+export interface CraftRecipeMessage {
+  recipeId: string;
+}
+
+export interface UseItemMessage {
+  itemId: string;
+}
+
 export function getEffectiveStats(base: PlayerStats, equipped: EquippedItems): PlayerStats {
   const total: PlayerStats = { ...base };
   for (const token of Object.values(equipped)) {
@@ -487,6 +620,11 @@ export interface EquipMessage {
 
 export interface UnequipMessage {
   slot: EquipSlot;
+}
+
+export interface SwapInventorySlotsMessage {
+  fromIndex: number;
+  toIndex: number;
 }
 
 export type TalentStatKey = "damagePercent" | "critChanceBonus" | "cooldownPercent" | "armorBonus" | "maxHpPercent";
@@ -630,6 +768,10 @@ export interface NpcDef {
   yOffset: number; // added on top of the auto-computed terrain height - see getTerrainHeight
   mapId: MapId;
   vendorItemIds?: string[]; // presence marks this NPC as a vendor - see VENDOR_SELL_FRACTION
+  // Presence marks this NPC as a profession trainer - one trainer teaches one profession (a real
+  // class of NPC per profession, not a generic do-everything trainer), same "presence marks this
+  // NPC as X" convention as vendorItemIds above. See WorldRoom.handleLearnProfession.
+  teachesProfessionId?: ProfessionId;
 }
 
 export let NPCS: Record<NpcId, NpcDef> = {};
@@ -715,6 +857,7 @@ export interface QuestDef {
   objectiveCount: number;
   rewardXp: number;
   rewardItemId?: string;
+  rewardGrantsMount?: boolean;
 }
 
 export let QUESTS: Record<QuestId, QuestDef> = {};
@@ -1744,6 +1887,9 @@ export interface ContentSnapshot {
   waypoints: WaypointDef[];
   furniture: FurnitureDef[];
   hexTiles: HexTileOverrideDef[];
+  recipes: RecipeDef[];
+  gatheringNodeTypes: GatheringNodeTypeDef[];
+  gatheringNodes: GatheringNodeDef[];
 }
 
 // The single entry point that turns a fetched content snapshot into every live table/constant
@@ -1761,6 +1907,8 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   TALENTS = Object.fromEntries(snapshot.talents.map((t) => [t.id, t]));
   ENEMY_TYPES = Object.fromEntries(snapshot.enemyTypes.map((e) => [e.id, e]));
   QUESTS = Object.fromEntries(snapshot.quests.map((q) => [q.id, q]));
+  RECIPES = Object.fromEntries(snapshot.recipes.map((r) => [r.id, r]));
+  GATHERING_NODE_TYPES = Object.fromEntries(snapshot.gatheringNodeTypes.map((t) => [t.id, t]));
 
   ITEM_IDS = Object.keys(ITEMS);
   DEFAULT_CLASS_ID = snapshot.classes[0]?.id ?? DEFAULT_CLASS_ID;
@@ -1784,6 +1932,7 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_MAP?.id);
   FURNITURE = snapshot.furniture.filter((f) => f.mapId === ACTIVE_MAP?.id);
   HEX_TILE_OVERRIDES = snapshot.hexTiles.filter((h) => h.mapId === ACTIVE_MAP?.id);
+  GATHERING_NODES = snapshot.gatheringNodes.filter((n) => n.mapId === ACTIVE_MAP?.id);
 
   // Same shape as the ACTIVE_MAP-scoped bindings just above, but scoped to the active dungeon's
   // own map row instead - see DUNGEON_STRUCTURES's own doc comment.

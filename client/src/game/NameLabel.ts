@@ -11,8 +11,14 @@ const WORLD_UNITS_PER_CANVAS_PX = 1 / 240; // matches ChatBubble's scale so text
 
 // subtitle (a player's guild tag, e.g. "<Ironclad>") renders as a smaller line above the name -
 // undefined/omitted draws exactly the single centered line this always used to be, so an enemy's
-// static name (the only caller with no subtitle) is pixel-for-pixel unchanged.
-function makeNameTexture(name: string, subtitle: string | undefined): { texture: THREE.CanvasTexture; width: number; height: number } {
+// static name (the only caller with no subtitle) is pixel-for-pixel unchanged. `color` defaults to
+// white (every existing caller's look, unchanged) - callers that want to stand out (e.g. a
+// gathering node's name, in yellow) can override it.
+function makeNameTexture(
+  name: string,
+  subtitle: string | undefined,
+  color: string,
+): { texture: THREE.CanvasTexture; width: number; height: number } {
   const measure = document.createElement("canvas").getContext("2d")!;
   measure.font = FONT;
   let width = Math.ceil(measure.measureText(name).width);
@@ -43,7 +49,7 @@ function makeNameTexture(name: string, subtitle: string | undefined): { texture:
   ctx.font = FONT;
   ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
   ctx.strokeText(name, width / 2, nameY);
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = color;
   ctx.fillText(name, width / 2, nameY);
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -61,11 +67,13 @@ export class NameLabel {
   private readonly mesh: THREE.Mesh;
   private readonly material: THREE.MeshBasicMaterial;
   private readonly yOffset: number;
+  private readonly color: string;
   private currentName: string;
   private currentSubtitle: string | undefined;
 
-  constructor(name: string, yOffset: number, subtitle?: string) {
+  constructor(name: string, yOffset: number, subtitle?: string, color = "#ffffff") {
     this.yOffset = yOffset;
+    this.color = color;
     this.currentName = name;
     this.currentSubtitle = subtitle;
     this.material = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false });
@@ -84,7 +92,7 @@ export class NameLabel {
   }
 
   private redraw() {
-    const { texture, width, height } = makeNameTexture(this.currentName, this.currentSubtitle);
+    const { texture, width, height } = makeNameTexture(this.currentName, this.currentSubtitle, this.color);
     this.material.map?.dispose();
     this.material.map = texture;
     this.material.needsUpdate = true;

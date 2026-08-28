@@ -10,6 +10,7 @@ const questSchema = z.object({
   objective_count: z.number().int().positive(),
   reward_xp: z.number().int().nonnegative(),
   reward_item_id: z.string().max(32).nullable().optional(),
+  reward_grants_mount: z.boolean().optional(),
 });
 const updateSchema = questSchema.omit({ id: true }).partial();
 

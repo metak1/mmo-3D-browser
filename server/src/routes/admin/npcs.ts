@@ -15,6 +15,10 @@ const npcFields = {
   y_offset: z.number().default(0),
   map_id: z.string().min(1).max(32),
   vendor_item_ids: z.array(z.string()).optional(),
+  teaches_profession_id: z
+    .enum(["lumberjack", "miner", "alchemist", "cook", "blacksmith", "tailor", "jeweler"])
+    .nullable()
+    .optional(),
 };
 const createSchema = z.object({ id: z.string().min(1).max(32), ...npcFields });
 const updateSchema = z.object(npcFields).partial();
@@ -73,10 +77,10 @@ npcsRouter.post(
       res.status(400).json({ error: formatZodError(parsed.error) });
       return;
     }
-    const { id, name, x, z, y_offset, map_id } = parsed.data;
+    const { id, name, x, z, y_offset, map_id, teaches_profession_id } = parsed.data;
     const { rows } = await pool.query(
-      "INSERT INTO npcs (id, name, x, z, y_offset, map_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-      [id, name, x, z, y_offset, map_id],
+      "INSERT INTO npcs (id, name, x, z, y_offset, map_id, teaches_profession_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+      [id, name, x, z, y_offset, map_id, teaches_profession_id ?? null],
     );
     await syncVendorItems(id, parsed.data.vendor_item_ids);
     await reloadGameContent();

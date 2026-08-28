@@ -41,6 +41,10 @@ const VENDOR_INDICATOR_SIZE = 0.65;
 const VENDOR_INDICATOR_X_OFFSET = 0.55; // offset from the quest indicator so a future NPC could show both at once
 const VENDOR_COLOR = 0x4fd166; // green "$", visually distinct from the yellow/grey quest states
 
+const TRAINER_INDICATOR_SIZE = 0.65;
+const TRAINER_INDICATOR_X_OFFSET = -0.55; // opposite side from the vendor indicator - so a future NPC could show quest+vendor+trainer all at once
+const TRAINER_COLOR = 0x4ac0e8; // the existing "rare" blue accent, visually distinct from vendor green/quest yellow
+
 // Client-only cosmetic wander for NPCs nobody has a reason to walk up to (see main.ts's `wander`
 // computation: no quest, no vendor catalog) - purely visual life for a city, not synced state.
 // NPC_QUEST_IDS/vendor interactions are all keyed by the NPC's authored home position (NPCS[id]),
@@ -83,6 +87,7 @@ function makeGlyphTexture(glyph: string): THREE.CanvasTexture {
 const EXCLAMATION_TEXTURE = makeGlyphTexture("!");
 const QUESTION_TEXTURE = makeGlyphTexture("?");
 const DOLLAR_TEXTURE = makeGlyphTexture("$");
+const TRAINER_TEXTURE = makeGlyphTexture("🎓");
 
 export type QuestIndicatorState = "none" | "available" | "active" | "ready";
 
@@ -92,6 +97,7 @@ export class NpcAvatar {
   private readonly indicator: THREE.Mesh;
   private readonly indicatorMaterial: THREE.MeshBasicMaterial;
   private readonly vendorIndicator: THREE.Mesh;
+  private readonly trainerIndicator: THREE.Mesh;
   private animator?: ModelAnimator;
   private homeX = 0;
   private homeZ = 0;
@@ -137,6 +143,18 @@ export class NpcAvatar {
     this.vendorIndicator.renderOrder = 10;
     this.vendorIndicator.visible = false;
     this.group.add(this.vendorIndicator);
+
+    // Independent of both the quest and vendor indicators (opposite side from vendor) - a
+    // trainer's lesson is always available regardless of player state, same reasoning as vendor.
+    this.trainerIndicator = new THREE.Mesh(
+      new THREE.PlaneGeometry(TRAINER_INDICATOR_SIZE, TRAINER_INDICATOR_SIZE),
+      new THREE.MeshBasicMaterial({ map: TRAINER_TEXTURE, color: TRAINER_COLOR, transparent: true, depthWrite: false }),
+    );
+    this.trainerIndicator.position.set(TRAINER_INDICATOR_X_OFFSET, INDICATOR_Y_OFFSET, 0);
+    this.trainerIndicator.rotation.x = -CAMERA_PITCH;
+    this.trainerIndicator.renderOrder = 10;
+    this.trainerIndicator.visible = false;
+    this.group.add(this.trainerIndicator);
   }
 
   setQuestIndicator(state: QuestIndicatorState) {
@@ -161,6 +179,10 @@ export class NpcAvatar {
 
   setVendorIndicator(isVendor: boolean) {
     this.vendorIndicator.visible = isVendor;
+  }
+
+  setTrainerIndicator(isTrainer: boolean) {
+    this.trainerIndicator.visible = isTrainer;
   }
 
   setPosition(x: number, z: number, yOffset = 0) {

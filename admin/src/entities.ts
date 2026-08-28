@@ -1,4 +1,14 @@
-export type FieldType = "text" | "textarea" | "number" | "boolean" | "select" | "json" | "reference" | "multiselect" | "effectList";
+export type FieldType =
+  | "text"
+  | "textarea"
+  | "number"
+  | "boolean"
+  | "select"
+  | "json"
+  | "reference"
+  | "multiselect"
+  | "effectList"
+  | "itemQuantityList";
 
 export interface FieldSchema {
   key: string; // matches the admin API's field name (snake_case, mirrors the DB column)
@@ -70,15 +80,28 @@ export const ENTITIES: EntitySchema[] = [
       { key: "id", label: "ID", type: "text" },
       { key: "name", label: "Name", type: "text" },
       {
-        key: "slot",
-        label: "Slot",
+        key: "category",
+        label: "Category",
         type: "select",
+        options: ["equipment", "material"],
+      },
+      {
+        key: "slot",
+        label: "Slot (equipment only)",
+        type: "select",
+        optional: true,
         options: ["weapon", "offHand", "head", "neck", "shoulders", "armor", "hands", "waist", "legs", "feet", "ring", "trinket"],
       },
       { key: "bonuses", label: "Bonuses", type: "json" },
       { key: "icon", label: "Icon (emoji)", type: "text" },
       { key: "description", label: "Description", type: "textarea" },
       { key: "base_price", label: "Base Price", type: "number" },
+      {
+        key: "use_effects",
+        label: "Use Effects (material only - drinking/eating this applies these to yourself)",
+        type: "effectList",
+        optional: true,
+      },
     ],
   },
   {
@@ -171,6 +194,13 @@ export const ENTITIES: EntitySchema[] = [
         referenceEntity: "items",
         optional: true,
       },
+      {
+        key: "teaches_profession_id",
+        label: "Teaches Profession (blank if not a trainer)",
+        type: "select",
+        optional: true,
+        options: ["lumberjack", "miner", "alchemist", "cook", "blacksmith", "tailor", "jeweler"],
+      },
     ],
   },
   {
@@ -186,6 +216,55 @@ export const ENTITIES: EntitySchema[] = [
       { key: "objective_count", label: "Objective Count", type: "number" },
       { key: "reward_xp", label: "Reward XP", type: "number" },
       { key: "reward_item_id", label: "Reward Item", type: "reference", referenceEntity: "items", optional: true },
+      { key: "reward_grants_mount", label: "Grants Mount", type: "boolean", optional: true },
+    ],
+  },
+  {
+    key: "recipes",
+    label: "Recipes",
+    displayField: "name",
+    fields: [
+      { key: "id", label: "ID", type: "text" },
+      { key: "profession", label: "Profession", type: "select", options: ["alchemist", "cook", "blacksmith", "tailor", "jeweler"] },
+      { key: "name", label: "Name", type: "text" },
+      { key: "required_level", label: "Required Profession Level", type: "number" },
+      { key: "ingredients", label: "Ingredients", type: "itemQuantityList", referenceEntity: "items" },
+      { key: "output_item_id", label: "Output Item", type: "reference", referenceEntity: "items" },
+      { key: "output_quantity", label: "Output Quantity", type: "number" },
+      { key: "xp_award", label: "Profession XP Award", type: "number" },
+    ],
+  },
+  {
+    key: "gathering-node-types",
+    label: "Gathering Node Types",
+    displayField: "name",
+    fields: [
+      { key: "id", label: "ID", type: "text" },
+      { key: "profession", label: "Profession", type: "select", options: ["lumberjack", "miner"] },
+      { key: "name", label: "Name", type: "text" },
+      {
+        key: "model_id",
+        label: "Model",
+        type: "select",
+        options: ["oakTree", "pineTree", "copperVein", "ironVein", "silverVein", "goldVein"],
+      },
+      { key: "output_item_id", label: "Output Item", type: "reference", referenceEntity: "items" },
+      { key: "output_quantity", label: "Output Quantity (per gather)", type: "number" },
+      { key: "xp_award", label: "Profession XP Award", type: "number" },
+      { key: "respawn_ms", label: "Respawn (ms)", type: "number" },
+      { key: "required_level", label: "Required Profession Level", type: "number" },
+    ],
+  },
+  {
+    key: "gathering-nodes",
+    label: "Gathering Nodes",
+    displayField: "id",
+    fields: [
+      { key: "id", label: "ID", type: "text" },
+      { key: "map_id", label: "Map", type: "reference", referenceEntity: "maps" },
+      { key: "node_type_id", label: "Node Type", type: "reference", referenceEntity: "gathering-node-types" },
+      { key: "x", label: "X", type: "number" },
+      { key: "z", label: "Z", type: "number" },
     ],
   },
   {

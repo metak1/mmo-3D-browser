@@ -116,6 +116,23 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
     for (const [talentId, rank] of Object.entries(savedRanks)) {
       player.talentRanks.set(talentId, rank);
     }
+    // Loaded read-only, same reasoning as talentRanks above - gathering/crafting/use-item aren't
+    // available mid-dungeon (WorldRoom-only, matching how quest turn-in already is), but they
+    // still need round-tripping through onLeave's saveCharacterProgress call unchanged, or that
+    // unconditional UPDATE would silently wipe them back to {} in the DB.
+    const savedProfessionXp = (character.profession_xp as Record<string, number>) ?? {};
+    for (const [professionId, xp] of Object.entries(savedProfessionXp)) {
+      player.professionXp.set(professionId, xp);
+    }
+    const savedProfessionLevel = (character.profession_level as Record<string, number>) ?? {};
+    for (const [professionId, level] of Object.entries(savedProfessionLevel)) {
+      player.professionLevel.set(professionId, level);
+    }
+    const savedMaterials = (character.materials as Record<string, number>) ?? {};
+    for (const [itemId, count] of Object.entries(savedMaterials)) {
+      player.materials.set(itemId, count);
+    }
+    player.hasMount = character.has_mount ?? false;
 
     const items = await listCharacterItems(character.id);
     for (const row of items) {
@@ -186,6 +203,10 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
           talentRanks: Object.fromEntries(player.talentRanks),
           questProgress: {},
           questCompleted: {},
+          professionXp: Object.fromEntries(player.professionXp),
+          professionLevel: Object.fromEntries(player.professionLevel),
+          materials: Object.fromEntries(player.materials),
+          hasMount: player.hasMount,
         });
       } catch (err) {
         console.error(`[DungeonRoom] failed to save character ${characterId}:`, err);
