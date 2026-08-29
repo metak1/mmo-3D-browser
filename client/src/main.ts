@@ -1,93 +1,53 @@
 import * as THREE from "three";
 import type { Room, SeatReservation } from "colyseus.js";
 import {
-  AcceptQuestMessage,
   ActionFailedMessage,
   ActionFailReason,
   BOSS_PHASE_2_HP_FRACTION,
   BossStats,
   BUFFS,
   BuffKind,
-  BuyItemMessage,
   CastFailedMessage,
   CastFailReason,
   CastMessage,
   CasterStats,
-  CHAT_MAX_LENGTH,
   ChatBroadcast,
-  ChatChannel,
-  ChatMessage,
   CLASSES,
   ClassId,
-  ClassRole,
   CombatTextEvent,
-  DUNGEON_COMPOSITION,
-  DUNGEON_PARTY_SIZE,
-  DungeonJoinListingMessage,
   ENEMY_TYPES,
   EffectShape,
   EnemyBehavior,
   EQUIP_SLOT_LABEL,
-  FriendRemoveMessage,
-  FriendRequestMessage,
-  FriendRespondMessage,
   FURNITURE,
   GatherNodeMessage,
   GATHER_INTERACT_RADIUS,
   GATHERING_NODE_TYPES,
-  GuildCreateMessage,
-  GuildInviteMessage,
-  GuildKickMessage,
-  GuildPromoteMessage,
-  GuildRespondMessage,
   GuildRosterSnapshot,
-  GUILD_NAME_MAX_LENGTH,
   InputMessage,
-  INVENTORY_SIZE,
   ITEMS,
-  LearnProfessionMessage,
   loadGameContent,
   LOOT_PICKUP_RADIUS,
   LootTakeMessage,
   MAP_HALF_EXTENT,
-  MAX_LEARNED_PROFESSIONS,
   NPCS,
   NPC_INTERACT_RADIUS,
   NPC_QUEST_IDS,
-  NpcDef,
-  PARTY_MAX_SIZE,
   PLAYER_SPEED,
   MOUNT_SPEED_MULTIPLIER,
   PORTAL_POSITION,
-  PartyInviteMessage,
-  PartyRespondMessage,
-  ProfessionId,
-  PROFESSION_ICONS,
-  PROFESSION_LABELS,
-  QUESTS,
-  QuestDef,
   RARITY_COLOR,
-  RARITY_MULTIPLIER,
   isHexPassable,
   resolveStructureCollisions,
-  SetTimeOfDayMessage,
-  SPAWN_POINTS,
   SPELLS,
-  SellItemMessage,
   SpellId,
   STRUCTURES,
   TimeOfDaySetBroadcast,
-  TradeOfferMessage,
-  TradeRequestMessage,
-  TradeRespondMessage,
   TradeSnapshot,
-  TurnInQuestMessage,
-  VENDOR_SELL_FRACTION,
   WAYPOINTS,
   WAYPOINT_INTERACT_RADIUS,
   WaypointTravelMessage,
   decodeItemToken,
-  encodeItemToken,
   findStructureLoops,
   getTerrainHeight,
 } from "@mmo/shared";
@@ -99,11 +59,11 @@ import { playHitSound, playHealSound, playErrorSound } from "./game/sfx";
 import { DEFAULT_Y_OFFSET as HEALTH_BAR_DEFAULT_Y_OFFSET } from "./game/HealthBar";
 import { PlayerAvatar } from "./game/Player";
 import { EnemyAvatar } from "./game/Enemy";
-import { NpcAvatar, QuestIndicatorState } from "./game/Npc";
+import { NpcAvatar } from "./game/Npc";
 import { StructureAvatar, StructureEnclosureAvatar } from "./game/Structure";
 import { WaypointAvatar } from "./game/Waypoint";
 import { FurnitureAvatar } from "./game/Furniture";
-import { Minimap, QuestAreaMarker } from "./game/Minimap";
+import { Minimap } from "./game/Minimap";
 import { PortalAvatar } from "./game/Portal";
 import { ProjectileAvatar } from "./game/Projectile";
 import { LootBagAvatar } from "./game/LootBagAvatar";
@@ -112,12 +72,10 @@ import { InputController } from "./game/InputController";
 import { connectToWorld, consumeDungeonReservation } from "./network/connection";
 import * as api from "./network/api";
 import { makeDraggable, makeResizable } from "./ui/DraggablePanel";
-import { openContextMenu, closeContextMenu, ContextMenuAction } from "./ui/contextMenu";
-import { attachItemTooltip } from "./ui/tooltips";
+import { openContextMenu, closeContextMenu } from "./ui/contextMenu";
 import {
   inventoryPanel,
   renderInventory,
-  buildShopSlot,
   updateMountButton,
   useItemSlot,
   useOverrideItem,
@@ -127,8 +85,8 @@ import {
 } from "./ui/inventoryPanel";
 import { professionsPanel, renderProfessionsPanel } from "./ui/professionsPanel";
 import { talentPanel, renderTalents } from "./ui/talentsPanel";
-import { updateCharacterPanel, updateHpBar, hpColor, typeColor, isAggressiveEnemyType } from "./ui/characterPanel";
-import { PlayerStatsSnapshot, activeRoom, localClassId, setActiveRoom, setRefreshSpellSlotOverrides, setLocalClassId } from "./clientState";
+import { updateCharacterPanel, updateHpBar, typeColor, isAggressiveEnemyType } from "./ui/characterPanel";
+import { localClassId, setActiveRoom, setRefreshSpellSlotOverrides, setLocalClassId } from "./clientState";
 import { GameSession } from "./GameSession";
 import {
   friendsPanel,
@@ -138,7 +96,6 @@ import {
   renderFriendsPanel,
   renderGuildPanel,
   renderTradeInvitePrompt,
-  renderTradeWindow,
   closeTradeWindow,
   actionsForPlayerTarget,
   handleTradeUpdate,
