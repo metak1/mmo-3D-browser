@@ -1,8 +1,13 @@
+import { Client } from "@colyseus/core";
 import { MapSchema } from "@colyseus/schema";
-import { MOUNT_SPEED_MULTIPLIER, PLAYER_SPEED } from "@mmo/shared";
+import { MOUNT_SPEED_MULTIPLIER, PLAYER_SPEED, SPELLS } from "@mmo/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Enemy, Player, Projectile } from "../schema/WorldState.js";
 import { CombatEngine, CombatState } from "./CombatEngine.js";
+
+function makeClient(sessionId: string): Client {
+  return { sessionId, send: vi.fn() } as unknown as Client;
+}
 
 // CombatEngine is a standalone class - it takes a plain {state, callbacks} config and has zero
 // Colyseus-server/network imports (no `this.clock`/`this.send`/Room base class), so it's testable
@@ -94,5 +99,73 @@ describe("CombatEngine movement / mount speed", () => {
     engine.tick(1);
     expect(player.x).toBe(0);
     expect(player.z).toBe(0);
+  });
+});
+
+describe("CombatEngine cast cancellation via movement", () => {
+  const spellId = "testCastTimeSpell";
+
+  beforeEach(() => {
+    SPELLS[spellId] = {
+      id: spellId,
+      classId: "warrior",
+      name: "Test Cast-Time Spell",
+      description: "",
+      effectType: "heal",
+      targetType: "self",
+      amount: 1,
+      cooldownMs: 5000,
+      castTimeMs: 1000,
+      range: 10,
+    };
+  });
+
+  it("cancels the pending cast and clears castSpellId when the player moves mid-cast", () => {
+    const { engine, state } = makeEngine();
+    const player = makePlayer({ classId: "warrior" });
+    state.players.set("s1", player);
+
+    engine.handleCast(makeClient("s1"), { spellId });
+    expect(player.castSpellId).toBe(spellId);
+
+    engine.handleInput("s1", { moveX: 1, moveZ: 0, seq: 1 });
+    expect(player.castSpellId).toBe("");
+  });
+
+  it("does not consume the cooldown when movement cancels the cast (unlike a completed cast)", () => {
+    const { engine, state } = makeEngine();
+    const player = makePlayer({ classId: "warrior" });
+    state.players.set("s1", player);
+    const client = makeClient("s1");
+
+    engine.handleCast(client, { spellId });
+    engine.handleInput("s1", { moveX: 1, moveZ: 0, seq: 1 }); // cancels before it ever fires
+
+    // Recasting immediately must succeed - if the cooldown had wrongly been consumed, this
+    // second handleCast would instead reject with "on_cooldown" and leave castSpellId empty.
+    engine.handleCast(client, { spellId });
+    expect(player.castSpellId).toBe(spellId);
+    expect(client.send).not.toHaveBeenCalledWith("cast_failed", expect.objectContaining({ reason: "on_cooldown" }));
+  });
+
+  it("still consumes the cooldown when a cast completes normally (no movement)", () => {
+    // tickPlayerCasts fires pending casts off a real Date.now() deadline (not tick()'s own dt
+    // argument), so advancing wall-clock time here needs fake timers rather than a bigger dt.
+    vi.useFakeTimers();
+    try {
+      const { engine, state } = makeEngine();
+      const player = makePlayer({ classId: "warrior" });
+      state.players.set("s1", player);
+      const client = makeClient("s1");
+
+      engine.handleCast(client, { spellId });
+      vi.advanceTimersByTime(SPELLS[spellId].castTimeMs + 50);
+      engine.tick(0.05); // tickPlayerCasts resolves the now-elapsed pending cast
+
+      engine.handleCast(client, { spellId });
+      expect(client.send).toHaveBeenCalledWith("cast_failed", expect.objectContaining({ reason: "on_cooldown" }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

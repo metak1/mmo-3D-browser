@@ -1,8 +1,6 @@
 import { Room, Client, matchMaker } from "@colyseus/core";
 import {
   AcceptQuestMessage,
-  ActionFailedMessage,
-  ActionFailReason,
   ALL_PROFESSIONS,
   BuyItemMessage,
   ChatMessage,
@@ -29,17 +27,11 @@ import {
   GuildKickMessage,
   GuildPromoteMessage,
   GuildRespondMessage,
-  GuildRosterSnapshot,
   GUILD_NAME_MAX_LENGTH,
   INVENTORY_SIZE,
-  ITEM_IDS,
   ITEMS,
   InputMessage,
   LearnProfessionMessage,
-  LOOT_BAG_AGGREGATE_RADIUS,
-  LOOT_BAG_DESPAWN_MS,
-  LOOT_DROP_CHANCE,
-  LOOT_PICKUP_RADIUS,
   LootTakeMessage,
   MAX_LEARNED_PROFESSIONS,
   MAX_LEVEL,
@@ -79,7 +71,6 @@ import {
   hasRankedDependents,
   isTalentUnlocked,
   resolveClassId,
-  rollRarity,
 } from "@mmo/shared";
 import { verifyToken } from "../auth/jwt.js";
 import { findCharacterByName, getCharacterById, getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
@@ -92,7 +83,11 @@ import { getOnlineEntry, isOnline, notifyCharacter, registerOnline, SocialCapabl
 import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
 import { getEquippedItemId, setEquippedItemId } from "./equipment.js";
-import { DungeonListing, Enemy, FriendEntry, FriendRequestEntry, GatheringNode, GuildInviteEntry, LootBag, Player, WorldState } from "./schema/WorldState.js";
+import { LootManager } from "./loot.js";
+import { PersistQueue } from "./persistQueue.js";
+import { rejectAction, respawnPlayerPosition } from "./roomUtil.js";
+import { DungeonListing, Enemy, FriendEntry, FriendRequestEntry, GatheringNode, GuildInviteEntry, Player, WorldState } from "./schema/WorldState.js";
+import { addFriendEntryToPlayer, handleGuildLeave, handleGuildRosterRequest, removeFriendEntry, setFriendOnline, setGuildFields } from "./social.js";
 import { TradeManager } from "./trade.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
@@ -102,15 +97,14 @@ const BOSS_GUARANTEED_DROPS = 3; // bypasses LOOT_DROP_CHANCE - a group should a
 export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
   private combat!: CombatEngine;
   private trade!: TradeManager;
-  private characterIdBySession = new Map<string, number>();
+  private loot!: LootManager;
+  // Not private: read by the GuildCapableRoom structural interface (social.ts's
+  // handleGuildLeave/handleGuildRosterRequest), same reasoning as TradeCapableRoom's own fields.
+  characterIdBySession = new Map<string, number>();
   private tokenBySession = new Map<string, string>(); // kept for re-use when reserving dungeon seats
-  private lootBagSeq = 0;
-  // Colyseus doesn't await onMessage handlers before processing the next message (confirmed in
-  // its dispatch loop), so persistItems/saveCharacter are otherwise fire-and-forget - two rapid
-  // writes for the same session (e.g. buy then sell) can race and let a stale write clobber a
-  // newer one in the DB. Chaining every persistence call for a session through this queue makes
-  // them apply strictly in call order, so the last one always wins.
-  private persistQueues = new Map<string, Promise<void>>();
+  // See PersistQueue's own doc comment for why every persistItems/saveCharacter call is chained
+  // through this instead of fired off directly.
+  private persistQueue = new PersistQueue();
   // Which zone a given state.enemies slot key belongs to - populated once per slot at onCreate
   // (see the SPAWN_ZONES loop below) and read again on every respawn, so membership survives a
   // slot's whole death/respawn cycle for the life of the room (mirrors why SPAWN_POINTS.find(...)
@@ -124,7 +118,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
       state: this.state,
       onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
         this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
-      onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
+      onPlayerRespawn: (_sessionId, player) => respawnPlayerPosition(player),
       onCombatText: (event) => this.broadcast("combat_text", event),
       collidableStructures: true,
       enemiesWander: true,
@@ -132,6 +126,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
       collidableFurniture: true,
     });
     this.trade = new TradeManager(this);
+    this.loot = new LootManager(this);
 
     for (const point of SPAWN_POINTS) {
       this.spawnEnemy(point);
@@ -159,7 +154,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
     this.onMessage("input", (client, message: InputMessage) => this.combat.handleInput(client.sessionId, message));
     this.onMessage("cast", (client, message: CastMessage) => this.combat.handleCast(client, message));
-    this.onMessage("loot_take", (client, message: LootTakeMessage) => this.handleLootTake(client, message));
+    this.onMessage("loot_take", (client, message: LootTakeMessage) => this.loot.handleLootTake(client, message));
     this.onMessage("equip", (client, message: EquipMessage) => this.handleEquip(client, message));
     this.onMessage("unequip", (client, message: UnequipMessage) => this.handleUnequip(client, message));
     this.onMessage("spend_talent", (client, message: SpendTalentMessage) => this.handleSpendTalent(client, message));
@@ -198,11 +193,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     this.onMessage("guild_create", (client, message: GuildCreateMessage) => this.handleGuildCreate(client, message));
     this.onMessage("guild_invite", (client, message: GuildInviteMessage) => this.handleGuildInvite(client, message));
     this.onMessage("guild_respond", (client, message: GuildRespondMessage) => this.handleGuildRespond(client, message));
-    this.onMessage("guild_leave", (client) => this.handleGuildLeave(client));
+    this.onMessage("guild_leave", (client) => handleGuildLeave(this, client));
     this.onMessage("guild_kick", (client, message: GuildKickMessage) => this.handleGuildKick(client, message));
     this.onMessage("guild_promote", (client, message: GuildPromoteMessage) => this.handleGuildPromote(client, message));
     this.onMessage("guild_disband", (client) => this.handleGuildDisband(client));
-    this.onMessage("guild_roster_request", (client) => this.handleGuildRosterRequest(client));
+    this.onMessage("guild_roster_request", (client) => handleGuildRosterRequest(this, client));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
     this.clock.setInterval(() => this.autosaveAll(), AUTOSAVE_INTERVAL_MS);
@@ -356,21 +351,12 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     this.state.players.delete(client.sessionId);
     this.characterIdBySession.delete(client.sessionId);
     this.tokenBySession.delete(client.sessionId);
-    this.persistQueues.delete(client.sessionId); // the final saveCharacter above already settled
+    this.persistQueue.clear(client.sessionId); // the final saveCharacter above already settled
     console.log(`[WorldRoom] ${client.sessionId} left`);
   }
 
-  // Runs `task` after every previously-queued persistence call for this session has settled,
-  // so concurrent callers (e.g. a quick buy followed by a sell) can never have their writes
-  // complete out of order - see the persistQueues field comment for why this is necessary.
-  private queuePersist(sessionId: string, task: () => Promise<void>): Promise<void> {
-    const next = (this.persistQueues.get(sessionId) ?? Promise.resolve()).then(task);
-    this.persistQueues.set(sessionId, next);
-    return next;
-  }
-
   async saveCharacter(sessionId: string) {
-    return this.queuePersist(sessionId, async () => {
+    return this.persistQueue.run(sessionId, async () => {
       const player = this.state.players.get(sessionId);
       const characterId = this.characterIdBySession.get(sessionId);
       if (!player || !characterId) return;
@@ -408,7 +394,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
   }
 
   async persistItems(sessionId: string) {
-    return this.queuePersist(sessionId, async () => {
+    return this.persistQueue.run(sessionId, async () => {
       const player = this.state.players.get(sessionId);
       const characterId = this.characterIdBySession.get(sessionId);
       if (!player || !characterId) return;
@@ -470,9 +456,9 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
   private handleEnemyKilled(enemyId: string, enemyTypeId: string, killerSessionId: string, x: number, z: number) {
     this.grantKillRewards(killerSessionId, enemyTypeId, x, z);
     if (ENEMY_TYPES[enemyTypeId]?.behavior === "boss") {
-      for (let i = 0; i < BOSS_GUARANTEED_DROPS; i++) this.maybeDropLoot(x, z, true);
+      for (let i = 0; i < BOSS_GUARANTEED_DROPS; i++) this.loot.maybeDropLoot(x, z, true);
     } else {
-      this.maybeDropLoot(x, z, false);
+      this.loot.maybeDropLoot(x, z, false);
     }
 
     const point = SPAWN_POINTS.find((p) => p.id === enemyId);
@@ -483,13 +469,6 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
     const zone = this.zoneBySlotKey.get(enemyId);
     if (zone) this.clock.setTimeout(() => this.spawnZoneMember(zone, enemyId), zone.respawnMs ?? ENEMY_RESPAWN_MS);
-  }
-
-  // CombatEngine hook: called after a dead player's hp/ailments/cast have already been reset.
-  private handlePlayerRespawn(_sessionId: string, player: Player) {
-    player.x = 0;
-    player.y = 0;
-    player.z = 0;
   }
 
   // Every party member within PARTY_XP_SHARE_RADIUS of the kill (and alive) gets the same
@@ -591,22 +570,12 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
   // --- Friends ---
 
-  private addFriendEntryToPlayer(player: Player, characterId: number, name: string, level: number, classId: string, online: boolean) {
-    const entry = new FriendEntry();
-    entry.characterId = characterId;
-    entry.name = name;
-    entry.level = level;
-    entry.classId = classId;
-    entry.online = online;
-    player.friends.set(String(characterId), entry);
-  }
-
   // Adds the friendship in the DB and reflects it live on both sides - shared by the explicit-
   // accept path (handleFriendRespond) and the auto-accept path (handleFriendRequest, when the
   // target already sent a reverse request).
   private async finalizeFriendship(selfPlayer: Player, selfCharacterId: number, otherCharacterId: number, otherName: string, otherLevel: number, otherClassId: string) {
     await friendsDb.addFriendship(selfCharacterId, otherCharacterId);
-    this.addFriendEntryToPlayer(selfPlayer, otherCharacterId, otherName, otherLevel, otherClassId, isOnline(otherCharacterId));
+    addFriendEntryToPlayer(selfPlayer, otherCharacterId, otherName, otherLevel, otherClassId, isOnline(otherCharacterId));
     notifyCharacter(otherCharacterId, (room, sid) =>
       room.applyFriendAdded(sid, { characterId: selfCharacterId, name: selfPlayer.name, level: selfPlayer.level, classId: selfPlayer.classId, online: true }),
     );
@@ -620,8 +589,8 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const targetName = message.targetName.trim();
     if (!targetName) return;
     const target = await findCharacterByName(targetName);
-    if (!target || target.id === fromCharacterId) return this.rejectAction(client, "not_found");
-    if (await friendsDb.areFriends(fromCharacterId, target.id)) return this.rejectAction(client, "already_friends");
+    if (!target || target.id === fromCharacterId) return rejectAction(client, "not_found");
+    if (await friendsDb.areFriends(fromCharacterId, target.id)) return rejectAction(client, "already_friends");
 
     // If the target already sent *me* a request, accept it instead of creating a redundant
     // reverse row - two people friend-requesting each other should just become friends.
@@ -636,7 +605,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     try {
       created = await friendsDb.createFriendRequest(fromCharacterId, target.id);
     } catch (err) {
-      if (isUniqueViolation(err)) return this.rejectAction(client, "already_pending");
+      if (isUniqueViolation(err)) return rejectAction(client, "already_pending");
       throw err;
     }
     notifyCharacter(target.id, (room, sid) =>
@@ -678,7 +647,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const player = this.state.players.get(client.sessionId);
     const characterId = this.characterIdBySession.get(client.sessionId);
     if (!player || characterId === undefined) return;
-    if (player.guildId !== 0) return this.rejectAction(client, "already_in_guild");
+    if (player.guildId !== 0) return rejectAction(client, "already_in_guild");
 
     const name = message.name.trim().slice(0, GUILD_NAME_MAX_LENGTH);
     if (!name) return;
@@ -687,7 +656,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     try {
       guild = await guildsDb.createGuild(name, characterId);
     } catch (err) {
-      if (isUniqueViolation(err)) return this.rejectAction(client, "name_taken");
+      if (isUniqueViolation(err)) return rejectAction(client, "name_taken");
       throw err;
     }
 
@@ -700,19 +669,19 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const player = this.state.players.get(client.sessionId);
     const characterId = this.characterIdBySession.get(client.sessionId);
     if (!player || characterId === undefined) return;
-    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+    if (player.guildRole !== "leader") return rejectAction(client, "not_leader");
 
     const targetName = message.targetName.trim();
     if (!targetName) return;
     const target = await findCharacterByName(targetName);
-    if (!target) return this.rejectAction(client, "not_found");
-    if (await guildsDb.getGuildForCharacter(target.id)) return this.rejectAction(client, "already_in_guild");
+    if (!target) return rejectAction(client, "not_found");
+    if (await guildsDb.getGuildForCharacter(target.id)) return rejectAction(client, "already_in_guild");
 
     let invite: { id: number };
     try {
       invite = await guildsDb.createGuildInvite(player.guildId, target.id, characterId);
     } catch (err) {
-      if (isUniqueViolation(err)) return this.rejectAction(client, "already_pending");
+      if (isUniqueViolation(err)) return rejectAction(client, "already_pending");
       throw err;
     }
     notifyCharacter(target.id, (room, sid) =>
@@ -749,35 +718,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     player.guildRole = "member";
   }
 
-  private async handleGuildLeave(client: Client) {
-    const player = this.state.players.get(client.sessionId);
-    const characterId = this.characterIdBySession.get(client.sessionId);
-    if (!player || characterId === undefined) return;
-    if (player.guildId === 0) return;
-
-    const guildId = player.guildId;
-    const guildName = player.guildName;
-    const wasLeader = player.guildRole === "leader";
-    await guildsDb.removeGuildMember(characterId);
-    player.guildId = 0;
-    player.guildName = "";
-    player.guildRole = "";
-
-    if (wasLeader) {
-      const promotedId = await guildsDb.promoteNextMemberAsLeader(guildId);
-      if (promotedId === null) {
-        await guildsDb.deleteGuild(guildId);
-      } else {
-        notifyCharacter(promotedId, (room, sid) => room.applyGuildFieldsChange(sid, guildId, guildName, "leader"));
-      }
-    }
-  }
-
   private async handleGuildKick(client: Client, message: GuildKickMessage) {
     const player = this.state.players.get(client.sessionId);
     const characterId = this.characterIdBySession.get(client.sessionId);
     if (!player || characterId === undefined) return;
-    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+    if (player.guildRole !== "leader") return rejectAction(client, "not_leader");
     if (message.characterId === characterId) return; // use leave, not kick, on yourself
 
     await guildsDb.removeGuildMember(message.characterId);
@@ -788,7 +733,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const player = this.state.players.get(client.sessionId);
     const characterId = this.characterIdBySession.get(client.sessionId);
     if (!player || characterId === undefined) return;
-    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+    if (player.guildRole !== "leader") return rejectAction(client, "not_leader");
     if (message.characterId === characterId) return;
 
     await guildsDb.transferLeadership(player.guildId, characterId, message.characterId);
@@ -800,7 +745,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const player = this.state.players.get(client.sessionId);
     const characterId = this.characterIdBySession.get(client.sessionId);
     if (!player || characterId === undefined) return;
-    if (player.guildRole !== "leader") return this.rejectAction(client, "not_leader");
+    if (player.guildRole !== "leader") return rejectAction(client, "not_leader");
 
     const guildId = player.guildId;
     const members = await guildsDb.listGuildMembers(guildId);
@@ -815,32 +760,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     player.guildRole = "";
   }
 
-  private async handleGuildRosterRequest(client: Client) {
-    const player = this.state.players.get(client.sessionId);
-    if (!player || player.guildId === 0) return;
-
-    const members = await guildsDb.listGuildMembers(player.guildId);
-    const snapshot: GuildRosterSnapshot = {
-      guildId: player.guildId,
-      guildName: player.guildName,
-      members: members.map((m) => ({
-        characterId: m.character_id,
-        name: m.name,
-        level: m.level,
-        classId: m.class_id,
-        role: m.role,
-        online: isOnline(m.character_id),
-      })),
-    };
-    client.send("guild_roster", snapshot);
-  }
-
   // --- SocialCapableRoom (see onlineRegistry.ts's own doc comment - lets notifyCharacter reach a
   // specific online character's client regardless of which room instance currently holds them) ---
 
   applyFriendOnlineChange(sessionId: string, characterId: number, online: boolean) {
-    const entry = this.state.players.get(sessionId)?.friends.get(String(characterId));
-    if (entry) entry.online = online;
+    setFriendOnline(this.state.players.get(sessionId), characterId, online);
   }
 
   applyFriendRequestPush(sessionId: string, entry: { requestId: number; fromCharacterId: number; fromName: string }) {
@@ -855,12 +779,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
   applyFriendAdded(sessionId: string, entry: { characterId: number; name: string; level: number; classId: string; online: boolean }) {
     const player = this.state.players.get(sessionId);
-    if (!player) return;
-    this.addFriendEntryToPlayer(player, entry.characterId, entry.name, entry.level, entry.classId, entry.online);
+    if (player) addFriendEntryToPlayer(player, entry.characterId, entry.name, entry.level, entry.classId, entry.online);
   }
 
   applyFriendRemoved(sessionId: string, characterId: number) {
-    this.state.players.get(sessionId)?.friends.delete(String(characterId));
+    removeFriendEntry(this.state.players.get(sessionId), characterId);
   }
 
   applyGuildInvitePush(sessionId: string, entry: { inviteId: number; guildId: number; guildName: string; invitedByName: string }) {
@@ -875,11 +798,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
   }
 
   applyGuildFieldsChange(sessionId: string, guildId: number, guildName: string, guildRole: string) {
-    const player = this.state.players.get(sessionId);
-    if (!player) return;
-    player.guildId = guildId;
-    player.guildName = guildName;
-    player.guildRole = guildRole;
+    setGuildFields(this.state.players.get(sessionId), guildId, guildName, guildRole);
   }
 
   // --- Dungeon finder ---
@@ -971,37 +890,6 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     this.state.dungeonListings.delete(caller.partyId);
   }
 
-  private maybeDropLoot(x: number, z: number, guaranteed: boolean) {
-    if (!guaranteed && Math.random() >= LOOT_DROP_CHANCE) return;
-    const itemId = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
-    this.dropLoot(x, z, encodeItemToken(itemId, rollRarity()));
-  }
-
-  private dropLoot(x: number, z: number, itemId: string) {
-    for (const bag of this.state.lootBags.values()) {
-      const dist = Math.hypot(bag.x - x, bag.z - z);
-      if (dist <= LOOT_BAG_AGGREGATE_RADIUS) {
-        bag.items.push(itemId);
-        return;
-      }
-    }
-
-    const bag = new LootBag();
-    bag.x = x;
-    bag.z = z;
-    bag.items.push(itemId);
-
-    const id = `bag-${this.lootBagSeq++}`;
-    this.state.lootBags.set(id, bag);
-    this.clock.setTimeout(() => this.state.lootBags.delete(id), LOOT_BAG_DESPAWN_MS);
-  }
-
-  // Sends an ActionFailedMessage back to just this one client - see that type's own doc comment.
-  private rejectAction(client: Client, reason: ActionFailReason) {
-    const failure: ActionFailedMessage = { reason };
-    client.send("action_failed", failure);
-  }
-
   // The "/time" chat command's GM tool (see main.ts's handleSlashCommand) - looked up fresh from
   // the DB on every call rather than a role cached at onJoin, same "a demotion takes effect
   // immediately" posture as the HTTP admin routes' own requireAdmin (adminMiddleware.ts). Broadcasts
@@ -1016,36 +904,13 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
       userId = -1;
     }
     const role = userId !== -1 ? await findUserRoleById(userId) : null;
-    if (role !== "admin") return this.rejectAction(client, "not_admin");
+    if (role !== "admin") return rejectAction(client, "not_admin");
 
     if (!Number.isFinite(message.fraction)) return;
     const fraction = ((message.fraction % 1) + 1) % 1;
     const payload: TimeOfDaySetBroadcast = { fraction };
     this.broadcast("time_of_day_set", payload);
   }
-
-  private handleLootTake(client: Client, message: LootTakeMessage) {
-    const player = this.state.players.get(client.sessionId);
-    const bag = this.state.lootBags.get(message.bagId);
-    if (!player || !bag) return;
-
-    const dist = Math.hypot(player.x - bag.x, player.z - bag.z);
-    if (dist > LOOT_PICKUP_RADIUS) return this.rejectAction(client, "too_far");
-
-    const index = bag.items.indexOf(message.itemId);
-    if (index === -1) return this.rejectAction(client, "not_available");
-    if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
-
-    bag.items.splice(index, 1);
-    player.inventory.push(message.itemId);
-
-    if (bag.items.length === 0) {
-      this.state.lootBags.delete(message.bagId);
-    }
-
-    this.persistItems(client.sessionId);
-  }
-
 
   private handleEquip(client: Client, message: EquipMessage) {
     const player = this.state.players.get(client.sessionId);
@@ -1143,7 +1008,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     if (!target) return;
 
     const nearAnyWaypoint = WAYPOINTS.some((w) => Math.hypot(player.x - w.x, player.z - w.z) <= WAYPOINT_INTERACT_RADIUS);
-    if (!nearAnyWaypoint) return this.rejectAction(client, "too_far");
+    if (!nearAnyWaypoint) return rejectAction(client, "too_far");
 
     player.x = target.x;
     player.y = 0;
@@ -1156,11 +1021,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     if (!ALL_PROFESSIONS.includes(message.professionId)) return;
 
     const npc = NPCS[message.npcId];
-    if (!npc || npc.teachesProfessionId !== message.professionId) return this.rejectAction(client, "not_available");
-    if (!this.isNearNpc(player, message.npcId)) return this.rejectAction(client, "too_far");
+    if (!npc || npc.teachesProfessionId !== message.professionId) return rejectAction(client, "not_available");
+    if (!this.isNearNpc(player, message.npcId)) return rejectAction(client, "too_far");
 
-    if (player.professionXp.has(message.professionId)) return this.rejectAction(client, "profession_already_learned");
-    if (player.professionXp.size >= MAX_LEARNED_PROFESSIONS) return this.rejectAction(client, "profession_slots_full");
+    if (player.professionXp.has(message.professionId)) return rejectAction(client, "profession_already_learned");
+    if (player.professionXp.size >= MAX_LEARNED_PROFESSIONS) return rejectAction(client, "profession_slots_full");
 
     player.professionXp.set(message.professionId, 0);
     player.professionLevel.set(message.professionId, 1);
@@ -1186,11 +1051,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const nodeType = GATHERING_NODE_TYPES[node.nodeTypeId];
     if (!nodeType) return; // content deleted/renamed after this node was placed
 
-    if (Math.hypot(player.x - node.x, player.z - node.z) > GATHER_INTERACT_RADIUS) return this.rejectAction(client, "too_far");
-    if (!node.available) return this.rejectAction(client, "not_available");
-    if (!player.professionXp.has(nodeType.profession)) return this.rejectAction(client, "profession_not_learned");
-    if ((player.professionLevel.get(nodeType.profession) ?? 0) < nodeType.requiredLevel) return this.rejectAction(client, "level_too_low");
-    if (!this.hasInventorySpaceFor(player, nodeType.outputItemId)) return this.rejectAction(client, "inventory_full");
+    if (Math.hypot(player.x - node.x, player.z - node.z) > GATHER_INTERACT_RADIUS) return rejectAction(client, "too_far");
+    if (!node.available) return rejectAction(client, "not_available");
+    if (!player.professionXp.has(nodeType.profession)) return rejectAction(client, "profession_not_learned");
+    if ((player.professionLevel.get(nodeType.profession) ?? 0) < nodeType.requiredLevel) return rejectAction(client, "level_too_low");
+    if (!this.hasInventorySpaceFor(player, nodeType.outputItemId)) return rejectAction(client, "inventory_full");
 
     node.available = false;
     player.materials.set(nodeType.outputItemId, (player.materials.get(nodeType.outputItemId) ?? 0) + nodeType.outputQuantity);
@@ -1210,18 +1075,18 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const outputItem = ITEMS[recipe.outputItemId];
     if (!outputItem) return;
 
-    if (!player.professionXp.has(recipe.profession)) return this.rejectAction(client, "profession_not_learned");
-    if ((player.professionLevel.get(recipe.profession) ?? 0) < recipe.requiredLevel) return this.rejectAction(client, "level_too_low");
+    if (!player.professionXp.has(recipe.profession)) return rejectAction(client, "profession_not_learned");
+    if ((player.professionLevel.get(recipe.profession) ?? 0) < recipe.requiredLevel) return rejectAction(client, "level_too_low");
 
     for (const ingredient of recipe.ingredients) {
-      if ((player.materials.get(ingredient.itemId) ?? 0) < ingredient.quantity) return this.rejectAction(client, "insufficient_materials");
+      if ((player.materials.get(ingredient.itemId) ?? 0) < ingredient.quantity) return rejectAction(client, "insufficient_materials");
     }
     // Checked before consuming anything, so a full inventory never eats the ingredients on a
     // failed craft.
     if (outputItem.category === "equipment") {
-      if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
+      if (player.inventory.length >= INVENTORY_SIZE) return rejectAction(client, "inventory_full");
     } else if (!this.hasInventorySpaceFor(player, recipe.outputItemId)) {
-      return this.rejectAction(client, "inventory_full");
+      return rejectAction(client, "inventory_full");
     }
 
     for (const ingredient of recipe.ingredients) {
@@ -1245,10 +1110,10 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     if (!player || player.hp <= 0) return;
 
     const item = ITEMS[message.itemId];
-    if (!item || item.category !== "material" || !item.useEffects?.length) return this.rejectAction(client, "not_usable");
+    if (!item || item.category !== "material" || !item.useEffects?.length) return rejectAction(client, "not_usable");
 
     const count = player.materials.get(message.itemId) ?? 0;
-    if (count < 1) return this.rejectAction(client, "not_available");
+    if (count < 1) return rejectAction(client, "not_available");
 
     if (count > 1) player.materials.set(message.itemId, count - 1);
     else player.materials.delete(message.itemId);
@@ -1284,7 +1149,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
   private handleToggleMount(client: Client) {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
-    if (!player.hasMount) return this.rejectAction(client, "no_mount");
+    if (!player.hasMount) return rejectAction(client, "no_mount");
 
     player.mounted = !player.mounted;
   }
@@ -1295,8 +1160,8 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
     const quest = QUESTS[message.questId];
     if (!quest) return;
-    if (player.questProgress.has(quest.id) || player.questCompleted.has(quest.id)) return this.rejectAction(client, "not_available");
-    if (!this.isNearNpc(player, quest.giverNpcId)) return this.rejectAction(client, "too_far");
+    if (player.questProgress.has(quest.id) || player.questCompleted.has(quest.id)) return rejectAction(client, "not_available");
+    if (!this.isNearNpc(player, quest.giverNpcId)) return rejectAction(client, "too_far");
 
     player.questProgress.set(quest.id, 0);
   }
@@ -1309,9 +1174,9 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     if (!quest) return;
 
     const progress = player.questProgress.get(quest.id);
-    if (progress === undefined || progress < quest.objectiveCount) return this.rejectAction(client, "not_available");
-    if (!this.isNearNpc(player, quest.giverNpcId)) return this.rejectAction(client, "too_far");
-    if (quest.rewardItemId && player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
+    if (progress === undefined || progress < quest.objectiveCount) return rejectAction(client, "not_available");
+    if (!this.isNearNpc(player, quest.giverNpcId)) return rejectAction(client, "too_far");
+    if (quest.rewardItemId && player.inventory.length >= INVENTORY_SIZE) return rejectAction(client, "inventory_full");
 
     player.questProgress.delete(quest.id);
     player.questCompleted.set(quest.id, Date.now());
@@ -1336,12 +1201,12 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
     const npc = NPCS[message.npcId];
     if (!npc?.vendorItemIds?.includes(message.itemId)) return;
-    if (!this.isNearNpc(player, message.npcId)) return this.rejectAction(client, "too_far");
+    if (!this.isNearNpc(player, message.npcId)) return rejectAction(client, "too_far");
 
     const item = ITEMS[message.itemId];
     if (!item) return;
-    if (player.gold < item.basePrice) return this.rejectAction(client, "not_enough_gold");
-    if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
+    if (player.gold < item.basePrice) return rejectAction(client, "not_enough_gold");
+    if (player.inventory.length >= INVENTORY_SIZE) return rejectAction(client, "inventory_full");
 
     player.gold -= item.basePrice;
     player.inventory.push(encodeItemToken(message.itemId, "common"));
@@ -1357,7 +1222,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
     const npc = NPCS[message.npcId];
     if (!npc?.vendorItemIds) return;
-    if (!this.isNearNpc(player, message.npcId)) return this.rejectAction(client, "too_far");
+    if (!this.isNearNpc(player, message.npcId)) return rejectAction(client, "too_far");
 
     const index = player.inventory.indexOf(message.token);
     if (index === -1) return;

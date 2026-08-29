@@ -1,27 +1,16 @@
 import { Room, Client } from "@colyseus/core";
 import {
   ACTIVE_DUNGEON,
-  ActionFailedMessage,
-  ActionFailReason,
   CastMessage,
   ChatMessage,
   DungeonSpawnDef,
   ENEMY_RESPAWN_MS,
   ENEMY_TYPES,
   EQUIP_SLOTS,
-  GuildRosterSnapshot,
-  INVENTORY_SIZE,
   InputMessage,
-  LOOT_BAG_AGGREGATE_RADIUS,
-  LOOT_BAG_DESPAWN_MS,
-  LOOT_DROP_CHANCE,
-  LOOT_PICKUP_RADIUS,
   LootTakeMessage,
-  ITEM_IDS,
   decodeItemToken,
-  encodeItemToken,
   resolveClassId,
-  rollRarity,
 } from "@mmo/shared";
 import { verifyToken } from "../auth/jwt.js";
 import { getCharacterForUser, saveCharacterProgress } from "../db/characters.js";
@@ -32,16 +21,26 @@ import { isOnline, notifyCharacter, registerOnline, SocialCapableRoom, unregiste
 import { handleChatMessage } from "./chat.js";
 import { CombatEngine } from "./combat/CombatEngine.js";
 import { getEquippedItemId, setEquippedItemId } from "./equipment.js";
-import { DungeonState, Enemy, LootBag, Player } from "./schema/DungeonState.js";
-import { FriendEntry, FriendRequestEntry, GuildInviteEntry } from "./schema/WorldState.js";
+import { LootManager } from "./loot.js";
+import { PersistQueue } from "./persistQueue.js";
+import { respawnPlayerPosition } from "./roomUtil.js";
+import { DungeonState, Enemy, Player } from "./schema/DungeonState.js";
+import { FriendEntry } from "./schema/WorldState.js";
+import { addFriendEntryToPlayer, handleGuildLeave, handleGuildRosterRequest, removeFriendEntry, setFriendOnline, setGuildFields } from "./social.js";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const BOSS_GUARANTEED_DROPS = 3;
 
 export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom {
   private combat!: CombatEngine;
-  private characterIdBySession = new Map<string, number>();
-  private lootBagSeq = 0;
+  private loot!: LootManager;
+  // Not private: read by the GuildCapableRoom structural interface (social.ts's
+  // handleGuildLeave/handleGuildRosterRequest), same reasoning as WorldRoom's own field.
+  characterIdBySession = new Map<string, number>();
+  // See PersistQueue's own doc comment (persistItems + the onLeave save both go through this -
+  // WorldRoom already had this guard, DungeonRoom didn't until now, which was a real gap: a loot
+  // pickup right as a player disconnects could otherwise race the onLeave save and lose data).
+  private persistQueue = new PersistQueue();
 
   onCreate() {
     this.setState(new DungeonState());
@@ -50,13 +49,14 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
       state: this.state,
       onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
         this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
-      onPlayerRespawn: (sessionId, player) => this.handlePlayerRespawn(sessionId, player),
+      onPlayerRespawn: (_sessionId, player) => respawnPlayerPosition(player),
       onCombatText: (event) => this.broadcast("combat_text", event),
       // No collidableStructures - a dungeon has none of its own, and STRUCTURES is the overworld's
       // global list at unrelated overworld coordinates (see WorldRoom's own comment on this flag).
       // No blockWaterTerrain either - a dungeon has no hex terrain of its own.
       enemiesWander: true,
     });
+    this.loot = new LootManager(this);
 
     // Every DungeonSpawnDef is live for the whole run from the moment it's created - no wave
     // gating, so the whole dungeon reads as one real space to fight through rather than a box that
@@ -66,10 +66,10 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
 
     this.onMessage("input", (client, message: InputMessage) => this.combat.handleInput(client.sessionId, message));
     this.onMessage("cast", (client, message: CastMessage) => this.combat.handleCast(client, message));
-    this.onMessage("loot_take", (client, message: LootTakeMessage) => this.handleLootTake(client, message));
+    this.onMessage("loot_take", (client, message: LootTakeMessage) => this.loot.handleLootTake(client, message));
     this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
-    this.onMessage("guild_leave", (client) => this.handleGuildLeave(client));
-    this.onMessage("guild_roster_request", (client) => this.handleGuildRosterRequest(client));
+    this.onMessage("guild_leave", (client) => handleGuildLeave(this, client));
+    this.onMessage("guild_roster_request", (client) => handleGuildRosterRequest(this, client));
 
     this.setSimulationInterval(() => this.combat.tick(SIMULATION_INTERVAL_MS / 1000), SIMULATION_INTERVAL_MS);
   }
@@ -193,29 +193,32 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
       }
     }
     if (player && characterId) {
-      try {
-        await saveCharacterProgress(characterId, {
-          level: player.level,
-          xp: player.xp,
-          stats: { mainStat: player.mainStat, vitality: player.vitality, luck: player.luck, armor: player.armor },
-          gold: player.gold,
-          talentPoints: player.talentPoints,
-          talentRanks: Object.fromEntries(player.talentRanks),
-          questProgress: {},
-          questCompleted: {},
-          professionXp: Object.fromEntries(player.professionXp),
-          professionLevel: Object.fromEntries(player.professionLevel),
-          materials: Object.fromEntries(player.materials),
-          hasMount: player.hasMount,
-        });
-      } catch (err) {
-        console.error(`[DungeonRoom] failed to save character ${characterId}:`, err);
-      }
+      await this.persistQueue.run(client.sessionId, async () => {
+        try {
+          await saveCharacterProgress(characterId, {
+            level: player.level,
+            xp: player.xp,
+            stats: { mainStat: player.mainStat, vitality: player.vitality, luck: player.luck, armor: player.armor },
+            gold: player.gold,
+            talentPoints: player.talentPoints,
+            talentRanks: Object.fromEntries(player.talentRanks),
+            questProgress: {},
+            questCompleted: {},
+            professionXp: Object.fromEntries(player.professionXp),
+            professionLevel: Object.fromEntries(player.professionLevel),
+            materials: Object.fromEntries(player.materials),
+            hasMount: player.hasMount,
+          });
+        } catch (err) {
+          console.error(`[DungeonRoom] failed to save character ${characterId}:`, err);
+        }
+      });
     }
 
     this.combat.clearSessionTracking(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.characterIdBySession.delete(client.sessionId);
+    this.persistQueue.clear(client.sessionId); // the save above already settled
   }
 
   private spawnDungeonEnemy(point: DungeonSpawnDef) {
@@ -245,10 +248,10 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
     }
 
     if (enemyType.behavior === "boss") {
-      for (let i = 0; i < BOSS_GUARANTEED_DROPS; i++) this.maybeDropLoot(x, z, true);
+      for (let i = 0; i < BOSS_GUARANTEED_DROPS; i++) this.loot.maybeDropLoot(x, z, true);
       this.state.cleared = true;
     } else {
-      this.maybeDropLoot(x, z, false);
+      this.loot.maybeDropLoot(x, z, false);
       // Same respawn-in-place contract as the overworld's SPAWN_POINTS (WorldRoom.spawnEnemy) -
       // doesn't match anything for a boss's own add spawns (their ids are `add-...`, never a
       // DungeonSpawnDef id), so those correctly never respawn either.
@@ -257,133 +260,26 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
     }
   }
 
-  // CombatEngine hook: called after a dead player's hp/ailments/cast have already been reset.
-  private handlePlayerRespawn(_sessionId: string, player: Player) {
-    player.x = 0;
-    player.y = 0;
-    player.z = 0;
-  }
+  async persistItems(sessionId: string) {
+    return this.persistQueue.run(sessionId, async () => {
+      const player = this.state.players.get(sessionId);
+      const characterId = this.characterIdBySession.get(sessionId);
+      if (!player || !characterId) return;
 
-  private maybeDropLoot(x: number, z: number, guaranteed: boolean) {
-    if (!guaranteed && Math.random() >= LOOT_DROP_CHANCE) return;
-    const itemId = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
-    this.dropLoot(x, z, encodeItemToken(itemId, rollRarity()));
-  }
-
-  private dropLoot(x: number, z: number, itemId: string) {
-    for (const bag of this.state.lootBags.values()) {
-      const dist = Math.hypot(bag.x - x, bag.z - z);
-      if (dist <= LOOT_BAG_AGGREGATE_RADIUS) {
-        bag.items.push(itemId);
-        return;
+      try {
+        const equipped = Object.fromEntries(EQUIP_SLOTS.map((slot) => [slot, getEquippedItemId(player, slot)])) as EquippedItemIds;
+        await replaceCharacterItems(characterId, [...player.inventory], equipped);
+      } catch (err) {
+        console.error(`[DungeonRoom] failed to persist items for character ${characterId}:`, err);
       }
-    }
-
-    const bag = new LootBag();
-    bag.x = x;
-    bag.z = z;
-    bag.items.push(itemId);
-
-    const id = `bag-${this.lootBagSeq++}`;
-    this.state.lootBags.set(id, bag);
-    this.clock.setTimeout(() => this.state.lootBags.delete(id), LOOT_BAG_DESPAWN_MS);
-  }
-
-  // Sends an ActionFailedMessage back to just this one client - mirrors WorldRoom's own
-  // rejectAction (each room keeps its own copy of handleLootTake, so this small helper is
-  // duplicated too rather than sharing a base class for one line of behavior).
-  private rejectAction(client: Client, reason: ActionFailReason) {
-    const failure: ActionFailedMessage = { reason };
-    client.send("action_failed", failure);
-  }
-
-  private handleLootTake(client: Client, message: LootTakeMessage) {
-    const player = this.state.players.get(client.sessionId);
-    const bag = this.state.lootBags.get(message.bagId);
-    if (!player || !bag) return;
-
-    const dist = Math.hypot(player.x - bag.x, player.z - bag.z);
-    if (dist > LOOT_PICKUP_RADIUS) return this.rejectAction(client, "too_far");
-
-    const index = bag.items.indexOf(message.itemId);
-    if (index === -1) return this.rejectAction(client, "not_available");
-    if (player.inventory.length >= INVENTORY_SIZE) return this.rejectAction(client, "inventory_full");
-
-    bag.items.splice(index, 1);
-    player.inventory.push(message.itemId);
-
-    if (bag.items.length === 0) {
-      this.state.lootBags.delete(message.bagId);
-    }
-
-    this.persistItems(client.sessionId);
-  }
-
-  private async persistItems(sessionId: string) {
-    const player = this.state.players.get(sessionId);
-    const characterId = this.characterIdBySession.get(sessionId);
-    if (!player || !characterId) return;
-
-    try {
-      const equipped = Object.fromEntries(EQUIP_SLOTS.map((slot) => [slot, getEquippedItemId(player, slot)])) as EquippedItemIds;
-      await replaceCharacterItems(characterId, [...player.inventory], equipped);
-    } catch (err) {
-      console.error(`[DungeonRoom] failed to persist items for character ${characterId}:`, err);
-    }
-  }
-
-  // --- Guilds (leave/roster only - see plan: creation/invite/kick/promote/disband stay world-only) ---
-
-  private async handleGuildLeave(client: Client) {
-    const player = this.state.players.get(client.sessionId);
-    const characterId = this.characterIdBySession.get(client.sessionId);
-    if (!player || characterId === undefined) return;
-    if (player.guildId === 0) return;
-
-    const guildId = player.guildId;
-    const guildName = player.guildName;
-    const wasLeader = player.guildRole === "leader";
-    await guildsDb.removeGuildMember(characterId);
-    player.guildId = 0;
-    player.guildName = "";
-    player.guildRole = "";
-
-    if (wasLeader) {
-      const promotedId = await guildsDb.promoteNextMemberAsLeader(guildId);
-      if (promotedId === null) {
-        await guildsDb.deleteGuild(guildId);
-      } else {
-        notifyCharacter(promotedId, (room, sid) => room.applyGuildFieldsChange(sid, guildId, guildName, "leader"));
-      }
-    }
-  }
-
-  private async handleGuildRosterRequest(client: Client) {
-    const player = this.state.players.get(client.sessionId);
-    if (!player || player.guildId === 0) return;
-
-    const members = await guildsDb.listGuildMembers(player.guildId);
-    const snapshot: GuildRosterSnapshot = {
-      guildId: player.guildId,
-      guildName: player.guildName,
-      members: members.map((m) => ({
-        characterId: m.character_id,
-        name: m.name,
-        level: m.level,
-        classId: m.class_id,
-        role: m.role,
-        online: isOnline(m.character_id),
-      })),
-    };
-    client.send("guild_roster", snapshot);
+    });
   }
 
   // --- SocialCapableRoom (see onlineRegistry.ts's own doc comment - lets notifyCharacter reach a
   // specific online character's client regardless of which room instance currently holds them) ---
 
   applyFriendOnlineChange(sessionId: string, characterId: number, online: boolean) {
-    const entry = this.state.players.get(sessionId)?.friends.get(String(characterId));
-    if (entry) entry.online = online;
+    setFriendOnline(this.state.players.get(sessionId), characterId, online);
   }
 
   applyFriendRequestPush(sessionId: string, entry: { requestId: number; fromCharacterId: number; fromName: string }) {
@@ -395,18 +291,11 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
 
   applyFriendAdded(sessionId: string, entry: { characterId: number; name: string; level: number; classId: string; online: boolean }) {
     const player = this.state.players.get(sessionId);
-    if (!player) return;
-    const friendEntry = new FriendEntry();
-    friendEntry.characterId = entry.characterId;
-    friendEntry.name = entry.name;
-    friendEntry.level = entry.level;
-    friendEntry.classId = entry.classId;
-    friendEntry.online = entry.online;
-    player.friends.set(String(entry.characterId), friendEntry);
+    if (player) addFriendEntryToPlayer(player, entry.characterId, entry.name, entry.level, entry.classId, entry.online);
   }
 
   applyFriendRemoved(sessionId: string, characterId: number) {
-    this.state.players.get(sessionId)?.friends.delete(String(characterId));
+    removeFriendEntry(this.state.players.get(sessionId), characterId);
   }
 
   applyGuildInvitePush(sessionId: string, entry: { inviteId: number; guildId: number; guildName: string; invitedByName: string }) {
@@ -416,10 +305,6 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
   }
 
   applyGuildFieldsChange(sessionId: string, guildId: number, guildName: string, guildRole: string) {
-    const player = this.state.players.get(sessionId);
-    if (!player) return;
-    player.guildId = guildId;
-    player.guildName = guildName;
-    player.guildRole = guildRole;
+    setGuildFields(this.state.players.get(sessionId), guildId, guildName, guildRole);
   }
 }

@@ -99,6 +99,7 @@ interface PendingPlayerCast {
   spellId: SpellId;
   target: ResolvedTarget;
   fireAt: number;
+  startedAt: number;
 }
 
 interface PendingEnemyCast {
@@ -309,7 +310,7 @@ export class CombatEngine {
 
   handleInput(sessionId: string, message: InputMessage) {
     if (message.moveX !== 0 || message.moveZ !== 0) {
-      this.cancelPlayerCast(sessionId);
+      this.cancelPlayerCast(sessionId, true);
     }
     this.lastInput.set(sessionId, {
       moveX: clamp(message.moveX, -1, 1),
@@ -367,6 +368,7 @@ export class CombatEngine {
         spellId: message.spellId,
         target,
         fireAt: now + spell.castTimeMs,
+        startedAt: now,
       });
     } else if (spell.effects?.length) {
       const casterCtx = this.makePlayerCasterCtx(player, client.sessionId, spell.id);
@@ -917,11 +919,25 @@ export class CombatEngine {
     }
   }
 
-  private cancelPlayerCast(sessionId: string) {
-    if (!this.pendingPlayerCast.has(sessionId)) return;
+  // refundCooldown undoes the cooldown-charge this cast consumed at handleCast time (see the
+  // activeCasts.push(now) there) - only appropriate when the player chose to cancel their own
+  // cast (moving), not when it was cancelled by dying or by an enemy interrupt, which still
+  // consume the cooldown same as a completed cast (matches tryInterrupt's own doc comment).
+  private cancelPlayerCast(sessionId: string, refundCooldown = false) {
+    const pending = this.pendingPlayerCast.get(sessionId);
+    if (!pending) return;
     this.pendingPlayerCast.delete(sessionId);
     const player = this.state.players.get(sessionId);
     if (player) player.castSpellId = "";
+
+    if (refundCooldown) {
+      const cooldownKey = `${sessionId}:${pending.spellId}`;
+      const activeCasts = this.lastCastAt.get(cooldownKey);
+      if (activeCasts) {
+        const index = activeCasts.indexOf(pending.startedAt);
+        if (index !== -1) activeCasts.splice(index, 1);
+      }
+    }
   }
 
   private cancelEnemyCast(enemyId: string) {
