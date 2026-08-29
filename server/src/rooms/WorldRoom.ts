@@ -48,6 +48,7 @@ import {
   RefundTalentMessage,
   SetTimeOfDayMessage,
   SPAWN_POINTS,
+  SPAWN_POSITION,
   SPAWN_ZONES,
   SellItemMessage,
   SpendTalentMessage,
@@ -85,7 +86,7 @@ import { CombatEngine } from "./combat/CombatEngine.js";
 import { getEquippedItemId, setEquippedItemId } from "./equipment.js";
 import { LootManager } from "./loot.js";
 import { PersistQueue } from "./persistQueue.js";
-import { rejectAction, respawnPlayerPosition } from "./roomUtil.js";
+import { rejectAction, respawnPlayerAtClosestPoint } from "./roomUtil.js";
 import { DungeonListing, Enemy, FriendEntry, FriendRequestEntry, GatheringNode, GuildInviteEntry, Player, WorldState } from "./schema/WorldState.js";
 import { addFriendEntryToPlayer, handleGuildLeave, handleGuildRosterRequest, removeFriendEntry, setFriendOnline, setGuildFields } from "./social.js";
 import { TradeManager } from "./trade.js";
@@ -118,7 +119,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
       state: this.state,
       onEnemyKilled: (enemyId, enemyTypeId, killerSessionId, x, z) =>
         this.handleEnemyKilled(enemyId, enemyTypeId, killerSessionId, x, z),
-      onPlayerRespawn: (_sessionId, player) => respawnPlayerPosition(player),
+      onPlayerRespawn: (_sessionId, player) => respawnPlayerAtClosestPoint(player),
       onCombatText: (event) => this.broadcast("combat_text", event),
       collidableStructures: true,
       enemiesWander: true,
@@ -224,9 +225,21 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const classId = resolveClassId(character.class_id);
 
     const player = new Player();
-    player.x = 0;
+    // A brand new character (characters.x/z still NULL - never saved) lands at the admin-editable
+    // spawn point (game_maps.spawn_x/spawn_z, edited via the map editor's spawn marker). An
+    // existing one resumes exactly where they last disconnected (see saveCharacter, which
+    // persists position on every leave/autosave) - SPAWN_POSITION is a first-time-only landing
+    // spot, not a "everyone always starts here" reset. Deliberately not PORTAL_POSITION either -
+    // that's the dungeon-entrance portal object's position, a different concept entirely (see
+    // SPAWN_POSITION's own doc comment).
+    if (character.x != null && character.z != null) {
+      player.x = character.x;
+      player.z = character.z;
+    } else {
+      player.x = SPAWN_POSITION.x;
+      player.z = SPAWN_POSITION.z;
+    }
     player.y = 0;
-    player.z = 0;
     player.name = character.name;
     // Restores a party that was already formed before entering a dungeon (see
     // DungeonRoom.onJoin's identical carry-through and the Leave Dungeon flow in main.ts) -
@@ -380,6 +393,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
           professionLevel: Object.fromEntries(player.professionLevel),
           materials: Object.fromEntries(player.materials),
           hasMount: player.hasMount,
+          position: { x: player.x, z: player.z },
         });
       } catch (err) {
         console.error(`[WorldRoom] failed to save character ${characterId}:`, err);

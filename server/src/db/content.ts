@@ -17,6 +17,7 @@ import {
   PlayerStats,
   QuestDef,
   RecipeDef,
+  RespawnPointDef,
   SpellDef,
   StructureDef,
   TalentDef,
@@ -156,6 +157,8 @@ interface GameMapRow {
   is_active: boolean;
   portal_x: number | null;
   portal_z: number | null;
+  spawn_x: number | null;
+  spawn_z: number | null;
   boss_arena_x: number | null;
   boss_arena_z: number | null;
   boss_arena_radius: number | null;
@@ -222,6 +225,14 @@ interface WaypointRow {
   z: number;
 }
 
+interface RespawnPointRow {
+  id: string;
+  name: string;
+  map_id: string;
+  x: number;
+  z: number;
+}
+
 interface FurnitureRow {
   id: string;
   name: string;
@@ -262,6 +273,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     dungeonRows,
     structureRows,
     waypointRows,
+    respawnPointRows,
     furnitureRows,
     hexTileRows,
     recipeRows,
@@ -283,6 +295,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     pool.query<DungeonRow>("SELECT * FROM dungeons").then((r) => r.rows),
     pool.query<StructureRow>("SELECT * FROM structures").then((r) => r.rows),
     pool.query<WaypointRow>("SELECT * FROM waypoints").then((r) => r.rows),
+    pool.query<RespawnPointRow>("SELECT * FROM respawn_points").then((r) => r.rows),
     pool.query<FurnitureRow>("SELECT * FROM furniture").then((r) => r.rows),
     pool.query<HexTileRow>("SELECT * FROM hex_tiles").then((r) => r.rows),
     pool.query<RecipeRow>("SELECT * FROM recipes").then((r) => r.rows),
@@ -393,6 +406,8 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     isActive: m.is_active,
     portalX: nullToUndefined(m.portal_x),
     portalZ: nullToUndefined(m.portal_z),
+    spawnX: nullToUndefined(m.spawn_x),
+    spawnZ: nullToUndefined(m.spawn_z),
     bossArenaX: nullToUndefined(m.boss_arena_x),
     bossArenaZ: nullToUndefined(m.boss_arena_z),
     bossArenaRadius: nullToUndefined(m.boss_arena_radius),
@@ -453,6 +468,14 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     mapId: w.map_id,
     x: w.x,
     z: w.z,
+  }));
+
+  const respawnPoints: RespawnPointDef[] = respawnPointRows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    mapId: r.map_id,
+    x: r.x,
+    z: r.z,
   }));
 
   const furniture: FurnitureDef[] = furnitureRows.map((f) => ({
@@ -523,6 +546,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     spawnZones,
     structures,
     waypoints,
+    respawnPoints,
     furniture,
     hexTiles,
     recipes,

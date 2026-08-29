@@ -279,6 +279,8 @@ export const ENTITIES: EntitySchema[] = [
       { key: "half_extent", label: "Half Extent", type: "number" },
       { key: "portal_x", label: "Portal X", type: "number", optional: true },
       { key: "portal_z", label: "Portal Z", type: "number", optional: true },
+      { key: "spawn_x", label: "Spawn X", type: "number", optional: true },
+      { key: "spawn_z", label: "Spawn Z", type: "number", optional: true },
       { key: "boss_arena_x", label: "Boss Arena X", type: "number", optional: true },
       { key: "boss_arena_z", label: "Boss Arena Z", type: "number", optional: true },
       { key: "boss_arena_radius", label: "Boss Arena Radius", type: "number", optional: true },
@@ -414,6 +416,18 @@ export const ENTITIES: EntitySchema[] = [
   {
     key: "waypoints",
     label: "Waypoints",
+    displayField: "name",
+    fields: [
+      { key: "id", label: "ID", type: "text" },
+      { key: "name", label: "Name", type: "text" },
+      { key: "map_id", label: "Map", type: "reference", referenceEntity: "maps" },
+      { key: "x", label: "X", type: "number" },
+      { key: "z", label: "Z", type: "number" },
+    ],
+  },
+  {
+    key: "respawn-points",
+    label: "Respawn Points",
     displayField: "name",
     fields: [
       { key: "id", label: "ID", type: "text" },

@@ -101,6 +101,7 @@ describe("content-backed functions", () => {
     spawnZones: [],
     structures: [{ id: "wall1", name: "Wall", mapId: "overworld", kind: "wall", x: 0, z: 0, rotationY: 0, width: 2, depth: 2, height: 2, color: "#888", yOffset: 0 }],
     waypoints: [],
+    respawnPoints: [],
     furniture: [{ id: "hill1", name: "Hill", mapId: "overworld", kind: "hill", x: 10, z: 10, rotationY: 0, color: "#000", yOffset: 0 }],
     hexTiles: [],
     recipes: [],

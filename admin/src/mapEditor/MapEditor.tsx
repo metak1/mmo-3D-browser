@@ -24,6 +24,7 @@ import { EntityForm } from "../EntityForm";
 import { createEntity, deleteEntity, listEntities, updateEntity } from "../api";
 import { BUILDING_MODEL_PATH, buildEnclosureShape, buildStructureShape, populateBuildingShape } from "./structureGeometry";
 import { populateFurnitureShape } from "./furnitureGeometry";
+import { populateNpcShape } from "./npcGeometry";
 import { loadModelGeometry } from "./modelLoader";
 import { buildHexTerrainPreview } from "./hexTerrainPreview";
 
@@ -34,14 +35,34 @@ type SelectableType =
   | "enemy-spawns"
   | "enemy-spawn-zones"
   | "waypoints"
+  | "respawn-points"
   | "furniture"
   | "hex-tiles"
-  | "gathering-nodes";
+  | "gathering-nodes"
+  // Not list entities like the others - each is one of the active map's own single point fields
+  // (portal_x/z or spawn_x/z), always rendered rather than placed/deleted (see the two always-on
+  // markers built in the content-sync effect below and their special-cased commitTransformRef
+  // branches, since a drag here PATCHes "maps", not a list row of its own). Two distinct
+  // SelectableTypes rather than one generic "maps" so the marker/inspector/commit code can tell
+  // which field a given drag/edit belongs to - see mapPointField().
+  | "map-portal"
+  | "map-spawn";
 type GizmoMode = "translate" | "rotate" | "scale";
 
 interface Selected {
   type: SelectableType;
   row: RowData;
+}
+
+// Both "map-portal" and "map-spawn" resolve to the same "maps" table/entity underneath (they're
+// two fields on one map row, not rows of their own) - centralizing that mapping here so every
+// call site that needs the real table name (updateEntity/ENTITIES lookup) or the field pair to
+// read/write agrees, rather than re-deriving it ad hoc in four different places.
+function isMapPointType(type: SelectableType): type is "map-portal" | "map-spawn" {
+  return type === "map-portal" || type === "map-spawn";
+}
+function mapEntityKey(type: SelectableType): string {
+  return isMapPointType(type) ? "maps" : type;
 }
 
 // A "tool" is what a click in the 3D view does while it's active: paint/erase a hex tile, or drop
@@ -54,7 +75,7 @@ type ActiveTool =
   | { mode: "structure"; structureModelId: string }
   | { mode: "lamp"; lampModelId: string }
   | { mode: "wallKind"; wallKind: (typeof STRUCTURE_KINDS)[number] }
-  | { mode: "marker"; markerKind: "npc" | "enemy-spawn" | "waypoint" | "gathering-node" }
+  | { mode: "marker"; markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node" }
   | { mode: "zone" }
   | { mode: "elevation"; level: number }
   | { mode: "ramp" }
@@ -254,13 +275,16 @@ const WALL_PALETTE: { wallKind: (typeof STRUCTURE_KINDS)[number]; label: string 
   label: wallKind[0].toUpperCase() + wallKind.slice(1),
 }));
 
-// NPCs/enemy spawns/waypoints are just a position - no footprint, no visual variety of their own -
-// so this palette mirrors their in-scene marker balls (buildMarker/NPC_MARKER_COLOR etc.) with a
-// round swatch instead of a thumbnail, same reasoning WALL_PALETTE uses flat swatches over renders.
-const MARKER_PALETTE: { markerKind: "npc" | "enemy-spawn" | "waypoint" | "gathering-node"; label: string; color: string }[] = [
+// Enemy spawns/waypoints/gathering nodes are just a position - no footprint, no visual variety of
+// their own - so this palette mirrors their in-scene marker balls (buildMarker/SPAWN_MARKER_COLOR
+// etc.) with a round swatch instead of a thumbnail, same reasoning WALL_PALETTE uses flat swatches
+// over renders. NPCs get a real model in-scene (populateNpcShape) but keep the same round swatch
+// here in the placement toolbar - a tiny yellow ball is still a fine "place an NPC" tool icon.
+const MARKER_PALETTE: { markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node"; label: string; color: string }[] = [
   { markerKind: "npc", label: "NPC", color: "#f5d76e" },
   { markerKind: "enemy-spawn", label: "Enemy Spawn", color: "#e05a4e" },
   { markerKind: "waypoint", label: "Waypoint", color: "#f5c451" },
+  { markerKind: "respawn-point", label: "Respawn Point", color: "#a78bfa" },
   { markerKind: "gathering-node", label: "Gathering Node", color: "#7bc47f" },
 ];
 
@@ -309,9 +333,11 @@ const LAMP_PALETTE: { modelId: string; label: string; thumbnail: string; width: 
   { modelId: "lampCeiling", label: "Ceiling Lamp", thumbnail: "/thumbnails/thumb_lampCeiling.png", width: 0.3, depth: 0.3, height: 2, yOffset: 2.5 },
 ];
 
-const NPC_MARKER_COLOR = 0xf5d76e;
 const SPAWN_MARKER_COLOR = 0xe05a4e;
 const WAYPOINT_MARKER_COLOR = 0xf5c451;
+const RESPAWN_POINT_MARKER_COLOR = 0xa78bfa;
+const PORTAL_MARKER_COLOR = 0x4ac0e8; // matches PortalAvatar's own in-game color (client/src/game/Portal.ts)
+const CHARACTER_SPAWN_MARKER_COLOR = 0xffa552;
 const GATHERING_NODE_MARKER_COLOR = 0x7bc47f;
 const GRID_COLOR = 0x4a5578;
 const GRID_COLOR_DARK = 0x3a4260;
@@ -516,6 +542,11 @@ interface ThreeContext {
   // entirely) flat plane at y=0, intersected whenever a placement tool is active to get the exact
   // world (x, z) under the cursor regardless of what's actually rendered there.
   pickPlane: THREE.Mesh;
+  // Drives every placed NPC's idle animation (see populateNpcShape) - reset to empty and repopulated
+  // each time the content-sync effect rebuilds `content` from scratch, same lifecycle as the
+  // markers/models themselves.
+  mixers: THREE.AnimationMixer[];
+  clock: THREE.Clock;
 }
 
 export function MapEditor() {
@@ -529,6 +560,7 @@ export function MapEditor() {
   const [spawns, setSpawns] = useState<RowData[]>([]);
   const [zones, setZones] = useState<RowData[]>([]);
   const [waypoints, setWaypoints] = useState<RowData[]>([]);
+  const [respawnPoints, setRespawnPoints] = useState<RowData[]>([]);
   const [furniture, setFurniture] = useState<RowData[]>([]);
   const [hexTiles, setHexTiles] = useState<RowData[]>([]);
   const [enemyTypes, setEnemyTypes] = useState<RowData[]>([]);
@@ -573,11 +605,18 @@ export function MapEditor() {
 
   const reloadContent = useCallback(() => {
     if (!mapId) return;
+    // Doesn't touch mapId itself (unlike the mount effect above, which also auto-selects the
+    // active overworld map on first load) - just refreshes each row's own fields, so a portal/
+    // spawn marker drag/save (the "map-portal"/"map-spawn" SelectableTypes - see
+    // commitTransformRef/handleFormSubmit) actually shows its new position instead of the marker/
+    // form silently reverting to stale portal_x/z or spawn_x/z on the next render.
+    listEntities<RowData>("maps").then((res) => setMaps(res.items));
     listEntities<RowData>("structures").then((res) => setStructures(res.items.filter((s) => s.map_id === mapId)));
     listEntities<RowData>("npcs").then((res) => setNpcs(res.items.filter((n) => n.map_id === mapId)));
     listEntities<RowData>("enemy-spawns").then((res) => setSpawns(res.items.filter((s) => s.map_id === mapId)));
     listEntities<RowData>("enemy-spawn-zones").then((res) => setZones(res.items.filter((z) => z.map_id === mapId)));
     listEntities<RowData>("waypoints").then((res) => setWaypoints(res.items.filter((w) => w.map_id === mapId)));
+    listEntities<RowData>("respawn-points").then((res) => setRespawnPoints(res.items.filter((r) => r.map_id === mapId)));
     listEntities<RowData>("furniture").then((res) => setFurniture(res.items.filter((f) => f.map_id === mapId)));
     listEntities<RowData>("hex-tiles").then((res) => setHexTiles(res.items.filter((h) => h.map_id === mapId)));
     listEntities<RowData>("gathering-nodes").then((res) => setGatheringNodes(res.items.filter((n) => n.map_id === mapId)));
@@ -643,8 +682,10 @@ export function MapEditor() {
     });
 
     const raycaster = new THREE.Raycaster();
+    const mixers: THREE.AnimationMixer[] = [];
+    const clock = new THREE.Clock();
 
-    threeRef.current = { renderer, scene, camera, orbit, transform, content, ground, grid, raycaster, pickPlane };
+    threeRef.current = { renderer, scene, camera, orbit, transform, content, ground, grid, raycaster, pickPlane, mixers, clock };
 
     function onResize() {
       if (!container) return;
@@ -703,6 +744,8 @@ export function MapEditor() {
     function animate() {
       raf = requestAnimationFrame(animate);
       orbit.update();
+      const delta = clock.getDelta();
+      for (const mixer of mixers) mixer.update(delta);
       renderer.render(scene, camera);
     }
     animate();
@@ -728,9 +771,11 @@ export function MapEditor() {
   const spawnsRef = useRef<RowData[]>([]);
   const zonesRef = useRef<RowData[]>([]);
   const waypointsRef = useRef<RowData[]>([]);
+  const respawnPointsRef = useRef<RowData[]>([]);
   const furnitureRef = useRef<RowData[]>([]);
   const hexTilesRef = useRef<RowData[]>([]);
   const gatheringNodesRef = useRef<RowData[]>([]);
+  const mapsRef = useRef<RowData[]>([]);
   // Session-local overlay of hex-tile row ids not yet confirmed by a reload - see its one use
   // site, the "elevation" tool branch in placeAtRef, for why this exists (fixes a real race a
   // rapid click sequence on the same cell can hit against hexTilesRef alone: a second click
@@ -754,6 +799,8 @@ export function MapEditor() {
   spawnsRef.current = spawns;
   zonesRef.current = zones;
   waypointsRef.current = waypoints;
+  respawnPointsRef.current = respawnPoints;
+  mapsRef.current = maps;
   furnitureRef.current = furniture;
   hexTilesRef.current = hexTiles;
   gatheringNodesRef.current = gatheringNodes;
@@ -770,12 +817,17 @@ export function MapEditor() {
         return zonesRef.current;
       case "waypoints":
         return waypointsRef.current;
+      case "respawn-points":
+        return respawnPointsRef.current;
       case "furniture":
         return furnitureRef.current;
       case "hex-tiles":
         return hexTilesRef.current;
       case "gathering-nodes":
         return gatheringNodesRef.current;
+      case "map-portal":
+      case "map-spawn":
+        return mapsRef.current;
     }
   }
 
@@ -852,6 +904,19 @@ export function MapEditor() {
       // this drag's result belongs to.
       if (isRampEligible(kind, elevation)) changes.ramp_rotation = normalized;
       else changes.rotation = normalized;
+    } else if (sel.type === "map-portal" || sel.type === "map-spawn") {
+      // The portal/spawn markers drag the active map's own portal_x/z or spawn_x/z fields
+      // directly (see the two markers built in the content-sync effect below) - not a list row's
+      // x/z like every other marker, so this branch writes different field names before falling
+      // through to the same generic updateEntity(mapEntityKey(sel.type), ...) call every other
+      // branch already ends in.
+      if (sel.type === "map-portal") {
+        changes.portal_x = round(mesh.position.x);
+        changes.portal_z = round(mesh.position.z);
+      } else {
+        changes.spawn_x = round(mesh.position.x);
+        changes.spawn_z = round(mesh.position.z);
+      }
     } else {
       changes.x = round(mesh.position.x);
       changes.z = round(mesh.position.z);
@@ -865,7 +930,7 @@ export function MapEditor() {
       }
     }
 
-    updateEntity(sel.type, String(sel.row.id), changes).then(() => reloadContent());
+    updateEntity(mapEntityKey(sel.type), String(sel.row.id), changes).then(() => reloadContent());
   };
 
   // --- Placement tools: a click in the 3D view while a palette item is active paints/erases a
@@ -1061,6 +1126,12 @@ export function MapEditor() {
           reloadContent();
           setSelected({ type: "waypoints", row });
         });
+      } else if (tool.markerKind === "respawn-point") {
+        const row: RowData = { id: `respawn_${Date.now()}`, name: "New Respawn Point", map_id: mapId, x: round(x), z: round(z) };
+        createEntity("respawn-points", row).then(() => {
+          reloadContent();
+          setSelected({ type: "respawn-points", row });
+        });
       } else {
         if (gatheringNodeTypes.length === 0) return;
         const row: RowData = {
@@ -1176,6 +1247,7 @@ export function MapEditor() {
         }
       });
     }
+    three.mixers.length = 0;
 
     for (const def of structureDefs) {
       const group = new THREE.Group();
@@ -1195,13 +1267,14 @@ export function MapEditor() {
     }
 
     for (const row of npcs) {
-      const marker = buildMarker(NPC_MARKER_COLOR);
+      const group = new THREE.Group();
       const x = Number(row.x);
       const z = Number(row.z);
       const yOffset = Number(row.y_offset ?? 0);
-      marker.position.set(x, terrainY(x, z) + yOffset, z);
-      marker.userData = { entityType: "npcs", entityId: String(row.id) };
-      three.content.add(marker);
+      group.position.set(x, terrainY(x, z) + yOffset, z);
+      group.userData = { entityType: "npcs", entityId: String(row.id) };
+      populateNpcShape(group, three.mixers);
+      three.content.add(group);
     }
 
     for (const row of spawns) {
@@ -1230,6 +1303,40 @@ export function MapEditor() {
       marker.position.set(x, terrainY(x, z), z);
       marker.userData = { entityType: "waypoints", entityId: String(row.id) };
       three.content.add(marker);
+    }
+
+    for (const row of respawnPoints) {
+      const marker = buildMarker(RESPAWN_POINT_MARKER_COLOR);
+      const x = Number(row.x);
+      const z = Number(row.z);
+      marker.position.set(x, terrainY(x, z), z);
+      marker.userData = { entityType: "respawn-points", entityId: String(row.id) };
+      three.content.add(marker);
+    }
+
+    // The portal and spawn markers - unlike every marker above, neither is a list row of its own
+    // (there's no "place one" tool, no create/delete): every map already has exactly one
+    // portal_x/z pair and one spawn_x/z pair (each defaulting to 0,0), they've just been four
+    // blind number fields on the map's own form until now. Always rendered so they're draggable
+    // the moment a map is open. These are two DIFFERENT things easy to conflate (see
+    // shared's PORTAL_POSITION/SPAWN_POSITION doc comments): the portal is the clickable
+    // dungeon-entrance prop only the overworld ever renders in-game (client/src/game/Portal.ts),
+    // while spawn is plain coordinates - where a character actually appears on join
+    // (WorldRoom.onJoin/DungeonRoom.onJoin), with no world object of its own, on every map kind.
+    if (activeMap) {
+      const portalMarker = buildMarker(PORTAL_MARKER_COLOR);
+      const px = activeMap.portal_x != null ? Number(activeMap.portal_x) : 0;
+      const pz = activeMap.portal_z != null ? Number(activeMap.portal_z) : 0;
+      portalMarker.position.set(px, terrainY(px, pz), pz);
+      portalMarker.userData = { entityType: "map-portal", entityId: String(activeMap.id) };
+      three.content.add(portalMarker);
+
+      const spawnMarker = buildMarker(CHARACTER_SPAWN_MARKER_COLOR);
+      const sx = activeMap.spawn_x != null ? Number(activeMap.spawn_x) : 0;
+      const sz = activeMap.spawn_z != null ? Number(activeMap.spawn_z) : 0;
+      spawnMarker.position.set(sx, terrainY(sx, sz), sz);
+      spawnMarker.userData = { entityType: "map-spawn", entityId: String(activeMap.id) };
+      three.content.add(spawnMarker);
     }
 
     for (const row of gatheringNodes) {
@@ -1270,11 +1377,15 @@ export function MapEditor() {
                 ? zones
                 : type === "waypoints"
                   ? waypoints
-                  : type === "hex-tiles"
-                    ? hexTiles
-                    : type === "gathering-nodes"
-                      ? gatheringNodes
-                      : furniture;
+                  : type === "respawn-points"
+                    ? respawnPoints
+                    : type === "hex-tiles"
+                      ? hexTiles
+                      : type === "gathering-nodes"
+                        ? gatheringNodes
+                        : isMapPointType(type)
+                          ? maps
+                          : furniture;
       const freshRow = list.find((r) => String(r.id) === String(row.id));
       if (freshRow) {
         const match = three.content.children.find(
@@ -1287,7 +1398,7 @@ export function MapEditor() {
         setSelected(null);
       }
     }
-  }, [structures, npcs, spawns, zones, waypoints, furniture, hexTiles, gatheringNodes, activeMap]);
+  }, [structures, npcs, spawns, zones, waypoints, respawnPoints, furniture, hexTiles, gatheringNodes, maps, activeMap]);
 
   // --- Attach the gizmo to the current selection + set its mode/axis constraints ---
   // (Separate from the scene-sync effect below: that one only re-runs when the fetched content
@@ -1478,7 +1589,7 @@ export function MapEditor() {
     setActiveTool((prev) => (prev?.mode === "wallKind" && prev.wallKind === wallKind ? null : { mode: "wallKind", wallKind }));
   }
 
-  function toggleMarkerTool(markerKind: "npc" | "enemy-spawn" | "waypoint" | "gathering-node") {
+  function toggleMarkerTool(markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node") {
     setSelected(null);
     setActiveTool((prev) => (prev?.mode === "marker" && prev.markerKind === markerKind ? null : { mode: "marker", markerKind }));
   }
@@ -1496,7 +1607,7 @@ export function MapEditor() {
     setFormError(null);
     try {
       const { id: _id, ...rest } = data;
-      await updateEntity(selected.type, String(selected.row.id), rest);
+      await updateEntity(mapEntityKey(selected.type), String(selected.row.id), rest);
       reloadContent();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Save failed");
@@ -1508,12 +1619,12 @@ export function MapEditor() {
   async function handleDelete() {
     if (!selected) return;
     if (!confirm(`Delete "${selected.row.name ?? selected.row.id}"?`)) return;
-    await deleteEntity(selected.type, String(selected.row.id));
+    await deleteEntity(mapEntityKey(selected.type), String(selected.row.id));
     setSelected(null);
     reloadContent();
   }
 
-  const inspectorSchema = selected ? ENTITIES.find((e) => e.key === selected.type) : undefined;
+  const inspectorSchema = selected ? ENTITIES.find((e) => e.key === mapEntityKey(selected.type)) : undefined;
 
   // --- Palette entries: every *_PALETTE array above reshaped into the generic PaletteEntry shape
   // PaletteSection renders, one map() per section rather than the seven near-duplicate JSX blocks
@@ -1730,8 +1841,19 @@ export function MapEditor() {
           {selected && inspectorSchema && (
             <div className="map-editor-inspector">
               <div className="entity-table-header">
-                <h3>{inspectorSchema.label.replace(/s$/, "")}</h3>
-                <button onClick={handleDelete}>Delete</button>
+                {/* The portal/spawn markers' "row" is the whole active map, not a leaf marker of
+                    their own (see isMapPointType's doc comment) - deleting a map is already a
+                    dedicated, guarded flow from the Maps table, not something reachable by
+                    dragging a point around, so this hides Delete rather than risk it reading as
+                    "delete this point". */}
+                <h3>
+                  {selected.type === "map-portal"
+                    ? "Dungeon Portal"
+                    : selected.type === "map-spawn"
+                      ? "Spawn Point"
+                      : inspectorSchema.label.replace(/s$/, "")}
+                </h3>
+                {!isMapPointType(selected.type) && <button onClick={handleDelete}>Delete</button>}
               </div>
               <EntityForm
                 // EntityForm seeds its internal state from `initial` only once, on mount (see its

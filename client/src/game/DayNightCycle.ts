@@ -1,11 +1,11 @@
 import * as THREE from "three";
 
-// A full in-game day takes this many real minutes - long enough that the sun's motion/color shift
+// A full in-game day takes this many real hours - long enough that the sun's motion/color shift
 // is a slow ambient backdrop (not a distraction while playing), short enough that a session longer
 // than a few minutes actually sees the sky change. Driven by wall-clock time (Date.now()), not a
 // server-synced value or a per-session timer, so every client's world shows roughly the same time
 // of day without needing any network plumbing for something this purely cosmetic.
-const DAY_LENGTH_MS = 24 * 60 * 1000;
+const DAY_LENGTH_MS = 6 * 60 * 60 * 1000;
 const SUN_DISTANCE = 45;
 
 // Elevation is a plain sine wave over one day (peaks at solar noon, troughs at midnight); azimuth
