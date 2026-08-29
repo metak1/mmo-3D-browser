@@ -367,9 +367,186 @@ async function main() {
       description: "Frosthold's last relic of the age before the giants came south.",
       base_price: 250,
     },
+    // --- Profession-crafted equipment (see recipes below) - one low-tier/high-tier pair per
+    // crafting profession, filling equip slots (hands/legs/ring) the loot/quest catalog above
+    // never touched. Ordinary equipment in every other respect - same rarity/getEffectiveStats
+    // handling as anything else, crafting is just a different acquisition path than looting.
+    {
+      id: "copper_dagger",
+      name: "Copper Dagger",
+      slot: "weapon",
+      bonuses: { mainStat: 4 },
+      icon: "🗡️",
+      description: "A blacksmith's first honest work - light, balanced, unglamorous.",
+      base_price: 25,
+    },
+    {
+      id: "iron_greatsword",
+      name: "Iron Greatsword",
+      slot: "weapon",
+      bonuses: { mainStat: 9, vitality: 2 },
+      icon: "⚔️",
+      description: "Quenched and re-quenched until it stopped ringing false.",
+      base_price: 70,
+    },
+    {
+      id: "padded_gloves",
+      name: "Padded Gloves",
+      slot: "hands",
+      bonuses: { vitality: 2, armor: 1 },
+      icon: "🧤",
+      description: "Stitched thick enough to stop a blister, not much else.",
+      base_price: 25,
+    },
+    {
+      id: "reinforced_leggings",
+      name: "Reinforced Leggings",
+      slot: "legs",
+      bonuses: { armor: 6, vitality: 2 },
+      icon: "👖",
+      description: "Iron strips sewn between two layers of boiled cloth.",
+      base_price: 65,
+    },
+    {
+      id: "copper_band",
+      name: "Copper Band",
+      slot: "ring",
+      bonuses: { luck: 2 },
+      icon: "💍",
+      description: "A jeweler's practice piece - simple, but it holds its shape.",
+      base_price: 20,
+    },
+    {
+      id: "gilded_ring",
+      name: "Gilded Ring",
+      slot: "ring",
+      bonuses: { mainStat: 7, luck: 3 },
+      icon: "💍",
+      description: "Gold wound around a silver core, set by a steady hand.",
+      base_price: 140,
+    },
   ];
   for (const i of items) {
     await upsert("items", i, ["bonuses"]);
+  }
+
+  // --- Profession materials: raw gathered resources (category "material", no equip slot, no
+  // rarity) plus a couple of crafted consumables with a use_effects payload (resolved through the
+  // same composable resolveEffect() interpreter as spells/boss abilities - see
+  // CombatEngine.consumeItem). Kept out of the `items` array/loot table above on purpose: monster
+  // loot rolls from ITEM_IDS filtered to category "equipment" (see loot.ts's maybeDropLoot) so
+  // these only ever enter play through gathering nodes or crafting, never a kill drop.
+  const materials = [
+    { id: "oak_log", name: "Oak Log", category: "material", bonuses: {}, icon: "🪵", description: "Common, straight-grained - every apprentice starts here.", base_price: 2 },
+    { id: "pine_log", name: "Pine Log", category: "material", bonuses: {}, icon: "🪵", description: "Sappy and pale, from further-flung stands of timber.", base_price: 5 },
+    { id: "copper_ore", name: "Copper Ore", category: "material", bonuses: {}, icon: "🟠", description: "Soft, reddish, easy to work - a beginner's metal.", base_price: 3 },
+    { id: "iron_ore", name: "Iron Ore", category: "material", bonuses: {}, icon: "⚙️", description: "Heavier and harder than copper, worth the extra effort.", base_price: 6 },
+    { id: "silver_ore", name: "Silver Ore", category: "material", bonuses: {}, icon: "⚪", description: "Cool to the touch, veined through the deeper rock.", base_price: 12 },
+    { id: "gold_ore", name: "Gold Ore", category: "material", bonuses: {}, icon: "🟡", description: "Rare and heavy - only the deepest veins carry it.", base_price: 20 },
+    {
+      id: "minor_healing_potion",
+      name: "Minor Healing Potion",
+      category: "material",
+      bonuses: {},
+      icon: "🧪",
+      description: "A quick alchemist's brew - takes the edge off, nothing more.",
+      base_price: 10,
+      use_effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "heal", amount: 30 }] }],
+    },
+    {
+      id: "greater_healing_potion",
+      name: "Greater Healing Potion",
+      category: "material",
+      bonuses: {},
+      icon: "🧪",
+      description: "Distilled twice over - an alchemist's real trade secret.",
+      base_price: 30,
+      use_effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "heal", amount: 80 }] }],
+    },
+    {
+      id: "trail_rations",
+      name: "Trail Rations",
+      category: "material",
+      bonuses: {},
+      icon: "🍖",
+      description: "Simple field cooking - filling, not fancy.",
+      base_price: 5,
+      use_effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "heal", amount: 15 }] }],
+    },
+    {
+      id: "hearty_stew",
+      name: "Hearty Stew",
+      category: "material",
+      bonuses: {},
+      icon: "🍲",
+      description: "An innkeeper-taught recipe, sized for someone about to get hit.",
+      base_price: 15,
+      use_effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "heal", amount: 45 }] }],
+    },
+  ];
+  for (const m of materials) {
+    await upsert("items", m, ["bonuses", "use_effects"]);
+  }
+
+  // --- Recipes: two per crafting profession (a starting recipe and a mid-tier one), each priced
+  // in the raw materials gathering hands back - see GATHERING_NODE_TYPES/GATHERING_NODES below for
+  // where oak_log/copper_ore etc. actually come from.
+  const recipes = [
+    { id: "recipe_minor_healing_potion", profession: "alchemist", name: "Minor Healing Potion", required_level: 1, ingredients: [{ itemId: "oak_log", quantity: 2 }, { itemId: "copper_ore", quantity: 1 }], output_item_id: "minor_healing_potion", output_quantity: 1, xp_award: 15 },
+    { id: "recipe_greater_healing_potion", profession: "alchemist", name: "Greater Healing Potion", required_level: 15, ingredients: [{ itemId: "pine_log", quantity: 2 }, { itemId: "iron_ore", quantity: 2 }], output_item_id: "greater_healing_potion", output_quantity: 1, xp_award: 30 },
+    { id: "recipe_trail_rations", profession: "cook", name: "Trail Rations", required_level: 1, ingredients: [{ itemId: "oak_log", quantity: 3 }], output_item_id: "trail_rations", output_quantity: 2, xp_award: 12 },
+    { id: "recipe_hearty_stew", profession: "cook", name: "Hearty Stew", required_level: 15, ingredients: [{ itemId: "pine_log", quantity: 2 }, { itemId: "iron_ore", quantity: 1 }], output_item_id: "hearty_stew", output_quantity: 2, xp_award: 28 },
+    { id: "recipe_copper_dagger", profession: "blacksmith", name: "Copper Dagger", required_level: 1, ingredients: [{ itemId: "copper_ore", quantity: 3 }], output_item_id: "copper_dagger", output_quantity: 1, xp_award: 18 },
+    { id: "recipe_iron_greatsword", profession: "blacksmith", name: "Iron Greatsword", required_level: 15, ingredients: [{ itemId: "iron_ore", quantity: 4 }, { itemId: "oak_log", quantity: 1 }], output_item_id: "iron_greatsword", output_quantity: 1, xp_award: 35 },
+    { id: "recipe_padded_gloves", profession: "tailor", name: "Padded Gloves", required_level: 1, ingredients: [{ itemId: "oak_log", quantity: 3 }, { itemId: "copper_ore", quantity: 2 }], output_item_id: "padded_gloves", output_quantity: 1, xp_award: 18 },
+    { id: "recipe_reinforced_leggings", profession: "tailor", name: "Reinforced Leggings", required_level: 15, ingredients: [{ itemId: "pine_log", quantity: 3 }, { itemId: "iron_ore", quantity: 2 }], output_item_id: "reinforced_leggings", output_quantity: 1, xp_award: 35 },
+    { id: "recipe_copper_band", profession: "jeweler", name: "Copper Band", required_level: 1, ingredients: [{ itemId: "copper_ore", quantity: 2 }], output_item_id: "copper_band", output_quantity: 1, xp_award: 15 },
+    { id: "recipe_gilded_ring", profession: "jeweler", name: "Gilded Ring", required_level: 25, ingredients: [{ itemId: "gold_ore", quantity: 2 }, { itemId: "silver_ore", quantity: 1 }], output_item_id: "gilded_ring", output_quantity: 1, xp_award: 45 },
+  ];
+  for (const r of recipes) {
+    await upsert("recipes", r, ["ingredients"]);
+  }
+
+  // --- Gathering node types: the "species" of each world node (mirrors enemy_types vs
+  // enemy_spawns) - model_id keys match client/src/game/GatheringNode.ts's MODEL_PATH lookup.
+  // Tiered to roughly track the leveling-path towns below (town -> Millbrook -> Ashford ->
+  // Frosthold), same progression the quest chain and enemy_spawns already climb.
+  const gatheringNodeTypes = [
+    { id: "oak_tree", profession: "lumberjack", name: "Oak Tree", model_id: "oakTree", output_item_id: "oak_log", output_quantity: 1, xp_award: 8, respawn_ms: 30_000, required_level: 1 },
+    { id: "pine_tree", profession: "lumberjack", name: "Pine Tree", model_id: "pineTree", output_item_id: "pine_log", output_quantity: 1, xp_award: 14, respawn_ms: 45_000, required_level: 15 },
+    { id: "copper_vein", profession: "miner", name: "Copper Vein", model_id: "copperVein", output_item_id: "copper_ore", output_quantity: 1, xp_award: 8, respawn_ms: 30_000, required_level: 1 },
+    { id: "iron_vein", profession: "miner", name: "Iron Vein", model_id: "ironVein", output_item_id: "iron_ore", output_quantity: 1, xp_award: 14, respawn_ms: 45_000, required_level: 15 },
+    { id: "silver_vein", profession: "miner", name: "Silver Vein", model_id: "silverVein", output_item_id: "silver_ore", output_quantity: 1, xp_award: 20, respawn_ms: 60_000, required_level: 20 },
+    { id: "gold_vein", profession: "miner", name: "Gold Vein", model_id: "goldVein", output_item_id: "gold_ore", output_quantity: 1, xp_award: 26, respawn_ms: 75_000, required_level: 25 },
+  ];
+  for (const t of gatheringNodeTypes) {
+    await upsert("gathering_node_types", t);
+  }
+
+  // --- Gathering node placements - scattered around each town roughly matching its node types'
+  // required_level, same one-row-per-placement pattern as enemy_spawns/waypoints.
+  const gatheringNodes = [
+    // Starting town (req 1)
+    { id: "oak-1", map_id: "overworld", node_type_id: "oak_tree", x: 10, z: -5 },
+    { id: "oak-2", map_id: "overworld", node_type_id: "oak_tree", x: -15, z: 5 },
+    { id: "oak-3", map_id: "overworld", node_type_id: "oak_tree", x: 5, z: 12 },
+    { id: "copper-1", map_id: "overworld", node_type_id: "copper_vein", x: 15, z: 6 },
+    { id: "copper-2", map_id: "overworld", node_type_id: "copper_vein", x: -18, z: -8 },
+    { id: "copper-3", map_id: "overworld", node_type_id: "copper_vein", x: -6, z: 15 },
+    // Millbrook (req 15)
+    { id: "pine-1", map_id: "overworld", node_type_id: "pine_tree", x: 65, z: -22 },
+    { id: "pine-2", map_id: "overworld", node_type_id: "pine_tree", x: 82, z: -4 },
+    { id: "iron-1", map_id: "overworld", node_type_id: "iron_vein", x: 58, z: -25 },
+    { id: "iron-2", map_id: "overworld", node_type_id: "iron_vein", x: 88, z: -14 },
+    // Ashford (req 20)
+    { id: "silver-1", map_id: "overworld", node_type_id: "silver_vein", x: 128, z: 32 },
+    { id: "silver-2", map_id: "overworld", node_type_id: "silver_vein", x: 152, z: 58 },
+    // Frosthold (req 25)
+    { id: "gold-1", map_id: "overworld", node_type_id: "gold_vein", x: -138, z: 82 },
+    { id: "gold-2", map_id: "overworld", node_type_id: "gold_vein", x: -162, z: 108 },
+  ];
+  for (const g of gatheringNodes) {
+    await upsert("gathering_nodes", g);
   }
 
   // --- Talents: a real tree per class, 2 tiers deep. Tier 1 is 3 side-by-side flat statBonus
@@ -886,27 +1063,31 @@ async function main() {
   const npcs = [
     { id: "quest_giver", name: "Weary Quartermaster", x: 0, z: -3, map_id: "overworld" },
     { id: "boss_watcher", name: "Scarred Sentinel", x: 0, z: 20, map_id: "overworld" },
-    { id: "merchant", name: "Traveling Merchant", x: -6, z: -3, map_id: "overworld" },
+    { id: "merchant", name: "Traveling Merchant", x: -6, z: -3, map_id: "overworld", teaches_profession_id: "alchemist" },
     // --- Leveling-path cities - each pairs one quest giver with one vendor, same "different
     // kinds of NPCs" split as the starting town, so every city reads the same way once you
     // arrive: someone with work for you, someone selling gear for the coin it pays.
     { id: "elara", name: "Ranger Elara", x: 70, z: -15, map_id: "overworld" },
     { id: "millbrook_trader", name: "Millbrook Trader", x: 70, z: -7, map_id: "overworld" },
     { id: "kael", name: "Sergeant Kael", x: 140, z: 43, map_id: "overworld" },
-    { id: "ashford_quartermaster", name: "Keep Quartermaster", x: 140, z: 53, map_id: "overworld" },
+    { id: "ashford_quartermaster", name: "Keep Quartermaster", x: 140, z: 53, map_id: "overworld", teaches_profession_id: "tailor" },
     { id: "frostbeard", name: "Elder Frostbeard", x: -150, z: 93, map_id: "overworld" },
     { id: "frosthold_trader", name: "Frosthold Trader", x: -150, z: 103, map_id: "overworld" },
     // --- Flavor NPCs - no quest, no vendor catalog, just bodies standing around so each city
     // doesn't read as two or three lonely quest-givers in an empty lot. Paired with the new
     // buildings below (each new building gets an NPC standing near/inside it).
-    { id: "blacksmith", name: "Town Blacksmith", x: 20, z: -14, map_id: "overworld" },
-    { id: "town_villager", name: "Local Villager", x: -9, z: -13, map_id: "overworld" },
-    { id: "millbrook_innkeeper", name: "Millbrook Innkeeper", x: 58, z: -9, map_id: "overworld" },
-    { id: "millbrook_stablehand", name: "Stable Hand", x: 73, z: -16, map_id: "overworld" },
+    // Profession trainers (teaches_profession_id) piggyback on these same flavor NPCs rather than
+    // adding dedicated bodies - one trainer per profession, spread across the leveling-path towns
+    // so gathering/crafting naturally opens up as a player travels, matching the quest chain's own
+    // town-by-town pacing. See server/migrations/20260827180000_npc_teaches_profession.
+    { id: "blacksmith", name: "Town Blacksmith", x: 20, z: -14, map_id: "overworld", teaches_profession_id: "blacksmith" },
+    { id: "town_villager", name: "Local Villager", x: -9, z: -13, map_id: "overworld", teaches_profession_id: "lumberjack" },
+    { id: "millbrook_innkeeper", name: "Millbrook Innkeeper", x: 58, z: -9, map_id: "overworld", teaches_profession_id: "cook" },
+    { id: "millbrook_stablehand", name: "Stable Hand", x: 73, z: -16, map_id: "overworld", teaches_profession_id: "miner" },
     { id: "ashford_guard", name: "Barracks Guard", x: 126, z: 48, map_id: "overworld" },
     { id: "ashford_squire", name: "Keep Squire", x: 140, z: 42, map_id: "overworld" },
     { id: "frosthold_trapper", name: "Grizzled Trapper", x: -150, z: 110, map_id: "overworld" },
-    { id: "frosthold_apprentice", name: "Frostbeard's Apprentice", x: -153, z: 100, map_id: "overworld" },
+    { id: "frosthold_apprentice", name: "Frostbeard's Apprentice", x: -153, z: 100, map_id: "overworld", teaches_profession_id: "jeweler" },
   ];
   for (const n of npcs) {
     await upsert("npcs", n);

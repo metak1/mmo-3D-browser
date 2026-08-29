@@ -3,6 +3,7 @@ import {
   ACTIVE_DUNGEON,
   CastMessage,
   ChatMessage,
+  DUNGEON_SPAWN_POSITION,
   DungeonSpawnDef,
   ENEMY_RESPAWN_MS,
   ENEMY_TYPES,
@@ -92,9 +93,14 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
     }
 
     const player = new Player();
-    player.x = 0;
+    // The admin-editable dungeon entry point (dungeon_ground's own spawn_x/spawn_z, edited via
+    // the map editor's spawn marker the same way as the overworld's - see WorldRoom.onJoin's
+    // identical use of SPAWN_POSITION) - defaults to (0,0), matching every existing fixed enemy
+    // spawn in this dungeon's layout (see DUNGEON_SPAWN_POINTS), so this is a no-op until an
+    // admin actually moves it.
+    player.x = DUNGEON_SPAWN_POSITION.x;
     player.y = 0;
-    player.z = 0;
+    player.z = DUNGEON_SPAWN_POSITION.z;
     player.name = character.name;
     // Carried over from the WorldRoom party that started this instance (see
     // WorldRoom.handleDungeonStart) - without this every dungeon Player defaults to the

@@ -11,6 +11,8 @@ const mapSchema = z.object({
   half_extent: z.number().positive(),
   portal_x: z.number().nullable().optional(),
   portal_z: z.number().nullable().optional(),
+  spawn_x: z.number().nullable().optional(),
+  spawn_z: z.number().nullable().optional(),
   boss_arena_x: z.number().nullable().optional(),
   boss_arena_z: z.number().nullable().optional(),
   boss_arena_radius: z.number().positive().nullable().optional(),

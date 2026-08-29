@@ -25,6 +25,8 @@ export interface CharacterRow {
   profession_level: unknown;
   materials: unknown;
   has_mount: boolean;
+  x: number | null;
+  z: number | null;
   created_at: Date;
 }
 
@@ -82,31 +84,48 @@ export async function saveCharacterProgress(
     professionLevel: Record<string, number>;
     materials: Record<string, number>;
     hasMount: boolean;
+    // Omitted by DungeonRoom's own save-on-leave call on purpose - a dungeon instance's
+    // coordinates aren't meaningful once the player is back in the overworld, so leaving this out
+    // there keeps whatever overworld position was last saved untouched (see WorldRoom.onJoin,
+    // which reads it back to restore an existing character's last position on reconnect).
+    position?: { x: number; z: number };
   },
 ): Promise<void> {
-  await pool.query(
-    `UPDATE characters SET
-       level = $1, xp = $2, main_stat = $3, vitality = $4, luck = $5, armor = $6, gold = $7,
-       talent_points = $8, talent_ranks = $9, quest_progress = $10, quest_completed = $11,
-       profession_xp = $12, profession_level = $13, materials = $14, has_mount = $15
-     WHERE id = $16`,
-    [
-      progress.level,
-      progress.xp,
-      progress.stats.mainStat,
-      progress.stats.vitality,
-      progress.stats.luck,
-      progress.stats.armor,
-      progress.gold,
-      progress.talentPoints,
-      JSON.stringify(progress.talentRanks),
-      JSON.stringify(progress.questProgress),
-      JSON.stringify(progress.questCompleted),
-      JSON.stringify(progress.professionXp),
-      JSON.stringify(progress.professionLevel),
-      JSON.stringify(progress.materials),
-      progress.hasMount,
-      characterId,
-    ],
-  );
+  const baseParams = [
+    progress.level,
+    progress.xp,
+    progress.stats.mainStat,
+    progress.stats.vitality,
+    progress.stats.luck,
+    progress.stats.armor,
+    progress.gold,
+    progress.talentPoints,
+    JSON.stringify(progress.talentRanks),
+    JSON.stringify(progress.questProgress),
+    JSON.stringify(progress.questCompleted),
+    JSON.stringify(progress.professionXp),
+    JSON.stringify(progress.professionLevel),
+    JSON.stringify(progress.materials),
+    progress.hasMount,
+  ];
+  if (progress.position) {
+    await pool.query(
+      `UPDATE characters SET
+         level = $1, xp = $2, main_stat = $3, vitality = $4, luck = $5, armor = $6, gold = $7,
+         talent_points = $8, talent_ranks = $9, quest_progress = $10, quest_completed = $11,
+         profession_xp = $12, profession_level = $13, materials = $14, has_mount = $15,
+         x = $16, z = $17
+       WHERE id = $18`,
+      [...baseParams, progress.position.x, progress.position.z, characterId],
+    );
+  } else {
+    await pool.query(
+      `UPDATE characters SET
+         level = $1, xp = $2, main_stat = $3, vitality = $4, luck = $5, armor = $6, gold = $7,
+         talent_points = $8, talent_ranks = $9, quest_progress = $10, quest_completed = $11,
+         profession_xp = $12, profession_level = $13, materials = $14, has_mount = $15
+       WHERE id = $16`,
+      [...baseParams, characterId],
+    );
+  }
 }

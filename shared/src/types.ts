@@ -801,6 +801,20 @@ export interface WaypointDef {
 
 export let WAYPOINTS: WaypointDef[] = [];
 
+// A "graveyard" placement - see roomUtil.ts's respawnPlayerAtClosestPoint, which picks whichever
+// of these is nearest the spot a player just died, mirroring the classic MMO graveyard-run
+// mechanic. Falls back to SPAWN_POSITION if none exist yet (a fresh install before an admin has
+// placed any), so death always has somewhere sane to send a player.
+export interface RespawnPointDef {
+  id: string;
+  name: string;
+  mapId: MapId;
+  x: number;
+  z: number;
+}
+
+export let RESPAWN_POINTS: RespawnPointDef[] = [];
+
 // A single hand-painted hex cell (admin/src/mapEditor's tile palette) that overrides whatever
 // shared/src/hex.ts's procedural classifier would otherwise compute for that cell - see
 // classify()'s "overrides win first" ordering. Most cells have no row here at all; this only
@@ -947,9 +961,25 @@ export interface GuildRosterSnapshot {
   members: GuildRosterEntry[];
 }
 
+// Where the dungeon-entrance portal object sits (see client/src/game/Portal.ts/main.ts's
+// PortalAvatar - a real clickable world object that opens the dungeon finder, not a spawn point).
+// Overworld-only, mirrored by GameMapDef.portalX/portalZ, admin-editable via the map editor's
+// portal marker.
 export let PORTAL_POSITION = { x: -24, z: -24 }; // clear of every existing spawn/quest/arena position
 
+// Where a character actually appears on join - a distinct concept from PORTAL_POSITION above
+// (easy to conflate since both are admin-editable single points on a map row, but one is a
+// clickable dungeon-entrance prop and this one is plain spawn coordinates with no world object of
+// its own). See WorldRoom.onJoin. Defaults to the origin, matching this game's original
+// hardcoded behavior before it became admin-editable.
+export let SPAWN_POSITION = { x: 0, z: 0 };
+
 export let DUNGEON_HALF_EXTENT = 16; // the active dungeon's own ground, purely decorative sizing for the client
+
+// Mirrors SPAWN_POSITION - see DungeonRoom.onJoin. Dungeons have no portal-of-their-own concept
+// (PortalAvatar only ever renders in the overworld - see its own doc comment), so this is the
+// only admin-editable point a dungeon's own map row needs.
+export let DUNGEON_SPAWN_POSITION = { x: 0, z: 0 };
 
 // The active dungeon's own hex-terrain content, mirroring STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/
 // HEX_TILE_OVERRIDES but scoped to ACTIVE_DUNGEON.mapId instead of ACTIVE_MAP.id (see
@@ -1839,6 +1869,8 @@ export interface GameMapDef {
   isActive: boolean;
   portalX?: number;
   portalZ?: number;
+  spawnX?: number;
+  spawnZ?: number;
   bossArenaX?: number;
   bossArenaZ?: number;
   bossArenaRadius?: number;
@@ -1885,6 +1917,7 @@ export interface ContentSnapshot {
   spawnZones: EnemySpawnZoneDef[];
   structures: StructureDef[];
   waypoints: WaypointDef[];
+  respawnPoints: RespawnPointDef[];
   furniture: FurnitureDef[];
   hexTiles: HexTileOverrideDef[];
   recipes: RecipeDef[];
@@ -1930,6 +1963,10 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   SPAWN_ZONES = snapshot.spawnZones.filter((z) => z.mapId === ACTIVE_MAP?.id);
   STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_MAP?.id);
   WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_MAP?.id);
+  // Overworld-only (mirrors WAYPOINTS, not DUNGEON_WAYPOINTS) - a dungeon run is a single fixed-
+  // spawn attempt (see roomUtil.ts's plain respawnPlayerPosition, still used by DungeonRoom
+  // unchanged), it has no graveyard concept of its own.
+  RESPAWN_POINTS = snapshot.respawnPoints.filter((r) => r.mapId === ACTIVE_MAP?.id);
   FURNITURE = snapshot.furniture.filter((f) => f.mapId === ACTIVE_MAP?.id);
   HEX_TILE_OVERRIDES = snapshot.hexTiles.filter((h) => h.mapId === ACTIVE_MAP?.id);
   GATHERING_NODES = snapshot.gatheringNodes.filter((n) => n.mapId === ACTIVE_MAP?.id);
@@ -1947,12 +1984,20 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
     if (ACTIVE_MAP.portalX != null && ACTIVE_MAP.portalZ != null) {
       PORTAL_POSITION = { x: ACTIVE_MAP.portalX, z: ACTIVE_MAP.portalZ };
     }
+    if (ACTIVE_MAP.spawnX != null && ACTIVE_MAP.spawnZ != null) {
+      SPAWN_POSITION = { x: ACTIVE_MAP.spawnX, z: ACTIVE_MAP.spawnZ };
+    }
     if (ACTIVE_MAP.bossArenaX != null && ACTIVE_MAP.bossArenaZ != null) {
       BOSS_ARENA_CENTER = { x: ACTIVE_MAP.bossArenaX, z: ACTIVE_MAP.bossArenaZ };
     }
     if (ACTIVE_MAP.bossArenaRadius != null) BOSS_ARENA_RADIUS = ACTIVE_MAP.bossArenaRadius;
   }
-  if (dungeonMap) DUNGEON_HALF_EXTENT = dungeonMap.halfExtent;
+  if (dungeonMap) {
+    DUNGEON_HALF_EXTENT = dungeonMap.halfExtent;
+    if (dungeonMap.spawnX != null && dungeonMap.spawnZ != null) {
+      DUNGEON_SPAWN_POSITION = { x: dungeonMap.spawnX, z: dungeonMap.spawnZ };
+    }
+  }
   if (ACTIVE_DUNGEON) {
     DUNGEON_PARTY_SIZE = ACTIVE_DUNGEON.partySize;
     DUNGEON_COMPOSITION = ACTIVE_DUNGEON.composition;

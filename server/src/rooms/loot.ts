@@ -4,6 +4,7 @@ import {
   encodeItemToken,
   INVENTORY_SIZE,
   ITEM_IDS,
+  ITEMS,
   LOOT_BAG_AGGREGATE_RADIUS,
   LOOT_BAG_DESPAWN_MS,
   LOOT_DROP_CHANCE,
@@ -30,7 +31,11 @@ export class LootManager {
 
   maybeDropLoot(x: number, z: number, guaranteed: boolean) {
     if (!guaranteed && Math.random() >= LOOT_DROP_CHANCE) return;
-    const itemId = ITEM_IDS[Math.floor(Math.random() * ITEM_IDS.length)];
+    // Materials (category "material") are excluded on purpose - they carry no rarity and belong
+    // in Player.materials, not an equip-token inventory slot (see ItemDef.category's own doc
+    // comment). They only ever enter play through gathering nodes/crafting, never a kill drop.
+    const equipmentItemIds = ITEM_IDS.filter((id) => ITEMS[id]?.category === "equipment");
+    const itemId = equipmentItemIds[Math.floor(Math.random() * equipmentItemIds.length)];
     this.dropLoot(x, z, encodeItemToken(itemId, rollRarity()));
   }
 
