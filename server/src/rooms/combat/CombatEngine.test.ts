@@ -1,6 +1,6 @@
 import { Client } from "@colyseus/core";
 import { MapSchema } from "@colyseus/schema";
-import { MOUNT_SPEED_MULTIPLIER, PLAYER_SPEED, SPELLS } from "@mmo/shared";
+import { BUFFS, MOUNT_SPEED_MULTIPLIER, PLAYER_SPEED, SPELLS, TALENTS } from "@mmo/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Enemy, Player, Projectile } from "../schema/WorldState.js";
 import { CombatEngine, CombatState } from "./CombatEngine.js";
@@ -31,6 +31,14 @@ function makePlayer(overrides: Partial<Player> = {}): Player {
   player.maxHp = 100;
   Object.assign(player, overrides);
   return player;
+}
+
+function makeEnemy(overrides: Partial<Enemy> = {}): Enemy {
+  const enemy = new Enemy();
+  enemy.hp = 50;
+  enemy.maxHp = 50;
+  Object.assign(enemy, overrides);
+  return enemy;
 }
 
 describe("CombatEngine.damagePlayer", () => {
@@ -111,12 +119,11 @@ describe("CombatEngine cast cancellation via movement", () => {
       classId: "warrior",
       name: "Test Cast-Time Spell",
       description: "",
-      effectType: "heal",
       targetType: "self",
-      amount: 1,
       cooldownMs: 5000,
       castTimeMs: 1000,
       range: 10,
+      effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "heal", amount: 1 }] }],
     };
   });
 
@@ -167,5 +174,104 @@ describe("CombatEngine cast cancellation via movement", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Player spells were migrated off an older flat-field resolver onto the same composable
+// {shape, actions[]} system boss abilities use (see SpellDef.effects) - these cover the
+// castSpellEffects path that replaced it, including two behaviors the migration had to
+// specifically preserve: combining damage+interrupt in one cast, and onCastBuff talents (which
+// used to be applied inside the deleted resolver and would have silently stopped firing if that
+// call hadn't been carried over into castSpellEffects).
+describe("CombatEngine player spells via the composable effect system", () => {
+  it("resolves a single-target damage spell through effects[]", () => {
+    const spellId = "testDamageSpell";
+    SPELLS[spellId] = {
+      id: spellId,
+      classId: "warrior",
+      name: "Test Damage Spell",
+      description: "",
+      targetType: "enemy",
+      cooldownMs: 1000,
+      castTimeMs: 0,
+      range: 10,
+      effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "damage", amount: 12 }] }],
+    };
+
+    const { engine, state } = makeEngine();
+    const player = makePlayer({ classId: "warrior" });
+    const enemy = makeEnemy();
+    state.players.set("s1", player);
+    state.enemies.set("e1", enemy);
+
+    engine.handleCast(makeClient("s1"), { spellId, targetId: "e1" });
+    expect(enemy.hp).toBeLessThan(enemy.maxHp);
+  });
+
+  it("combining damage + interrupt in one effect both damages the target and cancels its pending cast", () => {
+    const spellId = "testInterruptComboSpell";
+    SPELLS[spellId] = {
+      id: spellId,
+      classId: "warrior",
+      name: "Test Interrupt Combo Spell",
+      description: "",
+      targetType: "enemy",
+      cooldownMs: 1000,
+      castTimeMs: 0,
+      range: 10,
+      effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "damage", amount: 6 }, { kind: "interrupt" }] }],
+    };
+
+    const { engine, state } = makeEngine();
+    const player = makePlayer({ classId: "warrior" });
+    const enemy = makeEnemy();
+    state.players.set("s1", player);
+    state.enemies.set("e1", enemy);
+    // Fakes "this enemy is mid-windup on a cast" - pendingEnemyCast has no public setter (only
+    // reached in practice via the enemy AI's own tick), so this pokes the same private field
+    // tickPendingEnemyCasts itself reads, matching PendingEnemyCast's real shape.
+    (engine as unknown as { pendingEnemyCast: Map<string, unknown> }).pendingEnemyCast.set("e1", {
+      targetSessionId: "s1",
+      fireAt: Date.now() + 10000,
+    });
+
+    engine.handleCast(makeClient("s1"), { spellId, targetId: "e1" });
+
+    expect(enemy.hp).toBeLessThan(enemy.maxHp);
+    expect((engine as unknown as { pendingEnemyCast: Map<string, unknown> }).pendingEnemyCast.has("e1")).toBe(false);
+  });
+
+  it("still grants an onCastBuff talent's buff, now via castSpellEffects instead of the deleted resolveSpellEffect", () => {
+    const spellId = "testOnCastBuffSpell";
+    SPELLS[spellId] = {
+      id: spellId,
+      classId: "warrior",
+      name: "Test OnCastBuff Spell",
+      description: "",
+      targetType: "self",
+      cooldownMs: 1000,
+      castTimeMs: 0,
+      range: 10,
+      effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "heal", amount: 1 }] }],
+    };
+    TALENTS["test_talent"] = {
+      id: "test_talent",
+      classId: "warrior",
+      name: "Test Talent",
+      description: "",
+      maxRank: 1,
+      effect: { kind: "onCastBuff", spellId, buffId: "battleFury" },
+      tier: 1,
+      column: 0,
+    };
+    BUFFS["battleFury"] = { name: "Test Buff", durationMs: 5000 };
+
+    const { engine, state } = makeEngine();
+    const player = makePlayer({ classId: "warrior" });
+    player.talentRanks.set("test_talent", 1);
+    state.players.set("s1", player);
+
+    engine.handleCast(makeClient("s1"), { spellId });
+    expect(player.buffs.has("battleFury")).toBe(true);
   });
 });

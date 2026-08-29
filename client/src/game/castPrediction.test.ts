@@ -11,24 +11,22 @@ beforeEach(() => {
     classId: "warrior",
     name: "Test Instant Spell",
     description: "",
-    effectType: "damage",
     targetType: "enemy",
-    amount: 1,
     cooldownMs: 5000,
     castTimeMs: 0,
     range: 10,
+    effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "damage", amount: 1 }] }],
   };
   SPELLS[CAST_TIME_SPELL] = {
     id: CAST_TIME_SPELL,
     classId: "warrior",
     name: "Test Cast-Time Spell",
     description: "",
-    effectType: "heal",
     targetType: "self",
-    amount: 1,
     cooldownMs: 5000,
     castTimeMs: 1000,
     range: 10,
+    effects: [{ shape: { kind: "singleTarget" }, actions: [{ kind: "heal", amount: 1 }] }],
   };
 });
 

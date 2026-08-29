@@ -36,12 +36,12 @@ afterEach(async () => {
   }
 });
 
-// Every character joins both room types at (0,0,0) - placing the bag there sidesteps needing to
-// simulate movement/combat RNG just to get a real drop into range.
-function bagAt(itemId: string): LootBag {
+// Spawn position is admin-configurable per map now (SPAWN_POSITION/DUNGEON_SPAWN_POSITION), not a
+// fixed (0,0) - callers pass the connected player's actual x/z instead of assuming a coordinate.
+function bagAt(x: number, z: number, itemId: string): LootBag {
   const bag = new LootBag();
-  bag.x = 0;
-  bag.z = 0;
+  bag.x = x;
+  bag.z = z;
   bag.items.push(itemId);
   return bag;
 }
@@ -56,7 +56,8 @@ for (const [roomName, label] of [
       const room = await colyseus.createRoom(roomName, {});
       const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
 
-      room.state.lootBags.set("test-bag", bagAt("rusty_sword@common"));
+      const spawnedPlayer = room.state.players.get(client.sessionId)!;
+      room.state.lootBags.set("test-bag", bagAt(spawnedPlayer.x, spawnedPlayer.z, "rusty_sword@common"));
 
       const message: LootTakeMessage = { bagId: "test-bag", itemId: "rusty_sword@common" };
       client.send("loot_take", message);
@@ -72,9 +73,7 @@ for (const [roomName, label] of [
       const room = await colyseus.createRoom(roomName, {});
       const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
 
-      const farBag = bagAt("rusty_sword@common");
-      farBag.x = 9999;
-      room.state.lootBags.set("test-bag", farBag);
+      room.state.lootBags.set("test-bag", bagAt(9999, 9999, "rusty_sword@common"));
 
       const message: LootTakeMessage = { bagId: "test-bag", itemId: "rusty_sword@common" };
       client.send("loot_take", message);

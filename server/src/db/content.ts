@@ -45,16 +45,12 @@ interface SpellRow {
   class_id: string;
   name: string;
   description: string;
-  effect_type: string;
   target_type: string;
-  amount: number | null;
-  aoe_radius: number | null;
-  interrupts_cast: boolean;
   cooldown_ms: number;
   cast_time_ms: number;
   range: number;
   projectile_speed: number | null;
-  effects: EffectDef[] | null;
+  effects: EffectDef[];
 }
 
 interface ItemRow {
@@ -329,16 +325,12 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     classId: s.class_id,
     name: s.name,
     description: s.description,
-    effectType: s.effect_type as SpellDef["effectType"],
     targetType: s.target_type as SpellDef["targetType"],
-    amount: nullToUndefined(s.amount),
-    aoeRadius: nullToUndefined(s.aoe_radius),
-    interruptsCast: s.interrupts_cast || undefined,
     cooldownMs: s.cooldown_ms,
     castTimeMs: s.cast_time_ms,
     range: s.range,
     projectileSpeed: nullToUndefined(s.projectile_speed),
-    effects: nullToUndefined(s.effects),
+    effects: s.effects,
   }));
 
   const items: ItemDef[] = itemRows.map((i) => ({

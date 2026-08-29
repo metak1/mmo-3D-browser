@@ -53,22 +53,18 @@ export const ENTITIES: EntitySchema[] = [
       { key: "class_id", label: "Class", type: "reference", referenceEntity: "classes" },
       { key: "name", label: "Name", type: "text" },
       { key: "description", label: "Description", type: "textarea" },
-      { key: "effect_type", label: "Effect Type", type: "select", options: ["damage", "heal", "dispel", "interrupt"] },
       { key: "target_type", label: "Target Type", type: "select", options: ["enemy", "ally", "self", "ground"] },
-      { key: "amount", label: "Amount", type: "number", optional: true },
-      { key: "aoe_radius", label: "AoE Radius", type: "number", optional: true },
-      { key: "interrupts_cast", label: "Interrupts Cast", type: "boolean", optional: true },
       { key: "cooldown_ms", label: "Cooldown (ms)", type: "number" },
       { key: "cast_time_ms", label: "Cast Time (ms)", type: "number" },
       { key: "range", label: "Range", type: "number" },
       { key: "projectile_speed", label: "Projectile Speed", type: "number", optional: true },
       {
-        // The composable path - additive, see shared's SpellDef.effects doc comment. Blank means
-        // "use effect_type/target_type/amount/aoe_radius/interrupts_cast above exactly as before".
+        // The same composable {shape, actions[]} system a boss's specialAbilities use (see
+        // shared's EffectDef) - every spell is authored this way now, same widget an enemy's
+        // AbilityListEditor reuses (see EffectListEditor.tsx).
         key: "effects",
-        label: "Composable Effects (advanced - overrides the fields above when set)",
+        label: "Effects",
         type: "effectList",
-        optional: true,
       },
     ],
   },

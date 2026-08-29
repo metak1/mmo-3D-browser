@@ -103,7 +103,6 @@ export function critChanceFromLuck(luck: number): number {
 export type SpellId = string;
 
 export type SpellTargetType = "enemy" | "ally" | "self" | "ground";
-export type SpellEffectType = "damage" | "heal" | "dispel" | "interrupt";
 
 // The composable effect system - a "technique" (boss ability or spell) is a `shape` (where it
 // lands, relative to whoever cast it and the resolved impact point) crossed with one or more
@@ -143,22 +142,18 @@ export interface SpellDef {
   classId: ClassId;
   name: string;
   description: string;
-  effectType: SpellEffectType;
   targetType: SpellTargetType;
-  amount?: number; // damage or heal magnitude (base, before stat/talent/ailment scaling); unused by dispel/interrupt
-  aoeRadius?: number; // when set, the effect applies to every valid unit within this radius of the impact point
-  interruptsCast?: boolean; // secondary modifier - cancels the target's pending cast, independent of effectType
   cooldownMs: number;
   castTimeMs: number;
   range: number;
   projectileSpeed?: number; // only used when castTimeMs > 0 (cast-time spells may travel as a projectile)
-  // The composable path - additive, not a replacement for effectType/amount/aoeRadius/
-  // interruptsCast above. Unset (every spell authored before this field existed) falls through to
-  // that exact original flat-field resolution in resolveSpellEffect, unchanged; a spell that sets
-  // this instead runs through resolveEffect, one EffectDef per independent shape this cast should
-  // apply (most spells only ever need one entry - the array exists so a spell CAN layer more than
-  // one shape, e.g. "hit the target AND drop a circle at their feet").
-  effects?: EffectDef[];
+  // The same composable {shape, actions[]} system BossAbilityDef.effect uses (see EffectDef above)
+  // - one EffectDef per independent shape this cast should apply (most spells only ever need one
+  // entry - the array exists so a spell CAN layer more than one shape, e.g. "hit the target AND
+  // drop a circle at their feet"). Player spells used to have a separate, more limited flat-field
+  // resolution path (effectType/amount/aoeRadius/interruptsCast) - removed once every spell was
+  // migrated onto this system, so a spell is authored identically to a boss's special ability now.
+  effects: EffectDef[];
 }
 
 export let SPELLS: Record<SpellId, SpellDef> = {};

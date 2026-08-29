@@ -16,7 +16,6 @@ import {
   ClassId,
   CombatTextEvent,
   ENEMY_TYPES,
-  EffectShape,
   EnemyBehavior,
   EQUIP_SLOT_LABEL,
   FURNITURE,
@@ -796,11 +795,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       pendingGroundTargetSpellId = spellId;
       pendingGroundTargetSlotIndex = slotIndex;
       container.classList.add("ground-target-pending");
-      // The composable path's own shape if this spell has one (see SpellDef.effects), falling
-      // back to the old flat aoeRadius as a plain circle - keeps every spell authored before
-      // `effects` existed previewing exactly as it always did.
-      const previewShape: EffectShape = spell.effects?.[0]?.shape ?? { kind: "circle", radius: spell.aoeRadius ?? 0, centeredOn: "impact" };
-      groundTargetPreview.setShape(previewShape);
+      groundTargetPreview.setShape(spell.effects[0].shape);
       groundTargetPreview.show();
       return;
     }

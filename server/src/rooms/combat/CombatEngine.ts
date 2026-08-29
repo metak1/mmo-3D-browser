@@ -370,12 +370,8 @@ export class CombatEngine {
         fireAt: now + spell.castTimeMs,
         startedAt: now,
       });
-    } else if (spell.effects?.length) {
-      const casterCtx = this.makePlayerCasterCtx(player, client.sessionId, spell.id);
-      const hint = this.targetHintId(client.sessionId, target);
-      for (const effect of spell.effects) this.resolveEffect(casterCtx, effect, impact, hint);
     } else {
-      this.resolveSpellEffect(player, client.sessionId, spell, target);
+      this.castSpellEffects(player, client.sessionId, spell, target, impact);
     }
   }
 
@@ -618,15 +614,6 @@ export class CombatEngine {
     }
   }
 
-  private resolveAllyUnit(caster: Player, target: ResolvedTarget): Player | null {
-    if (target.kind === "self") return caster;
-    if (target.kind === "ally") {
-      const ally = this.state.players.get(target.id);
-      return ally && ally.hp > 0 ? ally : null;
-    }
-    return null;
-  }
-
   private makePlayerCasterCtx(player: Player, sessionId: string, spellId?: SpellId): CasterContext {
     return { isPlayer: true, casterX: player.x, casterZ: player.z, sourceId: sessionId, casterPlayer: player, spellId, enrageMultiplier: 1 };
   }
@@ -650,23 +637,12 @@ export class CombatEngine {
     return undefined;
   }
 
-  // Cancels whatever the target currently has pending (enemy windup or player cast) and
-  // applies a short lockout, regardless of whether anything was actually pending - a
-  // whiffed interrupt still consumes its own cooldown, matching how every other spell's
-  // cooldown is consumed once the cast is accepted.
-  private tryInterrupt(target: ResolvedTarget) {
-    if (target.kind === "enemy" && this.pendingEnemyCast.has(target.id)) {
-      this.cancelEnemyCast(target.id);
-      this.interruptLockoutUntil.set(target.id, Date.now() + INTERRUPT_LOCKOUT_MS);
-    } else if (target.kind === "ally" && this.pendingPlayerCast.has(target.id)) {
-      this.cancelPlayerCast(target.id);
-      this.interruptLockoutUntil.set(target.id, Date.now() + INTERRUPT_LOCKOUT_MS);
-    }
-  }
-
-  // Same cancel-and-lockout as tryInterrupt above, but from a plain (id, "is this id an enemy or
-  // a player") pair instead of a ResolvedTarget - the composable "interrupt" action targets
-  // whichever unit a shape matched, not a single pre-resolved cast target.
+  // Cancels whatever the target currently has pending (enemy windup or player cast) and applies a
+  // short lockout, regardless of whether anything was actually pending - a whiffed interrupt still
+  // consumes its own cooldown, matching how every other spell's cooldown is consumed once the cast
+  // is accepted. Takes a plain (id, "is this id an enemy or a player") pair rather than a
+  // ResolvedTarget since the composable "interrupt" action targets whichever unit a shape matched,
+  // not a single pre-resolved cast target.
   private tryInterruptUnit(unitId: string, unitIsEnemy: boolean) {
     if (unitIsEnemy && this.pendingEnemyCast.has(unitId)) {
       this.cancelEnemyCast(unitId);
@@ -877,46 +853,18 @@ export class CombatEngine {
     }
   }
 
-  private resolveSpellEffect(caster: Player, casterSessionId: string, spell: SpellDef, target: ResolvedTarget) {
+  // The sole non-projectile player-cast resolution path - every spell is authored as effects[]
+  // (the same composable system boss abilities use), so this just applies any onCastBuff talents
+  // for this spell first (kept as its own unconditional step here, not folded into resolveEffect,
+  // since it's about the caster regardless of what the effect's shape/actions actually hit), then
+  // runs each of the spell's effects through resolveEffect exactly like a boss ability does.
+  private castSpellEffects(caster: Player, casterSessionId: string, spell: SpellDef, target: ResolvedTarget, impact: { x: number; z: number }) {
     for (const buffId of getOnCastBuffs(resolveClassId(caster.classId), spell.id, caster.talentRanks)) {
       this.applyBuff(caster, buffId);
     }
-
-    if (spell.interruptsCast || spell.effectType === "interrupt") {
-      this.tryInterrupt(target);
-    }
-
-    if (spell.effectType === "damage") {
-      if (spell.aoeRadius) {
-        const impact = this.resolveImpactPoint(caster, target);
-        if (!impact) return;
-        forEachAlive(this.state.enemies, impact.x, impact.z, spell.aoeRadius, (enemy, enemyId) => {
-          const { amount, isCrit } = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
-          this.applySpellDamage(enemy, amount, enemyId, casterSessionId, isCrit);
-        });
-      } else if (target.kind === "enemy") {
-        const enemy = this.state.enemies.get(target.id);
-        if (enemy && enemy.hp > 0) {
-          const { amount, isCrit } = this.computePlayerDamage(caster, spell.amount ?? 0, spell.id);
-          this.applySpellDamage(enemy, amount, target.id, casterSessionId, isCrit);
-        }
-      }
-    } else if (spell.effectType === "heal") {
-      if (spell.aoeRadius) {
-        const impact = this.resolveImpactPoint(caster, target);
-        if (!impact) return;
-        forEachAlive(this.state.players, impact.x, impact.z, spell.aoeRadius, (ally, allySessionId) => {
-          this.healPlayer(caster, casterSessionId, ally, allySessionId, spell.amount ?? 0, spell.id);
-        });
-      } else {
-        const ally = this.resolveAllyUnit(caster, target);
-        const allySessionId = target.kind === "ally" ? target.id : casterSessionId;
-        if (ally) this.healPlayer(caster, casterSessionId, ally, allySessionId, spell.amount ?? 0, spell.id);
-      }
-    } else if (spell.effectType === "dispel") {
-      const ally = this.resolveAllyUnit(caster, target);
-      if (ally) ally.ailments.clear();
-    }
+    const casterCtx = this.makePlayerCasterCtx(caster, casterSessionId, spell.id);
+    const hint = this.targetHintId(casterSessionId, target);
+    for (const effect of spell.effects) this.resolveEffect(casterCtx, effect, impact, hint);
   }
 
   // refundCooldown undoes the cooldown-charge this cast consumed at handleCast time (see the
@@ -1114,19 +1062,12 @@ export class CombatEngine {
       // moved behind a wall during the windup, same as the immediate check in handleCast.
       if (this.config.collidableStructures && !hasLineOfSight(player.x, player.z, impact.x, impact.z, STRUCTURES)) continue;
 
-      if (spell.projectileSpeed && pending.target.kind === "enemy" && spell.effects?.length) {
+      if (spell.projectileSpeed && pending.target.kind === "enemy") {
         const casterCtx = this.makePlayerCasterCtx(player, sessionId, spell.id);
         const projId = this.spawnProjectile(player.x, player.z, "player", pending.target.id, 0, spell.projectileSpeed, sessionId, false);
         this.pendingProjectileEffects.set(projId, { effects: spell.effects, casterCtx, targetHint: pending.target.id });
-      } else if (spell.projectileSpeed && pending.target.kind === "enemy") {
-        const { amount, isCrit } = this.computePlayerDamage(player, spell.amount ?? 0);
-        this.spawnProjectile(player.x, player.z, "player", pending.target.id, amount, spell.projectileSpeed, sessionId, isCrit);
-      } else if (spell.effects?.length) {
-        const casterCtx = this.makePlayerCasterCtx(player, sessionId, spell.id);
-        const hint = this.targetHintId(sessionId, pending.target);
-        for (const effect of spell.effects) this.resolveEffect(casterCtx, effect, impact, hint);
       } else {
-        this.resolveSpellEffect(player, sessionId, spell, pending.target);
+        this.castSpellEffects(player, sessionId, spell, pending.target, impact);
       }
     }
   }
@@ -1467,7 +1408,7 @@ export class CombatEngine {
   // a boss without both set never uses this. Shares the same pendingEnemyCast/isCasting windup
   // slot as the existing phase-2 attack (a boss only ever winds up one thing at a time - whichever
   // cooldown comes due first claims the slot, the other just fires as soon as it's free next
-  // tick), which also means the existing interrupt mechanic (tryInterrupt) works on these for
+  // tick), which also means the existing interrupt mechanic (tryInterruptUnit) works on these for
   // free with no extra code.
   private tickBossSpecialAbilities() {
     const now = Date.now();
