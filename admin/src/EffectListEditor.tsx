@@ -9,7 +9,7 @@ import { AilmentKind, BuffKind, EffectAction, EffectDef, EffectShape } from "@mm
 // matching an internal TypeScript union from memory.
 
 export const SHAPE_KINDS: EffectShape["kind"][] = ["singleTarget", "circle", "cone", "line", "randomPoints"];
-export const ACTION_KINDS: EffectAction["kind"][] = ["damage", "heal", "dot", "ailment", "buff", "knockback", "dispel", "interrupt", "summon"];
+export const ACTION_KINDS: EffectAction["kind"][] = ["damage", "heal", "dot", "ailment", "buff", "knockback", "dispel", "interrupt", "summon", "resetCooldown"];
 export const AILMENT_KINDS: AilmentKind[] = ["weaken"];
 export const BUFF_KINDS: BuffKind[] = ["battleFury", "shadowStep", "huntersFocus", "divineFavor", "arcaneSurge"];
 
@@ -48,6 +48,8 @@ export function defaultAction(kind: EffectAction["kind"]): EffectAction {
       return { kind };
     case "summon":
       return { kind, enemyTypeId: "", count: 1 };
+    case "resetCooldown":
+      return { kind, spellId: "" };
   }
 }
 
@@ -156,20 +158,34 @@ export function ActionFields({ action, onChange }: { action: EffectAction; onCha
           <NumberField label="Count" value={action.count} onChange={(count) => onChange({ ...action, count })} />
         </>
       );
+    case "resetCooldown":
+      return (
+        <label>
+          Spell ID
+          <input type="text" value={action.spellId} onChange={(e) => onChange({ ...action, spellId: e.target.value })} />
+        </label>
+      );
   }
 }
 
 interface Props {
   value: EffectDef[];
   onChange: (value: EffectDef[]) => void;
+  // Optional click-to-preview wiring (see SpellEditor.tsx/AbilityListEditor.tsx, which drives a
+  // live 3D telegraph from whichever card is focused) - omitted entirely by callers that don't
+  // preview anything (items.use_effects, via the generic EntityForm), so a card is neither
+  // clickable nor highlighted unless both are provided.
+  focusedIndex?: number | null;
+  onFocus?: (index: number | null) => void;
 }
 
-export function EffectListEditor({ value, onChange }: Props) {
+export function EffectListEditor({ value, onChange, focusedIndex, onFocus }: Props) {
   function updateEffect(index: number, next: EffectDef) {
     onChange(value.map((e, i) => (i === index ? next : e)));
   }
   function removeEffect(index: number) {
     onChange(value.filter((_, i) => i !== index));
+    if (onFocus && focusedIndex === index) onFocus(null);
   }
   function addEffect() {
     onChange([...value, { shape: defaultShape("circle"), actions: [defaultAction("damage")] }]);
@@ -178,10 +194,21 @@ export function EffectListEditor({ value, onChange }: Props) {
   return (
     <div className="effect-list">
       {value.map((effect, effectIndex) => (
-        <div className="effect-card" key={effectIndex}>
+        <div
+          className={onFocus && effectIndex === focusedIndex ? "effect-card ability-card ability-card-focused" : onFocus ? "effect-card ability-card" : "effect-card"}
+          key={effectIndex}
+          onClick={onFocus ? () => onFocus(effectIndex) : undefined}
+        >
           <div className="effect-card-header">
             <span>Effect {effectIndex + 1}</span>
-            <button type="button" className="effect-list-remove" onClick={() => removeEffect(effectIndex)}>
+            <button
+              type="button"
+              className="effect-list-remove"
+              onClick={(e) => {
+                e.stopPropagation();
+                removeEffect(effectIndex);
+              }}
+            >
               Remove Effect
             </button>
           </div>

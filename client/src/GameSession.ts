@@ -23,6 +23,7 @@ export interface DungeonListingRef {
   partyId: string;
   leaderSessionId: string;
   createdAt: number;
+  dungeonId: string;
 }
 
 // The minimal shared-state bridge between main()'s closure (the room connection, spell casting/

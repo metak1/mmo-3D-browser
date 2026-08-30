@@ -1,4 +1,4 @@
-// hex.ts reads STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/PORTAL_POSITION below, and this
+// hex.ts reads STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/DUNGEON_PORTALS below, and this
 // file calls resetHexTerrainCache() from loadGameContent - a real module cycle, safe because every
 // actual cross-reference happens inside function bodies invoked after both modules finish loading,
 // never at module top-level. Re-exported (in addition to imported - `export *` alone doesn't create
@@ -130,7 +130,12 @@ export type EffectAction =
   | { kind: "knockback"; distance: number }
   | { kind: "dispel" }
   | { kind: "interrupt" }
-  | { kind: "summon"; enemyTypeId: EnemyTypeId; count: number };
+  | { kind: "summon"; enemyTypeId: EnemyTypeId; count: number }
+  // Self-polarity like "summon" - clears the caster's own tracked cooldown for `spellId` (see
+  // CombatEngine.applySelfAction), letting it be cast again immediately. Primarily meant for
+  // talents' onCastEffect (TalentEffect below), but lives here since it's a general primitive any
+  // composable effect (a spell, a boss ability, a consumable item) can already reach for free.
+  | { kind: "resetCooldown"; spellId: SpellId };
 
 export interface EffectDef {
   shape: EffectShape;
@@ -568,6 +573,20 @@ export interface GatheringNodeDef {
 
 export let GATHERING_NODES: GatheringNodeDef[] = [];
 
+// One clickable dungeon-entrance marker (see client/src/game/Portal.ts/main.ts's PortalAvatar) -
+// mirrors GatheringNodeDef exactly, except the thing it references (dungeonId) is which dungeon
+// clicking it opens the finder for, not a type/flavor of the marker itself. Many can exist on one
+// map, each pointing at its own dungeon - see DUNGEONS below for what dungeonId resolves to.
+export interface DungeonPortalDef {
+  id: string;
+  mapId: MapId;
+  dungeonId: DungeonId;
+  x: number;
+  z: number;
+}
+
+export let DUNGEON_PORTALS: DungeonPortalDef[] = [];
+
 export interface LearnProfessionMessage {
   professionId: ProfessionId;
   npcId: string; // must be a trainer NPC that teaches this profession - see WorldRoom.handleLearnProfession
@@ -624,19 +643,29 @@ export interface SwapInventorySlotsMessage {
 
 export type TalentStatKey = "damagePercent" | "critChanceBonus" | "cooldownPercent" | "armorBonus" | "maxHpPercent";
 
-// A talent's effect is one of four kinds instead of always being a flat class-wide stat bonus:
+// A talent's effect is one of five kinds instead of always being a flat class-wide stat bonus:
 //  - statBonus: today's original behavior, applies regardless of which spell (if any) is in play.
 //  - spellStatBonus: same stat bonus shape, but only counts while resolving a cast of `spellId`.
 //  - extraCharges: `spellId` can be cast `perRank * rank` extra times before fully going on
 //    cooldown (see getSpellCharges/CombatEngine's charge-array cooldown gate).
 //  - onCastBuff: successfully casting `spellId` grants the caster the `buffId` buff (see
 //    BuffKind/BUFFS above) for that buff's own durationMs. Purely on/off (any rank > 0 triggers
-//    it) - the buff's own definition carries the magnitude, not the talent rank.
+//    it) - the buff's own definition carries the magnitude, not the talent rank. Always applies to
+//    the caster regardless of the triggering spell's own target - kept separate from onCastEffect
+//    below rather than folded into it, since routing a self-buff through shape-matching meant for
+//    the triggering spell's actual target would be a real semantic mismatch (e.g. buffing yourself
+//    off an enemy-targeted spell has no natural "ally near the enemy" shape to match against).
+//  - onCastEffect: successfully casting `spellId` also resolves `effect` (the same composable
+//    {shape, actions[]} a spell's own effects[]/a boss ability's own effect use) against that same
+//    cast's already-resolved target/impact point - e.g. "casting Backstab also applies a DOT to
+//    the target it hit," or (combined with EffectAction's resetCooldown) "casting X resets Y's
+//    cooldown." Purely on/off per rank, same as onCastBuff - see CombatEngine.castSpellEffects.
 export type TalentEffect =
   | { kind: "statBonus"; stat: TalentStatKey; perRank: number }
   | { kind: "spellStatBonus"; spellId: SpellId; stat: TalentStatKey; perRank: number }
   | { kind: "extraCharges"; spellId: SpellId; perRank: number }
-  | { kind: "onCastBuff"; spellId: SpellId; buffId: BuffKind };
+  | { kind: "onCastBuff"; spellId: SpellId; buffId: BuffKind }
+  | { kind: "onCastEffect"; spellId: SpellId; effect: EffectDef };
 
 export interface TalentDef {
   id: string;
@@ -644,7 +673,10 @@ export interface TalentDef {
   name: string;
   description: string;
   maxRank: number;
-  effect: TalentEffect;
+  // The same "combinable list" upgrade spells' effects/boss abilities' specialAbilities already
+  // have - one talent node can now stack more than one TalentEffect (e.g. a stat bonus AND an
+  // onCastEffect trigger on the same node), not just exactly one.
+  effects: TalentEffect[];
   tier: number; // 1-based row in the class's talent tree
   column: number; // 0-based column within that row, for grid layout
   prerequisiteTalentId?: string; // must have >=1 rank invested before this node can be spent
@@ -697,11 +729,12 @@ export function getTalentBonus(
     if (def.classId !== classId) continue;
     const rank = ranks.get(def.id) ?? 0;
     if (rank <= 0) continue;
-    const effect = def.effect;
-    if (effect.kind === "statBonus") {
-      bonus[effect.stat] += effect.perRank * rank;
-    } else if (effect.kind === "spellStatBonus" && effect.spellId === spellId) {
-      bonus[effect.stat] += effect.perRank * rank;
+    for (const effect of def.effects) {
+      if (effect.kind === "statBonus") {
+        bonus[effect.stat] += effect.perRank * rank;
+      } else if (effect.kind === "spellStatBonus" && effect.spellId === spellId) {
+        bonus[effect.stat] += effect.perRank * rank;
+      }
     }
   }
   return bonus;
@@ -714,9 +747,12 @@ export function getSpellCharges(classId: ClassId, spellId: SpellId, talentRanks:
   const ranks = new Map(talentRanks);
   let bonus = 0;
   for (const def of Object.values(TALENTS)) {
-    if (def.classId !== classId || def.effect.kind !== "extraCharges" || def.effect.spellId !== spellId) continue;
+    if (def.classId !== classId) continue;
     const rank = ranks.get(def.id) ?? 0;
-    if (rank > 0) bonus += def.effect.perRank * rank;
+    if (rank <= 0) continue;
+    for (const effect of def.effects) {
+      if (effect.kind === "extraCharges" && effect.spellId === spellId) bonus += effect.perRank * rank;
+    }
   }
   return bonus;
 }
@@ -727,10 +763,27 @@ export function getOnCastBuffs(classId: ClassId, spellId: SpellId, talentRanks: 
   const ranks = new Map(talentRanks);
   const buffs: BuffKind[] = [];
   for (const def of Object.values(TALENTS)) {
-    if (def.classId !== classId || def.effect.kind !== "onCastBuff" || def.effect.spellId !== spellId) continue;
-    if ((ranks.get(def.id) ?? 0) > 0) buffs.push(def.effect.buffId);
+    if (def.classId !== classId || (ranks.get(def.id) ?? 0) <= 0) continue;
+    for (const effect of def.effects) {
+      if (effect.kind === "onCastBuff" && effect.spellId === spellId) buffs.push(effect.buffId);
+    }
   }
   return buffs;
+}
+
+// Every EffectDef a spent onCastEffect talent resolves for casting `spellId` - see TalentEffect's
+// own doc comment for why this is separate from onCastBuff (this always resolves against the
+// triggering cast's own target/impact, onCastBuff always applies to the caster).
+export function getOnCastEffects(classId: ClassId, spellId: SpellId, talentRanks: Iterable<[string, number]>): EffectDef[] {
+  const ranks = new Map(talentRanks);
+  const effects: EffectDef[] = [];
+  for (const def of Object.values(TALENTS)) {
+    if (def.classId !== classId || (ranks.get(def.id) ?? 0) <= 0) continue;
+    for (const effect of def.effects) {
+      if (effect.kind === "onCastEffect" && effect.spellId === spellId) effects.push(effect.effect);
+    }
+  }
+  return effects;
 }
 
 export interface SpendTalentMessage {
@@ -956,65 +1009,86 @@ export interface GuildRosterSnapshot {
   members: GuildRosterEntry[];
 }
 
-// Where the dungeon-entrance portal object sits (see client/src/game/Portal.ts/main.ts's
-// PortalAvatar - a real clickable world object that opens the dungeon finder, not a spawn point).
-// Overworld-only, mirrored by GameMapDef.portalX/portalZ, admin-editable via the map editor's
-// portal marker.
-export let PORTAL_POSITION = { x: -24, z: -24 }; // clear of every existing spawn/quest/arena position
-
-// Where a character actually appears on join - a distinct concept from PORTAL_POSITION above
-// (easy to conflate since both are admin-editable single points on a map row, but one is a
-// clickable dungeon-entrance prop and this one is plain spawn coordinates with no world object of
-// its own). See WorldRoom.onJoin. Defaults to the origin, matching this game's original
-// hardcoded behavior before it became admin-editable.
+// Where a character actually appears on join - a distinct concept from DUNGEON_PORTALS above
+// (easy to conflate since both are admin-editable points on the map, but those are clickable
+// dungeon-entrance props and this one is plain spawn coordinates with no world object of its own).
+// See WorldRoom.onJoin. Defaults to the origin, matching this game's original hardcoded behavior
+// before it became admin-editable.
 export let SPAWN_POSITION = { x: 0, z: 0 };
 
-export let DUNGEON_HALF_EXTENT = 16; // the active dungeon's own ground, purely decorative sizing for the client
-
-// Mirrors SPAWN_POSITION - see DungeonRoom.onJoin. Dungeons have no portal-of-their-own concept
-// (PortalAvatar only ever renders in the overworld - see its own doc comment), so this is the
-// only admin-editable point a dungeon's own map row needs.
+// Purely client-side rendering defaults, reassigned by setActiveDungeonForClient below - see its
+// own doc comment for why these stay simple reassignable globals (a single "current" dungeon)
+// even though the server-side equivalent (DUNGEON_CONTENT) had to become a real per-id dictionary.
+export let DUNGEON_HALF_EXTENT = 16;
 export let DUNGEON_SPAWN_POSITION = { x: 0, z: 0 };
 
-// The active dungeon's own hex-terrain content, mirroring STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/
-// HEX_TILE_OVERRIDES but scoped to ACTIVE_DUNGEON.mapId instead of ACTIVE_MAP.id (see
-// loadGameContent) - structures/npcs/waypoints/spawns are already placeable on a dungeon map via
-// the admin editor today, so including them here means a dungeon's own walls/props/NPCs get the
-// same "never drop a lake under this" land protection the overworld already gets for free.
-export let DUNGEON_STRUCTURES: StructureDef[] = [];
-export let DUNGEON_NPCS: Record<string, NpcDef> = {};
-export let DUNGEON_WAYPOINTS: WaypointDef[] = [];
-export let DUNGEON_SPAWN_POINTS: EnemySpawnDef[] = [];
-export let DUNGEON_HEX_TILE_OVERRIDES: HexTileOverrideDef[] = [];
+// Every dungeon's own hex-terrain content (structures/npcs/waypoints/spawns/hex overrides scoped
+// to that dungeon's own map, plus its spawn position/half extent), keyed by dungeon id - mirrors
+// STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/HEX_TILE_OVERRIDES but computed for every dungeon at once
+// instead of one globally "active" one, since several DungeonRoom instances can now run
+// concurrently server-side, each needing only its own dungeon's content. See loadGameContent.
+export interface DungeonRuntimeContent {
+  structures: StructureDef[];
+  npcs: Record<string, NpcDef>;
+  waypoints: WaypointDef[];
+  spawnPoints: EnemySpawnDef[];
+  hexTileOverrides: HexTileOverrideDef[];
+  spawnPosition: { x: number; z: number };
+  halfExtent: number;
+}
+export let DUNGEON_CONTENT: Record<DungeonId, DungeonRuntimeContent> = {};
 
-// Assembled fresh on every call from the globals above rather than cached, since it's only ever
-// used for ground-mesh construction (once per dungeon load) and client-visual elevation lookups -
-// see getTerrainHeight's "dungeon" branch. No boss-arena/portal land-forcing for dungeons yet
-// (both left at a harmless {0,0}/0 - a dungeon-kind map's own bossArena/portal columns aren't used
-// today), unlike the overworld's equivalent live content.
+let CLIENT_DUNGEON_CONTENT: DungeonRuntimeContent | null = null;
+
+// Called once from main.ts right after the client learns which dungeon it just entered (or with
+// undefined for the overworld) - the client is never inside more than one dungeon room at a time,
+// unlike the server (which can run many DungeonRoom instances concurrently, each reading
+// DUNGEON_CONTENT[its own id] directly), so a single "current" pointer is legitimate here. Once
+// called, DUNGEON_HALF_EXTENT/DUNGEON_SPAWN_POSITION/dungeonHexContent() below all reflect the
+// chosen dungeon with no other call site (Scene.ts/Minimap.ts/HexGround.ts/getTerrainHeight) ever
+// needing to know a dungeon id itself.
+export function setActiveDungeonForClient(dungeonId: DungeonId | undefined): void {
+  const content = dungeonId ? (DUNGEON_CONTENT[dungeonId] ?? null) : null;
+  CLIENT_DUNGEON_CONTENT = content;
+  DUNGEON_HALF_EXTENT = content?.halfExtent ?? 16;
+  DUNGEON_SPAWN_POSITION = content?.spawnPosition ?? { x: 0, z: 0 };
+}
+
+// Assembled fresh on every call from whichever dungeon setActiveDungeonForClient last selected -
+// only ever used for ground-mesh construction (once per dungeon load) and client-visual elevation
+// lookups, see getTerrainHeight's "dungeon" branch. No boss-arena/portal land-forcing for dungeons
+// (both left at a harmless {0,0}/0/[] - a dungeon has no boss arena or entrance portal of its own),
+// unlike the overworld's equivalent live content.
 export function dungeonHexContent(): HexTerrainContent {
+  const c = CLIENT_DUNGEON_CONTENT;
   return {
-    structures: DUNGEON_STRUCTURES,
-    npcs: Object.values(DUNGEON_NPCS),
-    waypoints: DUNGEON_WAYPOINTS,
-    spawns: DUNGEON_SPAWN_POINTS,
+    structures: c?.structures ?? [],
+    npcs: c ? Object.values(c.npcs) : [],
+    waypoints: c?.waypoints ?? [],
+    spawns: c?.spawnPoints ?? [],
     bossArenaCenter: { x: 0, z: 0 },
     bossArenaRadius: 0,
-    portalPosition: { x: 0, z: 0 },
-    overrides: DUNGEON_HEX_TILE_OVERRIDES,
+    portals: [],
+    overrides: c?.hexTileOverrides ?? [],
   };
 }
 
 export const DUNGEON_ROOM_NAME = "dungeon_room";
-export let DUNGEON_PARTY_SIZE = 4;
-export let DUNGEON_COMPOSITION: Record<ClassRole, number> = { tank: 1, healer: 1, dps: 2 };
 
 // A "listing" is just a party advertising itself - composition is only enforced at
 // dungeon_start, not at dungeon_join_listing (only a size check, "except if it's full").
 // The member list/roles are derived on demand from state.players filtered by partyId,
-// never duplicated onto the listing itself.
+// never duplicated onto the listing itself. dungeonId records which dungeon the listing's leader
+// opened it for (from whichever portal they clicked) - see DUNGEONS[dungeonId] for its own
+// partySize/composition, no separate global needed now that more than one dungeon can exist.
 export interface DungeonJoinListingMessage {
   partyId: string;
+}
+export interface DungeonOpenListingMessage {
+  dungeonId: DungeonId;
+}
+export interface DungeonStartMessage {
+  dungeonId: DungeonId;
 }
 
 export const CHAT_MAX_LENGTH = 200;
@@ -1290,19 +1364,123 @@ export interface StructureCollider {
   halfDepth: number;
 }
 
+// Each building model's own native height, scaled up to this fixed world-unit height when placed
+// (fitHeight - see admin/src/mapEditor/modelLoader.ts and client/src/game/models.ts, both take a
+// target height and uniformly scale-to-fit, preserving the model's own aspect ratio) - single-
+// sourced here (both admin's structureGeometry.ts and client's Structure.ts import this instead of
+// each hand-duplicating their own copy) since it's also what StructureDef.height is measured
+// against: a building's own `height` field is real now (see getStructureColliders' "building" case
+// below and MapEditor.tsx's commitTransformRef), and `height / BUILDING_TARGET_HEIGHT[modelId]` is
+// the scale ratio a resized building has been stretched by relative to this, its natural size.
+export const BUILDING_TARGET_HEIGHT: Record<string, number> = {
+  building_archeryrange_blue: 6.27,
+  building_barracks_blue: 5.74,
+  building_blacksmith_blue: 3.45,
+  building_castle_blue: 11.94,
+  building_church_blue: 5.76,
+  building_home_A_blue: 3.26,
+  building_home_B_blue: 4.48,
+  building_lumbermill_blue: 1.71,
+  building_market_blue: 3.44,
+  building_mine_blue: 3.98,
+  building_tavern_blue: 4.89,
+  building_tower_A_blue: 6.4,
+  building_tower_base_blue: 10.5,
+  building_tower_B_blue: 8.45,
+  building_tower_catapult_blue: 1.62,
+  building_watermill_blue: 3.68,
+  building_well_blue: 2.07,
+  building_windmill_blue: 3.51,
+  building_archeryrange_green: 6.27,
+  building_barracks_green: 5.74,
+  building_blacksmith_green: 3.45,
+  building_castle_green: 11.94,
+  building_church_green: 5.76,
+  building_home_A_green: 3.26,
+  building_home_B_green: 4.48,
+  building_lumbermill_green: 1.71,
+  building_market_green: 3.44,
+  building_mine_green: 3.98,
+  building_tavern_green: 4.89,
+  building_tower_A_green: 6.4,
+  building_tower_base_green: 10.5,
+  building_tower_B_green: 8.45,
+  building_tower_catapult_green: 1.62,
+  building_watermill_green: 3.68,
+  building_well_green: 2.07,
+  building_windmill_green: 3.51,
+  building_archeryrange_red: 6.27,
+  building_barracks_red: 5.74,
+  building_blacksmith_red: 3.45,
+  building_castle_red: 11.94,
+  building_church_red: 5.76,
+  building_home_A_red: 3.26,
+  building_home_B_red: 4.48,
+  building_lumbermill_red: 1.71,
+  building_market_red: 3.44,
+  building_mine_red: 3.98,
+  building_tavern_red: 4.89,
+  building_tower_A_red: 6.4,
+  building_tower_base_red: 10.5,
+  building_tower_B_red: 8.45,
+  building_tower_catapult_red: 1.62,
+  building_watermill_red: 3.68,
+  building_well_red: 2.07,
+  building_windmill_red: 3.51,
+  building_archeryrange_yellow: 6.27,
+  building_barracks_yellow: 5.74,
+  building_blacksmith_yellow: 3.45,
+  building_castle_yellow: 11.94,
+  building_church_yellow: 5.76,
+  building_home_A_yellow: 3.26,
+  building_home_B_yellow: 4.48,
+  building_lumbermill_yellow: 1.71,
+  building_market_yellow: 3.44,
+  building_mine_yellow: 3.98,
+  building_tavern_yellow: 4.89,
+  building_tower_A_yellow: 6.4,
+  building_tower_base_yellow: 10.5,
+  building_tower_B_yellow: 8.45,
+  building_tower_catapult_yellow: 1.62,
+  building_watermill_yellow: 3.68,
+  building_well_yellow: 2.07,
+  building_windmill_yellow: 3.51,
+  building_bridge_A: 3.13,
+  building_bridge_B: 3.13,
+  building_destroyed: 2.48,
+  building_dirt: 0.22,
+  building_grain: 0.98,
+  building_scaffolding: 3.25,
+  building_stage_A: 0.71,
+  building_stage_B: 1.59,
+  building_stage_C: 2.46,
+  fence_stone_straight: 0.54,
+  fence_stone_straight_gate: 0.59,
+  fence_wood_straight: 1.1,
+  fence_wood_straight_gate: 0.89,
+  wall_corner_A_gate: 1.58,
+  wall_corner_A_inside: 2.2,
+  wall_corner_A_outside: 2.2,
+  wall_corner_B_inside: 2.2,
+  wall_corner_B_outside: 2.2,
+  wall_straight: 2.2,
+  wall_straight_gate: 1.58,
+};
+
 // A single AABB per building model, in local (unrotated, pre-scale) space, approximating its real
-// footprint - computed once offline from each GLTF's own native bounding box (same technique as
-// client/src/game/Structure.ts's BUILDING_MODELS targetHeight), scaled by that same
-// targetHeight/nativeHeight ratio fitHeight applies visually, then shrunk 15% (same "kept slightly
-// inside the visual model" fudge shared's FURNITURE_FOOTPRINT below also uses) so the collision
-// edge never reads as bigger than what's drawn. Deliberately missing 8 of the 92 models, which
-// stay walk-through (no entry -> getStructureColliders' building case returns []):
-// building_bridge_A/B (spans a river - meant to be walked over, not around), building_dirt/grain
-// (flat ground decals with no real height, not obstacles), and the 4 "*_gate" pieces
-// (fence_stone_straight_gate, fence_wood_straight_gate, wall_corner_A_gate, wall_straight_gate -
-// each has a real passable opening built into its geometry that a single box can't represent, so
-// this follows the same "a gate/door never blocks" rule the door/gate StructureKinds already use
-// rather than wall off the very opening the piece exists to provide).
+// footprint at its natural size (BUILDING_TARGET_HEIGHT above) - computed once offline from each
+// GLTF's own native bounding box, scaled by that same targetHeight/nativeHeight ratio fitHeight
+// applies visually, then shrunk 15% (same "kept slightly inside the visual model" fudge shared's
+// FURNITURE_FOOTPRINT below also uses) so the collision edge never reads as bigger than what's
+// drawn. getStructureColliders' "building" case scales this further by the structure's own current
+// height/BUILDING_TARGET_HEIGHT ratio, so a resized building's collision grows/shrinks with it.
+// Deliberately missing 8 of the 92 models, which stay walk-through (no entry -> getStructureColliders'
+// building case returns []): building_bridge_A/B (spans a river - meant to be walked over, not
+// around), building_dirt/grain (flat ground decals with no real height, not obstacles), and the 4
+// "*_gate" pieces (fence_stone_straight_gate, fence_wood_straight_gate, wall_corner_A_gate,
+// wall_straight_gate - each has a real passable opening built into its geometry that a single box
+// can't represent, so this follows the same "a gate/door never blocks" rule the door/gate
+// StructureKinds already use rather than wall off the very opening the piece exists to provide).
 export const BUILDING_FOOTPRINT: Record<string, { halfWidth: number; halfDepth: number }> = {
   building_archeryrange_blue: { halfWidth: 2.485, halfDepth: 2.306 },
   building_barracks_blue: { halfWidth: 2.142, halfDepth: 2.329 },
@@ -1417,7 +1595,14 @@ export function getStructureColliders(def: StructureDef): StructureCollider[] {
     }
     case "building": {
       const footprint = def.modelId ? BUILDING_FOOTPRINT[def.modelId] : undefined;
-      return footprint ? [{ localX: 0, localZ: 0, halfWidth: footprint.halfWidth, halfDepth: footprint.halfDepth }] : [];
+      if (!footprint) return [];
+      // BUILDING_FOOTPRINT is baked at each model's own natural size (BUILDING_TARGET_HEIGHT) - a
+      // structure's real height/that natural height is the same uniform ratio fitHeight scaled the
+      // visual model by, so applying it here keeps collision proportional to whatever size the
+      // building was actually resized to (see MapEditor.tsx's commitTransformRef).
+      const targetHeight = def.modelId ? BUILDING_TARGET_HEIGHT[def.modelId] : undefined;
+      const scale = targetHeight ? def.height / targetHeight : 1;
+      return [{ localX: 0, localZ: 0, halfWidth: footprint.halfWidth * scale, halfDepth: footprint.halfDepth * scale }];
     }
     default:
       return [];
@@ -1859,11 +2044,9 @@ export interface GameMapDef {
   kind: MapKind;
   halfExtent: number;
   // isActive is only meaningful (and exclusively enforced - exactly one true) among
-  // kind:"overworld" rows. A kind:"dungeon" map's liveness is entirely determined by whether
-  // the Dungeon row pointing at it (via Dungeon.mapId) has isActive=true.
+  // kind:"overworld" rows - a kind:"dungeon" map's own isActive is unused (a dungeon simply exists
+  // or doesn't, see DungeonDef's own doc comment; its map row is just where its content lives).
   isActive: boolean;
-  portalX?: number;
-  portalZ?: number;
   spawnX?: number;
   spawnZ?: number;
   bossArenaX?: number;
@@ -1886,17 +2069,22 @@ export interface DungeonSpawnDef {
   respawnMs?: number;
 }
 
+// A dungeon simply exists or doesn't - no enable/disable flag, same as EnemyTypeDef/TalentDef/
+// SpellDef. Many can exist at once, each reachable through its own DungeonPortalDef(s); delete a
+// dungeon (blocked while a portal still points at it - see the admin dungeons route's
+// checkDeletable) rather than deactivating it.
 export interface DungeonDef {
   id: DungeonId;
   name: string;
   mapId: MapId;
-  isActive: boolean;
   partySize: number;
   composition: Record<ClassRole, number>;
   spawns: DungeonSpawnDef[];
 }
 
-export let ACTIVE_DUNGEON: DungeonDef | null = null;
+// Every dungeon that exists, keyed by id - mirrors ENEMY_TYPES/TALENTS. DungeonRoom looks its own
+// dungeonId up here (see DUNGEON_CONTENT below for the matching per-dungeon rendering content).
+export let DUNGEONS: Record<DungeonId, DungeonDef> = {};
 
 export interface ContentSnapshot {
   classes: ClassDef[];
@@ -1918,6 +2106,7 @@ export interface ContentSnapshot {
   recipes: RecipeDef[];
   gatheringNodeTypes: GatheringNodeTypeDef[];
   gatheringNodes: GatheringNodeDef[];
+  dungeonPortals: DungeonPortalDef[];
 }
 
 // The single entry point that turns a fetched content snapshot into every live table/constant
@@ -1947,8 +2136,6 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   }
 
   ACTIVE_MAP = snapshot.maps.find((m) => m.kind === "overworld" && m.isActive) ?? ACTIVE_MAP;
-  ACTIVE_DUNGEON = snapshot.dungeons.find((d) => d.isActive) ?? ACTIVE_DUNGEON;
-  const dungeonMap = snapshot.maps.find((m) => m.id === ACTIVE_DUNGEON?.mapId) ?? null;
 
   // NPCs/spawns/structures are scoped to whichever map is currently ACTIVE_MAP, computed just
   // above - so a draft/inactive "overworld"-kind map can carry its own content in the DB without
@@ -1958,27 +2145,36 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
   SPAWN_ZONES = snapshot.spawnZones.filter((z) => z.mapId === ACTIVE_MAP?.id);
   STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_MAP?.id);
   WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_MAP?.id);
-  // Overworld-only (mirrors WAYPOINTS, not DUNGEON_WAYPOINTS) - a dungeon run is a single fixed-
-  // spawn attempt (see roomUtil.ts's plain respawnPlayerPosition, still used by DungeonRoom
+  // Overworld-only (mirrors WAYPOINTS, not a dungeon's own waypoints) - a dungeon run is a single
+  // fixed-spawn attempt (see roomUtil.ts's plain respawnPlayerPosition, still used by DungeonRoom
   // unchanged), it has no graveyard concept of its own.
   RESPAWN_POINTS = snapshot.respawnPoints.filter((r) => r.mapId === ACTIVE_MAP?.id);
   FURNITURE = snapshot.furniture.filter((f) => f.mapId === ACTIVE_MAP?.id);
   HEX_TILE_OVERRIDES = snapshot.hexTiles.filter((h) => h.mapId === ACTIVE_MAP?.id);
   GATHERING_NODES = snapshot.gatheringNodes.filter((n) => n.mapId === ACTIVE_MAP?.id);
+  DUNGEON_PORTALS = snapshot.dungeonPortals.filter((p) => p.mapId === ACTIVE_MAP?.id);
 
-  // Same shape as the ACTIVE_MAP-scoped bindings just above, but scoped to the active dungeon's
-  // own map row instead - see DUNGEON_STRUCTURES's own doc comment.
-  DUNGEON_STRUCTURES = snapshot.structures.filter((s) => s.mapId === ACTIVE_DUNGEON?.mapId);
-  DUNGEON_NPCS = Object.fromEntries(snapshot.npcs.filter((n) => n.mapId === ACTIVE_DUNGEON?.mapId).map((n) => [n.id, n]));
-  DUNGEON_WAYPOINTS = snapshot.waypoints.filter((w) => w.mapId === ACTIVE_DUNGEON?.mapId);
-  DUNGEON_SPAWN_POINTS = snapshot.spawns.filter((s) => s.mapId === ACTIVE_DUNGEON?.mapId);
-  DUNGEON_HEX_TILE_OVERRIDES = snapshot.hexTiles.filter((h) => h.mapId === ACTIVE_DUNGEON?.mapId);
+  // Every dungeon that exists, keyed by id - not scoped to one "active" one any more, since many
+  // can now be reachable at once (see DUNGEONS/DUNGEON_CONTENT's own doc comments). Each entry's
+  // content is scoped to that dungeon's own map row, mirroring the ACTIVE_MAP-scoped bindings just
+  // above but computed once per dungeon instead of once for a singleton.
+  DUNGEONS = Object.fromEntries(snapshot.dungeons.map((d) => [d.id, d]));
+  DUNGEON_CONTENT = {};
+  for (const dungeon of snapshot.dungeons) {
+    const dungeonMap = snapshot.maps.find((m) => m.id === dungeon.mapId);
+    DUNGEON_CONTENT[dungeon.id] = {
+      structures: snapshot.structures.filter((s) => s.mapId === dungeon.mapId),
+      npcs: Object.fromEntries(snapshot.npcs.filter((n) => n.mapId === dungeon.mapId).map((n) => [n.id, n])),
+      waypoints: snapshot.waypoints.filter((w) => w.mapId === dungeon.mapId),
+      spawnPoints: snapshot.spawns.filter((s) => s.mapId === dungeon.mapId),
+      hexTileOverrides: snapshot.hexTiles.filter((h) => h.mapId === dungeon.mapId),
+      spawnPosition: dungeonMap?.spawnX != null && dungeonMap?.spawnZ != null ? { x: dungeonMap.spawnX, z: dungeonMap.spawnZ } : { x: 0, z: 0 },
+      halfExtent: dungeonMap?.halfExtent ?? 16,
+    };
+  }
 
   if (ACTIVE_MAP) {
     MAP_HALF_EXTENT = ACTIVE_MAP.halfExtent;
-    if (ACTIVE_MAP.portalX != null && ACTIVE_MAP.portalZ != null) {
-      PORTAL_POSITION = { x: ACTIVE_MAP.portalX, z: ACTIVE_MAP.portalZ };
-    }
     if (ACTIVE_MAP.spawnX != null && ACTIVE_MAP.spawnZ != null) {
       SPAWN_POSITION = { x: ACTIVE_MAP.spawnX, z: ACTIVE_MAP.spawnZ };
     }
@@ -1987,19 +2183,9 @@ export function loadGameContent(snapshot: ContentSnapshot): void {
     }
     if (ACTIVE_MAP.bossArenaRadius != null) BOSS_ARENA_RADIUS = ACTIVE_MAP.bossArenaRadius;
   }
-  if (dungeonMap) {
-    DUNGEON_HALF_EXTENT = dungeonMap.halfExtent;
-    if (dungeonMap.spawnX != null && dungeonMap.spawnZ != null) {
-      DUNGEON_SPAWN_POSITION = { x: dungeonMap.spawnX, z: dungeonMap.spawnZ };
-    }
-  }
-  if (ACTIVE_DUNGEON) {
-    DUNGEON_PARTY_SIZE = ACTIVE_DUNGEON.partySize;
-    DUNGEON_COMPOSITION = ACTIVE_DUNGEON.composition;
-  }
 
   // The hex terrain classifier (hex.ts) derives everything from the bindings just reassigned
-  // above (STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/PORTAL_POSITION) - its cached road
+  // above (STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/DUNGEON_PORTALS) - its cached road
   // network and passability answers go stale the moment any of those change, which happens live
   // on every admin CRUD mutation (reloadGameContent), not just once at boot.
   resetHexTerrainCache();

@@ -1,4 +1,4 @@
-import { CLASSES, ClassId, ClassRole, DUNGEON_COMPOSITION, DUNGEON_PARTY_SIZE, DungeonJoinListingMessage } from "@mmo/shared";
+import { CLASSES, ClassId, ClassRole, DUNGEONS, DungeonId, DungeonJoinListingMessage, DungeonOpenListingMessage, DungeonStartMessage } from "@mmo/shared";
 import { activeRoom } from "../clientState";
 import { GameSession } from "../GameSession";
 import { makeDraggable } from "./DraggablePanel";
@@ -12,11 +12,22 @@ const dungeonStartBtn = document.querySelector<HTMLButtonElement>("[data-dungeon
 
 makeDraggable(dungeonFinderPanel, "dungeon-finder");
 
+// Which dungeon the panel is currently showing - set once by openDungeonFinder (from whichever
+// portal was clicked, see main.ts's raycast hit-test), then read by every later re-render this
+// module's own onAdd/onRemove/onChange listeners in main.ts trigger, none of which pass a dungeon
+// id themselves. More than one dungeon can exist now (see DUNGEONS), so this replaces what used
+// to be a single always-correct DUNGEON_COMPOSITION/DUNGEON_PARTY_SIZE global pair.
+let currentDungeonId: DungeonId | null = null;
+
 function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 export function renderDungeonFinderPanel(session: GameSession) {
+  const dungeon = currentDungeonId ? DUNGEONS[currentDungeonId] : undefined;
+  const partySize = dungeon?.partySize ?? 0;
+  const composition = dungeon?.composition ?? ({} as Record<ClassRole, number>);
+
   const local = session.localSessionId ? session.playerSchemaById.get(session.localSessionId) : undefined;
   const partyId = local?.partyId ?? "";
 
@@ -44,10 +55,10 @@ export function renderDungeonFinderPanel(session: GameSession) {
 
   // Shown as guidance ("this is the dungeon's designed composition"), not a hard gate -
   // see the Start button below.
-  dungeonRoleChecklistEl.innerHTML = (Object.keys(DUNGEON_COMPOSITION) as ClassRole[])
+  dungeonRoleChecklistEl.innerHTML = (Object.keys(composition) as ClassRole[])
     .map((role) => {
       const have = roleCounts[role];
-      const need = DUNGEON_COMPOSITION[role];
+      const need = composition[role];
       return `<span class="dungeon-role-tag ${have === need ? "filled" : "missing"}">${capitalize(role)} ${have}/${need}</span>`;
     })
     .join("");
@@ -58,13 +69,14 @@ export function renderDungeonFinderPanel(session: GameSession) {
   // soloing) can still push Start rather than being blocked, matching the relaxed server-side
   // check in WorldRoom.handleDungeonStart. Only the group size cap is actually enforced.
   const groupSize = members.length;
-  dungeonStartBtn.disabled = groupSize < 1 || groupSize > DUNGEON_PARTY_SIZE;
+  dungeonStartBtn.disabled = !dungeon || groupSize < 1 || groupSize > partySize;
 
   dungeonListingListEl.innerHTML = "";
   for (const [listingPartyId, listing] of session.dungeonListingSchemaById) {
+    if (listing.dungeonId !== currentDungeonId) continue; // a listing for a different portal's dungeon
     const size = [...session.playerSchemaById.values()].filter((s) => s.partyId === listingPartyId).length;
     const isOwnGroup = listingPartyId === partyId;
-    const wouldFit = !isOwnGroup && size + groupSize <= DUNGEON_PARTY_SIZE;
+    const wouldFit = !isOwnGroup && size + groupSize <= partySize;
     const leaderLabel = session.playerSchemaById.get(listing.leaderSessionId)?.name ?? "Someone";
 
     const row = document.createElement("div");
@@ -72,7 +84,7 @@ export function renderDungeonFinderPanel(session: GameSession) {
     row.innerHTML = `
       <div class="talent-card-top">
         <span>${leaderLabel}'s Group</span>
-        <span class="talent-rank">${size} / ${DUNGEON_PARTY_SIZE}</span>
+        <span class="talent-rank">${size} / ${partySize}</span>
       </div>
     `;
 
@@ -96,7 +108,8 @@ export function renderDungeonFinderPanel(session: GameSession) {
   }
 }
 
-export function openDungeonFinder(session: GameSession) {
+export function openDungeonFinder(session: GameSession, dungeonId: DungeonId) {
+  currentDungeonId = dungeonId;
   dungeonFinderPanel.hidden = false;
   renderDungeonFinderPanel(session);
 }
@@ -107,6 +120,14 @@ export function closeDungeonFinder() {
 
 export function setupDungeonFinderPanel() {
   document.querySelector("[data-dungeon-finder-close]")!.addEventListener("click", () => closeDungeonFinder());
-  dungeonOpenListingBtn.addEventListener("click", () => activeRoom?.send("dungeon_open_listing"));
-  dungeonStartBtn.addEventListener("click", () => activeRoom?.send("dungeon_start"));
+  dungeonOpenListingBtn.addEventListener("click", () => {
+    if (!currentDungeonId) return;
+    const message: DungeonOpenListingMessage = { dungeonId: currentDungeonId };
+    activeRoom?.send("dungeon_open_listing", message);
+  });
+  dungeonStartBtn.addEventListener("click", () => {
+    if (!currentDungeonId) return;
+    const message: DungeonStartMessage = { dungeonId: currentDungeonId };
+    activeRoom?.send("dungeon_start", message);
+  });
 }

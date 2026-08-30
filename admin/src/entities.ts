@@ -8,7 +8,8 @@ export type FieldType =
   | "reference"
   | "multiselect"
   | "effectList"
-  | "itemQuantityList";
+  | "itemQuantityList"
+  | "talentEffectList";
 
 export interface FieldSchema {
   key: string; // matches the admin API's field name (snake_case, mirrors the DB column)
@@ -28,7 +29,7 @@ export interface EntitySchema {
   label: string;
   displayField: string; // which field to show alongside the id in tables/reference dropdowns
   fields: FieldSchema[];
-  hasActivate?: boolean; // maps/dungeons - "exactly one active" is managed via a dedicated action
+  hasActivate?: boolean; // overworld maps only - "exactly one active" is managed via a dedicated action
   hidden?: boolean; // no sidebar nav link - registered only so the generic CRUD helpers work for it
 }
 
@@ -110,7 +111,7 @@ export const ENTITIES: EntitySchema[] = [
       { key: "name", label: "Name", type: "text" },
       { key: "description", label: "Description", type: "textarea" },
       { key: "max_rank", label: "Max Rank", type: "number" },
-      { key: "effect", label: "Effect", type: "json" },
+      { key: "effects", label: "Effects", type: "talentEffectList" },
       { key: "tier", label: "Tier (tree row, 1-based)", type: "number" },
       { key: "column_index", label: "Column (0-based, within the row)", type: "number" },
       {
@@ -264,6 +265,18 @@ export const ENTITIES: EntitySchema[] = [
     ],
   },
   {
+    key: "dungeon-portals",
+    label: "Dungeon Portals",
+    displayField: "id",
+    fields: [
+      { key: "id", label: "ID", type: "text" },
+      { key: "map_id", label: "Map", type: "reference", referenceEntity: "maps" },
+      { key: "dungeon_id", label: "Dungeon", type: "reference", referenceEntity: "dungeons" },
+      { key: "x", label: "X", type: "number" },
+      { key: "z", label: "Z", type: "number" },
+    ],
+  },
+  {
     key: "maps",
     label: "Maps",
     displayField: "name",
@@ -273,8 +286,6 @@ export const ENTITIES: EntitySchema[] = [
       { key: "name", label: "Name", type: "text" },
       { key: "kind", label: "Kind", type: "select", options: ["overworld", "dungeon"] },
       { key: "half_extent", label: "Half Extent", type: "number" },
-      { key: "portal_x", label: "Portal X", type: "number", optional: true },
-      { key: "portal_z", label: "Portal Z", type: "number", optional: true },
       { key: "spawn_x", label: "Spawn X", type: "number", optional: true },
       { key: "spawn_z", label: "Spawn Z", type: "number", optional: true },
       { key: "boss_arena_x", label: "Boss Arena X", type: "number", optional: true },
@@ -294,9 +305,9 @@ export const ENTITIES: EntitySchema[] = [
       { key: "x", label: "X", type: "number" },
       { key: "z", label: "Z", type: "number" },
       { key: "rotation_y", label: "Rotation Y (radians)", type: "number", optional: true },
-      { key: "width", label: "Width (ignored for kind=building)", type: "number" },
-      { key: "depth", label: "Depth (ignored for kind=building)", type: "number" },
-      { key: "height", label: "Height (ignored for kind=building)", type: "number" },
+      { key: "width", label: "Width (kind=building: real footprint width, kept in sync with height by the scale gizmo)", type: "number" },
+      { key: "depth", label: "Depth (kind=building: real footprint depth, kept in sync with height by the scale gizmo)", type: "number" },
+      { key: "height", label: "Height (kind=building: the model's real fit height - scaling this resizes it)", type: "number" },
       { key: "color", label: "Color (hex, ignored for kind=building)", type: "text" },
       { key: "y_offset", label: "Y Offset", type: "number", optional: true },
       {
@@ -596,7 +607,6 @@ export const ENTITIES: EntitySchema[] = [
     key: "dungeons",
     label: "Dungeons",
     displayField: "name",
-    hasActivate: true,
     fields: [
       { key: "id", label: "ID", type: "text" },
       { key: "name", label: "Name", type: "text" },

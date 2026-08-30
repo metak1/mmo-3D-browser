@@ -1,9 +1,9 @@
 import { Room, Client } from "@colyseus/core";
 import {
-  ACTIVE_DUNGEON,
+  DUNGEON_CONTENT,
+  DUNGEONS,
   CastMessage,
   ChatMessage,
-  DUNGEON_SPAWN_POSITION,
   DungeonSpawnDef,
   ENEMY_RESPAWN_MS,
   ENEMY_TYPES,
@@ -35,6 +35,10 @@ const BOSS_GUARANTEED_DROPS = 3;
 export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom {
   private combat!: CombatEngine;
   private loot!: LootManager;
+  // Which DUNGEONS/DUNGEON_CONTENT entry this particular instance is - several DungeonRooms can
+  // run concurrently now that a portal can point at any dungeon (see WorldRoom.handleDungeonStart),
+  // so every dungeon-specific lookup below is scoped to this instead of a shared module global.
+  private dungeonId!: string;
   // Not private: read by the GuildCapableRoom structural interface (social.ts's
   // handleGuildLeave/handleGuildRosterRequest), same reasoning as WorldRoom's own field.
   characterIdBySession = new Map<string, number>();
@@ -43,7 +47,10 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
   // pickup right as a player disconnects could otherwise race the onLeave save and lose data).
   private persistQueue = new PersistQueue();
 
-  onCreate() {
+  onCreate(options: { dungeonId: string }) {
+    if (!DUNGEONS[options.dungeonId]) throw new Error(`Unknown dungeonId: ${options.dungeonId}`);
+    this.dungeonId = options.dungeonId;
+
     this.setState(new DungeonState());
 
     this.combat = new CombatEngine({
@@ -63,7 +70,7 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
     // gating, so the whole dungeon reads as one real space to fight through rather than a box that
     // dispenses enemies as you clear it. See spawnDungeonEnemy/handleEnemyKilled for how a killed
     // trash spawn respawns in place, and the boss (the one "boss"-behavior entry) doesn't.
-    for (const point of ACTIVE_DUNGEON?.spawns ?? []) this.spawnDungeonEnemy(point);
+    for (const point of DUNGEONS[this.dungeonId]?.spawns ?? []) this.spawnDungeonEnemy(point);
 
     this.onMessage("input", (client, message: InputMessage) => this.combat.handleInput(client.sessionId, message));
     this.onMessage("cast", (client, message: CastMessage) => this.combat.handleCast(client, message));
@@ -93,14 +100,15 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
     }
 
     const player = new Player();
-    // The admin-editable dungeon entry point (dungeon_ground's own spawn_x/spawn_z, edited via
-    // the map editor's spawn marker the same way as the overworld's - see WorldRoom.onJoin's
-    // identical use of SPAWN_POSITION) - defaults to (0,0), matching every existing fixed enemy
-    // spawn in this dungeon's layout (see DUNGEON_SPAWN_POINTS), so this is a no-op until an
-    // admin actually moves it.
-    player.x = DUNGEON_SPAWN_POSITION.x;
+    // The admin-editable dungeon entry point (this dungeon's own map row's spawn_x/spawn_z,
+    // edited via the map editor's spawn marker the same way as the overworld's - see
+    // WorldRoom.onJoin's identical use of SPAWN_POSITION) - defaults to (0,0), matching every
+    // existing fixed enemy spawn in this dungeon's layout, so this is a no-op until an admin
+    // actually moves it.
+    const spawnPosition = DUNGEON_CONTENT[this.dungeonId]?.spawnPosition ?? { x: 0, z: 0 };
+    player.x = spawnPosition.x;
     player.y = 0;
-    player.z = DUNGEON_SPAWN_POSITION.z;
+    player.z = spawnPosition.z;
     player.name = character.name;
     // Carried over from the WorldRoom party that started this instance (see
     // WorldRoom.handleDungeonStart) - without this every dungeon Player defaults to the
@@ -261,7 +269,7 @@ export class DungeonRoom extends Room<DungeonState> implements SocialCapableRoom
       // Same respawn-in-place contract as the overworld's SPAWN_POINTS (WorldRoom.spawnEnemy) -
       // doesn't match anything for a boss's own add spawns (their ids are `add-...`, never a
       // DungeonSpawnDef id), so those correctly never respawn either.
-      const point = ACTIVE_DUNGEON?.spawns.find((p) => p.id === enemyId);
+      const point = DUNGEONS[this.dungeonId]?.spawns.find((p) => p.id === enemyId);
       if (point) this.clock.setTimeout(() => this.spawnDungeonEnemy(point), point.respawnMs ?? ENEMY_RESPAWN_MS);
     }
   }

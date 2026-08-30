@@ -1,0 +1,291 @@
+-- Buildings ("kind = 'building'" structures - houses, castles, towers, market stalls, a
+-- whole pre-made external model rather than procedural box/cone geometry) have always carried
+-- unused placeholder width/depth/height values - visual size came from a fixed per-model constant
+-- (BUILDING_TARGET_HEIGHT, now in shared/src/types.ts), completely ignoring the row's own columns.
+-- Those columns are real now (see MapEditor.tsx's commitTransformRef and getStructureColliders'
+-- "building" case): height drives the model's actual fit size, width/depth track its real
+-- footprint (BUILDING_FOOTPRINT) so isNearProtectedContent's kind-agnostic terrain-flatten radius
+-- stays meaningful. Backfill every existing building row to its own model's natural (unscaled)
+-- size - the same values a fresh reseed writes (see server/scripts/seed.ts) - so nothing suddenly
+-- shrinks to the old height=1 placeholder once the rendering code starts trusting this column.
+-- ELSE branches keep the column's own current value, so this is a no-op for any non-building row
+-- or a model_id this migration doesn't recognize (defensive - correct regardless of migrate/reseed
+-- ordering, same discipline as this session's earlier backfills).
+
+UPDATE "structures" SET "height" =
+CASE model_id
+    WHEN 'building_archeryrange_blue' THEN 6.27
+    WHEN 'building_barracks_blue' THEN 5.74
+    WHEN 'building_blacksmith_blue' THEN 3.45
+    WHEN 'building_castle_blue' THEN 11.94
+    WHEN 'building_church_blue' THEN 5.76
+    WHEN 'building_home_A_blue' THEN 3.26
+    WHEN 'building_home_B_blue' THEN 4.48
+    WHEN 'building_lumbermill_blue' THEN 1.71
+    WHEN 'building_market_blue' THEN 3.44
+    WHEN 'building_mine_blue' THEN 3.98
+    WHEN 'building_tavern_blue' THEN 4.89
+    WHEN 'building_tower_A_blue' THEN 6.4
+    WHEN 'building_tower_base_blue' THEN 10.5
+    WHEN 'building_tower_B_blue' THEN 8.45
+    WHEN 'building_tower_catapult_blue' THEN 1.62
+    WHEN 'building_watermill_blue' THEN 3.68
+    WHEN 'building_well_blue' THEN 2.07
+    WHEN 'building_windmill_blue' THEN 3.51
+    WHEN 'building_archeryrange_green' THEN 6.27
+    WHEN 'building_barracks_green' THEN 5.74
+    WHEN 'building_blacksmith_green' THEN 3.45
+    WHEN 'building_castle_green' THEN 11.94
+    WHEN 'building_church_green' THEN 5.76
+    WHEN 'building_home_A_green' THEN 3.26
+    WHEN 'building_home_B_green' THEN 4.48
+    WHEN 'building_lumbermill_green' THEN 1.71
+    WHEN 'building_market_green' THEN 3.44
+    WHEN 'building_mine_green' THEN 3.98
+    WHEN 'building_tavern_green' THEN 4.89
+    WHEN 'building_tower_A_green' THEN 6.4
+    WHEN 'building_tower_base_green' THEN 10.5
+    WHEN 'building_tower_B_green' THEN 8.45
+    WHEN 'building_tower_catapult_green' THEN 1.62
+    WHEN 'building_watermill_green' THEN 3.68
+    WHEN 'building_well_green' THEN 2.07
+    WHEN 'building_windmill_green' THEN 3.51
+    WHEN 'building_archeryrange_red' THEN 6.27
+    WHEN 'building_barracks_red' THEN 5.74
+    WHEN 'building_blacksmith_red' THEN 3.45
+    WHEN 'building_castle_red' THEN 11.94
+    WHEN 'building_church_red' THEN 5.76
+    WHEN 'building_home_A_red' THEN 3.26
+    WHEN 'building_home_B_red' THEN 4.48
+    WHEN 'building_lumbermill_red' THEN 1.71
+    WHEN 'building_market_red' THEN 3.44
+    WHEN 'building_mine_red' THEN 3.98
+    WHEN 'building_tavern_red' THEN 4.89
+    WHEN 'building_tower_A_red' THEN 6.4
+    WHEN 'building_tower_base_red' THEN 10.5
+    WHEN 'building_tower_B_red' THEN 8.45
+    WHEN 'building_tower_catapult_red' THEN 1.62
+    WHEN 'building_watermill_red' THEN 3.68
+    WHEN 'building_well_red' THEN 2.07
+    WHEN 'building_windmill_red' THEN 3.51
+    WHEN 'building_archeryrange_yellow' THEN 6.27
+    WHEN 'building_barracks_yellow' THEN 5.74
+    WHEN 'building_blacksmith_yellow' THEN 3.45
+    WHEN 'building_castle_yellow' THEN 11.94
+    WHEN 'building_church_yellow' THEN 5.76
+    WHEN 'building_home_A_yellow' THEN 3.26
+    WHEN 'building_home_B_yellow' THEN 4.48
+    WHEN 'building_lumbermill_yellow' THEN 1.71
+    WHEN 'building_market_yellow' THEN 3.44
+    WHEN 'building_mine_yellow' THEN 3.98
+    WHEN 'building_tavern_yellow' THEN 4.89
+    WHEN 'building_tower_A_yellow' THEN 6.4
+    WHEN 'building_tower_base_yellow' THEN 10.5
+    WHEN 'building_tower_B_yellow' THEN 8.45
+    WHEN 'building_tower_catapult_yellow' THEN 1.62
+    WHEN 'building_watermill_yellow' THEN 3.68
+    WHEN 'building_well_yellow' THEN 2.07
+    WHEN 'building_windmill_yellow' THEN 3.51
+    WHEN 'building_bridge_A' THEN 3.13
+    WHEN 'building_bridge_B' THEN 3.13
+    WHEN 'building_destroyed' THEN 2.48
+    WHEN 'building_dirt' THEN 0.22
+    WHEN 'building_grain' THEN 0.98
+    WHEN 'building_scaffolding' THEN 3.25
+    WHEN 'building_stage_A' THEN 0.71
+    WHEN 'building_stage_B' THEN 1.59
+    WHEN 'building_stage_C' THEN 2.46
+    WHEN 'fence_stone_straight' THEN 0.54
+    WHEN 'fence_stone_straight_gate' THEN 0.59
+    WHEN 'fence_wood_straight' THEN 1.1
+    WHEN 'fence_wood_straight_gate' THEN 0.89
+    WHEN 'wall_corner_A_gate' THEN 1.58
+    WHEN 'wall_corner_A_inside' THEN 2.2
+    WHEN 'wall_corner_A_outside' THEN 2.2
+    WHEN 'wall_corner_B_inside' THEN 2.2
+    WHEN 'wall_corner_B_outside' THEN 2.2
+    WHEN 'wall_straight' THEN 2.2
+    WHEN 'wall_straight_gate' THEN 1.58
+    ELSE height
+  END
+WHERE "kind" = 'building';
+
+UPDATE "structures" SET "width" =
+CASE model_id
+    WHEN 'building_archeryrange_blue' THEN 4.97
+    WHEN 'building_barracks_blue' THEN 4.284
+    WHEN 'building_blacksmith_blue' THEN 3.832
+    WHEN 'building_castle_blue' THEN 5.038
+    WHEN 'building_church_blue' THEN 3.062
+    WHEN 'building_home_A_blue' THEN 2.36
+    WHEN 'building_home_B_blue' THEN 2.602
+    WHEN 'building_lumbermill_blue' THEN 1.164
+    WHEN 'building_market_blue' THEN 5.36
+    WHEN 'building_mine_blue' THEN 4.778
+    WHEN 'building_tavern_blue' THEN 3.488
+    WHEN 'building_tower_A_blue' THEN 2.466
+    WHEN 'building_tower_base_blue' THEN 5.532
+    WHEN 'building_tower_B_blue' THEN 3.46
+    WHEN 'building_tower_catapult_blue' THEN 0.652
+    WHEN 'building_watermill_blue' THEN 2.094
+    WHEN 'building_well_blue' THEN 1.388
+    WHEN 'building_windmill_blue' THEN 2.304
+    WHEN 'building_archeryrange_green' THEN 4.97
+    WHEN 'building_barracks_green' THEN 4.284
+    WHEN 'building_blacksmith_green' THEN 3.832
+    WHEN 'building_castle_green' THEN 5.038
+    WHEN 'building_church_green' THEN 3.062
+    WHEN 'building_home_A_green' THEN 2.36
+    WHEN 'building_home_B_green' THEN 2.602
+    WHEN 'building_lumbermill_green' THEN 1.164
+    WHEN 'building_market_green' THEN 5.36
+    WHEN 'building_mine_green' THEN 4.778
+    WHEN 'building_tavern_green' THEN 3.488
+    WHEN 'building_tower_A_green' THEN 2.466
+    WHEN 'building_tower_base_green' THEN 5.532
+    WHEN 'building_tower_B_green' THEN 3.46
+    WHEN 'building_tower_catapult_green' THEN 0.652
+    WHEN 'building_watermill_green' THEN 2.094
+    WHEN 'building_well_green' THEN 1.388
+    WHEN 'building_windmill_green' THEN 2.304
+    WHEN 'building_archeryrange_red' THEN 4.97
+    WHEN 'building_barracks_red' THEN 4.284
+    WHEN 'building_blacksmith_red' THEN 3.832
+    WHEN 'building_castle_red' THEN 5.038
+    WHEN 'building_church_red' THEN 3.062
+    WHEN 'building_home_A_red' THEN 2.36
+    WHEN 'building_home_B_red' THEN 2.602
+    WHEN 'building_lumbermill_red' THEN 1.164
+    WHEN 'building_market_red' THEN 5.36
+    WHEN 'building_mine_red' THEN 4.778
+    WHEN 'building_tavern_red' THEN 3.488
+    WHEN 'building_tower_A_red' THEN 2.466
+    WHEN 'building_tower_base_red' THEN 5.532
+    WHEN 'building_tower_B_red' THEN 3.46
+    WHEN 'building_tower_catapult_red' THEN 0.652
+    WHEN 'building_watermill_red' THEN 2.094
+    WHEN 'building_well_red' THEN 1.388
+    WHEN 'building_windmill_red' THEN 2.304
+    WHEN 'building_archeryrange_yellow' THEN 4.97
+    WHEN 'building_barracks_yellow' THEN 4.284
+    WHEN 'building_blacksmith_yellow' THEN 3.832
+    WHEN 'building_castle_yellow' THEN 5.038
+    WHEN 'building_church_yellow' THEN 3.062
+    WHEN 'building_home_A_yellow' THEN 2.36
+    WHEN 'building_home_B_yellow' THEN 2.602
+    WHEN 'building_lumbermill_yellow' THEN 1.164
+    WHEN 'building_market_yellow' THEN 5.36
+    WHEN 'building_mine_yellow' THEN 4.778
+    WHEN 'building_tavern_yellow' THEN 3.488
+    WHEN 'building_tower_A_yellow' THEN 2.466
+    WHEN 'building_tower_base_yellow' THEN 5.532
+    WHEN 'building_tower_B_yellow' THEN 3.46
+    WHEN 'building_tower_catapult_yellow' THEN 0.652
+    WHEN 'building_watermill_yellow' THEN 2.094
+    WHEN 'building_well_yellow' THEN 1.388
+    WHEN 'building_windmill_yellow' THEN 2.304
+    WHEN 'building_destroyed' THEN 3.264
+    WHEN 'building_scaffolding' THEN 4.042
+    WHEN 'building_stage_A' THEN 2.21
+    WHEN 'building_stage_B' THEN 2.168
+    WHEN 'building_stage_C' THEN 2.46
+    WHEN 'fence_stone_straight' THEN 0.342
+    WHEN 'fence_wood_straight' THEN 0.17
+    WHEN 'wall_corner_A_inside' THEN 3.138
+    WHEN 'wall_corner_A_outside' THEN 2.992
+    WHEN 'wall_corner_B_inside' THEN 1.636
+    WHEN 'wall_corner_B_outside' THEN 1.638
+    WHEN 'wall_straight' THEN 3.4
+    ELSE width
+  END
+WHERE "kind" = 'building';
+
+UPDATE "structures" SET "depth" =
+CASE model_id
+    WHEN 'building_archeryrange_blue' THEN 4.612
+    WHEN 'building_barracks_blue' THEN 4.658
+    WHEN 'building_blacksmith_blue' THEN 3.706
+    WHEN 'building_castle_blue' THEN 5.754
+    WHEN 'building_church_blue' THEN 3.438
+    WHEN 'building_home_A_blue' THEN 2.544
+    WHEN 'building_home_B_blue' THEN 3.268
+    WHEN 'building_lumbermill_blue' THEN 1.012
+    WHEN 'building_market_blue' THEN 3.918
+    WHEN 'building_mine_blue' THEN 5.714
+    WHEN 'building_tavern_blue' THEN 3.966
+    WHEN 'building_tower_A_blue' THEN 2.862
+    WHEN 'building_tower_base_blue' THEN 6.612
+    WHEN 'building_tower_B_blue' THEN 3.996
+    WHEN 'building_tower_catapult_blue' THEN 0.914
+    WHEN 'building_watermill_blue' THEN 2.466
+    WHEN 'building_well_blue' THEN 1.6
+    WHEN 'building_windmill_blue' THEN 1.67
+    WHEN 'building_archeryrange_green' THEN 4.612
+    WHEN 'building_barracks_green' THEN 4.658
+    WHEN 'building_blacksmith_green' THEN 3.706
+    WHEN 'building_castle_green' THEN 5.754
+    WHEN 'building_church_green' THEN 3.438
+    WHEN 'building_home_A_green' THEN 2.544
+    WHEN 'building_home_B_green' THEN 3.268
+    WHEN 'building_lumbermill_green' THEN 1.012
+    WHEN 'building_market_green' THEN 3.918
+    WHEN 'building_mine_green' THEN 5.714
+    WHEN 'building_tavern_green' THEN 3.966
+    WHEN 'building_tower_A_green' THEN 2.862
+    WHEN 'building_tower_base_green' THEN 6.612
+    WHEN 'building_tower_B_green' THEN 3.996
+    WHEN 'building_tower_catapult_green' THEN 0.914
+    WHEN 'building_watermill_green' THEN 2.466
+    WHEN 'building_well_green' THEN 1.6
+    WHEN 'building_windmill_green' THEN 1.67
+    WHEN 'building_archeryrange_red' THEN 4.612
+    WHEN 'building_barracks_red' THEN 4.658
+    WHEN 'building_blacksmith_red' THEN 3.706
+    WHEN 'building_castle_red' THEN 5.754
+    WHEN 'building_church_red' THEN 3.438
+    WHEN 'building_home_A_red' THEN 2.544
+    WHEN 'building_home_B_red' THEN 3.268
+    WHEN 'building_lumbermill_red' THEN 1.012
+    WHEN 'building_market_red' THEN 3.918
+    WHEN 'building_mine_red' THEN 5.714
+    WHEN 'building_tavern_red' THEN 3.966
+    WHEN 'building_tower_A_red' THEN 2.862
+    WHEN 'building_tower_base_red' THEN 6.612
+    WHEN 'building_tower_B_red' THEN 3.996
+    WHEN 'building_tower_catapult_red' THEN 0.914
+    WHEN 'building_watermill_red' THEN 2.466
+    WHEN 'building_well_red' THEN 1.6
+    WHEN 'building_windmill_red' THEN 1.67
+    WHEN 'building_archeryrange_yellow' THEN 4.612
+    WHEN 'building_barracks_yellow' THEN 4.658
+    WHEN 'building_blacksmith_yellow' THEN 3.706
+    WHEN 'building_castle_yellow' THEN 5.754
+    WHEN 'building_church_yellow' THEN 3.438
+    WHEN 'building_home_A_yellow' THEN 2.544
+    WHEN 'building_home_B_yellow' THEN 3.268
+    WHEN 'building_lumbermill_yellow' THEN 1.012
+    WHEN 'building_market_yellow' THEN 3.918
+    WHEN 'building_mine_yellow' THEN 5.714
+    WHEN 'building_tavern_yellow' THEN 3.966
+    WHEN 'building_tower_A_yellow' THEN 2.862
+    WHEN 'building_tower_base_yellow' THEN 6.612
+    WHEN 'building_tower_B_yellow' THEN 3.996
+    WHEN 'building_tower_catapult_yellow' THEN 0.914
+    WHEN 'building_watermill_yellow' THEN 2.466
+    WHEN 'building_well_yellow' THEN 1.6
+    WHEN 'building_windmill_yellow' THEN 1.67
+    WHEN 'building_destroyed' THEN 2.77
+    WHEN 'building_scaffolding' THEN 4.486
+    WHEN 'building_stage_A' THEN 1.848
+    WHEN 'building_stage_B' THEN 2.402
+    WHEN 'building_stage_C' THEN 2.39
+    WHEN 'fence_stone_straight' THEN 1.97
+    WHEN 'fence_wood_straight' THEN 1.962
+    WHEN 'wall_corner_A_inside' THEN 2.408
+    WHEN 'wall_corner_A_outside' THEN 2.434
+    WHEN 'wall_corner_B_inside' THEN 2.492
+    WHEN 'wall_corner_B_outside' THEN 2.294
+    WHEN 'wall_straight' THEN 1.36
+    ELSE depth
+  END
+WHERE "kind" = 'building';

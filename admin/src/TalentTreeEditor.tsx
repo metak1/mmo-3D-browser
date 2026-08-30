@@ -143,7 +143,7 @@ export function TalentTreeEditor({ schema }: { schema: EntitySchema }) {
       tier: 1,
       column_index: nextColumn,
       max_rank: 12,
-      effect: { kind: "statBonus", stat: "damagePercent", perRank: 1 },
+      effects: [{ kind: "statBonus", stat: "damagePercent", perRank: 1 }],
     });
   }
 
@@ -154,7 +154,7 @@ export function TalentTreeEditor({ schema }: { schema: EntitySchema }) {
       column_index: parent.column_index,
       prerequisite_talent_id: parent.id,
       max_rank: 1,
-      effect: { kind: "statBonus", stat: "damagePercent", perRank: 1 },
+      effects: [{ kind: "statBonus", stat: "damagePercent", perRank: 1 }],
     });
   }
 

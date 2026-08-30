@@ -1,7 +1,7 @@
 // A real (not just visual) hex-grid layer for the overworld: pointy-top axial (q, r) coordinates
 // sized to match client/src/game/HexGround.ts's tile mesh exactly, plus a deterministic terrain
 // classifier (grass/water/road, each with an elevation level) derived purely from already-authored
-// content (STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/PORTAL_POSITION below) plus optional
+// content (STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/DUNGEON_PORTALS below) plus optional
 // hand-painted overrides - no per-cell content is required to exist. Water is the one kind with a
 // real gameplay effect (isHexPassable, consumed by CombatEngine's movement resolution); road and
 // elevation are purely visual/cosmetic (elevation has no collision effect, matching this game's
@@ -9,10 +9,10 @@
 import {
   BOSS_ARENA_CENTER,
   BOSS_ARENA_RADIUS,
+  DUNGEON_PORTALS,
   ENEMY_WANDER_RADIUS,
   HEX_TILE_OVERRIDES,
   NPCS,
-  PORTAL_POSITION,
   SPAWN_POINTS,
   STRUCTURES,
   WAYPOINTS,
@@ -170,7 +170,7 @@ interface StructureLike extends PointLike {
 
 // Everything the classifier reads content from, bundled so it can be overridden - the live game
 // (server/client) always uses the default (the STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/
-// PORTAL_POSITION bindings below, populated by loadGameContent), but the admin map editor previews
+// DUNGEON_PORTALS bindings below, populated by loadGameContent), but the admin map editor previews
 // maps that aren't necessarily the currently-ACTIVE one loadGameContent filters everything to - it
 // passes its own fetched-and-filtered content instead, the same explicit-parameter/live-default
 // pattern getTerrainHeight already uses for STRUCTURES.
@@ -202,7 +202,7 @@ export interface HexTerrainContent {
   spawns: PointLike[];
   bossArenaCenter: PointLike;
   bossArenaRadius: number;
-  portalPosition: PointLike;
+  portals: PointLike[];
   // Hand-painted cells (admin/src/mapEditor's tile palette) - see classify()'s "overrides win
   // first" ordering. Defaults to none if omitted, so every existing HexTerrainContent-builder
   // that predates this field still compiles and behaves exactly as before.
@@ -217,7 +217,7 @@ function liveContent(): HexTerrainContent {
     spawns: SPAWN_POINTS,
     bossArenaCenter: BOSS_ARENA_CENTER,
     bossArenaRadius: BOSS_ARENA_RADIUS,
-    portalPosition: PORTAL_POSITION,
+    portals: DUNGEON_PORTALS,
     overrides: HEX_TILE_OVERRIDES,
   };
 }
@@ -244,8 +244,9 @@ function isNearProtectedContent(x: number, z: number, content: HexTerrainContent
   }
   const arena = content.bossArenaCenter;
   if (Math.hypot(x - arena.x, z - arena.z) <= content.bossArenaRadius + CONTENT_LAND_BUFFER) return true;
-  const portal = content.portalPosition;
-  if (Math.hypot(x - portal.x, z - portal.z) <= PORTAL_LAND_BUFFER) return true;
+  for (const portal of content.portals) {
+    if (Math.hypot(x - portal.x, z - portal.z) <= PORTAL_LAND_BUFFER) return true;
+  }
   return false;
 }
 
@@ -462,7 +463,7 @@ export function classifyHexCell(q: number, r: number, content?: HexTerrainConten
 
 // Must be called whenever the content this classifier reads from changes - loadGameContent
 // (types.ts) calls this after reassigning STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/BOSS_ARENA_*/
-// PORTAL_POSITION, since reloadGameContent() runs live on every admin CRUD mutation, not just
+// DUNGEON_PORTALS, since reloadGameContent() runs live on every admin CRUD mutation, not just
 // once at boot.
 export function resetHexTerrainCache(): void {
   roadCellsCache = null;
@@ -679,6 +680,42 @@ export function classifyElevationRamps(grid: HexCellPlacement[]): PlacedElevatio
     ramps.push({ cell, rotationRadians: cell.rampRotation });
   }
   return ramps;
+}
+
+export interface StackedPlacement {
+  cell: HexCellPlacement;
+  level: number;
+}
+
+// A cell at elevation N needs N+1 stacked instances (levels 0..N) to read as solid raised ground
+// instead of one flat tile floating over a hollow column with a bare drop underneath (see
+// classifyElevationRamps' own doc comment on the "bare cliff edge" this replaces).
+// HEX_ELEVATION_STEP_WORLD's own doc comment already ties the per-level rise to the ramp model's
+// modeled height - the same spacing a flat tile's own thickness matches, so stacking copies at
+// exactly this interval sits flush with no gap and no overlap. Pure data (which (cell, level)
+// pairs need an instance) - the actual THREE.js InstancedMesh building stays in each renderer
+// (HexGround.ts/hexTerrainPreview.ts), same "logic here, rendering there" split every other piece
+// of this hex system already uses.
+export function stackedPlacements(cells: HexCellPlacement[]): StackedPlacement[] {
+  const placements: StackedPlacement[] = [];
+  for (const cell of cells) {
+    for (let level = 0; level <= cell.elevation; level++) placements.push({ cell, level });
+  }
+  return placements;
+}
+
+// The flat fill still needed BENEATH a ramp cell's own low end - the ramp mesh itself already
+// spans from elevation-1 up to elevation (GRASS_RAMP_MODEL_PATH's own doc comment), so only levels
+// 0..elevation-2 need a separate flat instance underneath it; an elevation-1 ramp needs none (its
+// low end already sits on the ground). Ramp cells are excluded from stackedPlacements upstream
+// (they render their top level as the sloped mesh, not a flat instance), so this is their own,
+// shorter equivalent.
+export function rampBaseFill(ramps: PlacedElevationRamp[]): StackedPlacement[] {
+  const placements: StackedPlacement[] = [];
+  for (const { cell } of ramps) {
+    for (let level = 0; level <= cell.elevation - 2; level++) placements.push({ cell, level });
+  }
+  return placements;
 }
 
 // The 4 coast shoreline pieces, now placed and rotated entirely by hand (see HexTerrainKind's own

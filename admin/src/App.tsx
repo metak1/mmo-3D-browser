@@ -6,6 +6,7 @@ import { EntityTable } from "./EntityTable";
 import { TalentTreeEditor } from "./TalentTreeEditor";
 import { MapEditor } from "./mapEditor/MapEditor";
 import { EnemyEditor } from "./enemyEditor/EnemyEditor";
+import { SpellEditor } from "./SpellEditor";
 
 const MAP_EDITOR_KEY = "__map_editor__";
 
@@ -67,12 +68,14 @@ export function App() {
           Log out ({user.username})
         </button>
       </nav>
-      <main className={!schema || schema.key === "enemy-types" ? "content content-full" : "content"}>
+      <main className={!schema || schema.key === "enemy-types" || schema.key === "spells" ? "content content-full" : "content"}>
         {schema ? (
           schema.key === "talents" ? (
             <TalentTreeEditor key={schema.key} schema={schema} />
           ) : schema.key === "enemy-types" ? (
             <EnemyEditor key={schema.key} />
+          ) : schema.key === "spells" ? (
+            <SpellEditor key={schema.key} />
           ) : (
             <EntityTable key={schema.key} schema={schema} />
           )

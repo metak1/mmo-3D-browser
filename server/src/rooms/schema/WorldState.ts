@@ -171,6 +171,9 @@ export class DungeonListing extends Schema {
   @type("string") partyId = "";
   @type("string") leaderSessionId = "";
   @type("number") createdAt = 0;
+  // Which dungeon the leader opened this listing for (from whichever portal they clicked) - see
+  // DUNGEONS[dungeonId] for its name/partySize/composition, now that more than one dungeon exists.
+  @type("string") dungeonId = "";
 }
 
 export class WorldState extends Schema {

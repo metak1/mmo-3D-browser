@@ -50,10 +50,15 @@ for (const [roomName, label] of [
   [WORLD_ROOM_NAME, "WorldRoom"],
   [DUNGEON_ROOM_NAME, "DungeonRoom"],
 ] as const) {
+  // DungeonRoom now requires a valid dungeonId in its options (see DungeonRoom.onCreate) - these
+  // tests exercise loot/social mechanics common to both room types, not dungeon selection itself,
+  // so they just point at the seeded "ashen_ruins" dungeon whenever roomName is DUNGEON_ROOM_NAME.
+  const roomOptions = roomName === DUNGEON_ROOM_NAME ? { dungeonId: "ashen_ruins" } : {};
+
   describe(`${label} loot_take (via LootManager)`, () => {
     it("moves the item into inventory and clears the bag when it's the last item", async () => {
       const account = await testAccount();
-      const room = await colyseus.createRoom(roomName, {});
+      const room = await colyseus.createRoom(roomName, roomOptions);
       const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
 
       const spawnedPlayer = room.state.players.get(client.sessionId)!;
@@ -70,7 +75,7 @@ for (const [roomName, label] of [
 
     it("rejects too_far without touching the bag or inventory", async () => {
       const account = await testAccount();
-      const room = await colyseus.createRoom(roomName, {});
+      const room = await colyseus.createRoom(roomName, roomOptions);
       const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
 
       room.state.lootBags.set("test-bag", bagAt(9999, 9999, "rusty_sword@common"));
@@ -90,7 +95,7 @@ for (const [roomName, label] of [
       const account = await testAccount();
       const guild = await guildsDb.createGuild(`TestGuild_${account.characterId}`, account.characterId);
 
-      const room = await colyseus.createRoom(roomName, {});
+      const room = await colyseus.createRoom(roomName, roomOptions);
       const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
 
       // onJoin hydrates guild membership from the DB - confirms the pre-existing guild is visible
@@ -107,7 +112,7 @@ for (const [roomName, label] of [
 
     it("guild_roster_request on a guildless character sends nothing and doesn't error", async () => {
       const account = await testAccount();
-      const room = await colyseus.createRoom(roomName, {});
+      const room = await colyseus.createRoom(roomName, roomOptions);
       const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
 
       client.send("guild_roster_request");

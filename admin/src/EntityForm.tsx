@@ -1,9 +1,10 @@
 import { FormEvent, useEffect, useState } from "react";
-import { EffectDef } from "@mmo/shared";
+import { EffectDef, TalentEffect } from "@mmo/shared";
 import { EntitySchema, FieldSchema } from "./entities";
 import { listEntities } from "./api";
 import { EffectListEditor } from "./EffectListEditor";
 import { IngredientListEditor } from "./IngredientListEditor";
+import { TalentEffectListEditor, defaultTalentEffect } from "./TalentEffectListEditor";
 
 type RowData = Record<string, unknown>;
 
@@ -208,6 +209,13 @@ function renderField(
         <EffectListEditor
           value={Array.isArray(value) ? (value as EffectDef[]) : []}
           onChange={(next) => setValue(next.length > 0 ? next : undefined)}
+        />
+      );
+    case "talentEffectList":
+      return (
+        <TalentEffectListEditor
+          value={Array.isArray(value) && value.length > 0 ? (value as TalentEffect[]) : [defaultTalentEffect("statBonus")]}
+          onChange={(next) => setValue(next)}
         />
       );
     case "itemQuantityList":

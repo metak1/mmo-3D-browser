@@ -5,9 +5,11 @@ import {
   BuyItemMessage,
   ChatMessage,
   CraftRecipeMessage,
-  DUNGEON_PARTY_SIZE,
   DUNGEON_ROOM_NAME,
+  DUNGEONS,
   DungeonJoinListingMessage,
+  DungeonOpenListingMessage,
+  DungeonStartMessage,
   ENEMY_RESPAWN_MS,
   ENEMY_TYPES,
   EnemySpawnDef,
@@ -167,12 +169,14 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     this.onMessage("party_invite", (client, message: PartyInviteMessage) => this.handlePartyInvite(client, message));
     this.onMessage("party_respond", (client, message: PartyRespondMessage) => this.handlePartyRespond(client, message));
     this.onMessage("party_leave", (client) => this.handlePartyLeave(client));
-    this.onMessage("dungeon_open_listing", (client) => this.handleDungeonOpenListing(client));
+    this.onMessage("dungeon_open_listing", (client, message: DungeonOpenListingMessage) =>
+      this.handleDungeonOpenListing(client, message),
+    );
     this.onMessage("dungeon_close_listing", (client) => this.handleDungeonCloseListing(client));
     this.onMessage("dungeon_join_listing", (client, message: DungeonJoinListingMessage) =>
       this.handleDungeonJoinListing(client, message),
     );
-    this.onMessage("dungeon_start", (client) => this.handleDungeonStart(client));
+    this.onMessage("dungeon_start", (client, message: DungeonStartMessage) => this.handleDungeonStart(client, message));
     this.onMessage("chat", (client, message: ChatMessage) => handleChatMessage(this, client, message));
     this.onMessage("set_time_of_day", (client, message: SetTimeOfDayMessage) => this.handleSetTimeOfDay(client, message));
     this.onMessage("trade_request", (client, message: TradeRequestMessage) => this.trade.handleRequest(client, message));
@@ -817,21 +821,23 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
   // --- Dungeon finder ---
 
-  private handleDungeonOpenListing(client: Client) {
+  private handleDungeonOpenListing(client: Client, message: DungeonOpenListingMessage) {
     const player = this.state.players.get(client.sessionId);
-    if (!player) return;
+    const dungeon = DUNGEONS[message.dungeonId];
+    if (!player || !dungeon) return;
 
     // Solo player opening a listing becomes a party of one, anchored on themself - same
     // self-anchoring convention the party system already uses for a freshly forming group.
     if (!player.partyId) player.partyId = client.sessionId;
 
-    if (this.countPartyMembers(player.partyId) > DUNGEON_PARTY_SIZE) return; // could never fit
+    if (this.countPartyMembers(player.partyId) > dungeon.partySize) return; // could never fit
     if (this.state.dungeonListings.has(player.partyId)) return; // already listed
 
     const listing = new DungeonListing();
     listing.partyId = player.partyId;
     listing.leaderSessionId = client.sessionId;
     listing.createdAt = Date.now();
+    listing.dungeonId = message.dungeonId;
     this.state.dungeonListings.set(player.partyId, listing);
   }
 
@@ -856,8 +862,9 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
       ? [...this.state.players.values()].filter((p) => p.partyId === oldPartyId)
       : [player];
 
+    const dungeon = DUNGEONS[listing.dungeonId];
     const targetSize = this.countPartyMembers(listing.partyId);
-    if (targetSize + joiningMembers.length > DUNGEON_PARTY_SIZE) return; // "except if it's full"
+    if (!dungeon || targetSize + joiningMembers.length > dungeon.partySize) return; // "except if it's full"
 
     for (const member of joiningMembers) member.partyId = listing.partyId;
     if (oldPartyId) this.state.dungeonListings.delete(oldPartyId); // stale - every prior member just moved
@@ -865,9 +872,10 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
   // Composition (1 tank / 1 healer / 2 dps) is only enforced here, not at join time - a
   // listing can be "not ready yet" the same way a real LFG lobby can be.
-  private async handleDungeonStart(client: Client) {
+  private async handleDungeonStart(client: Client, message: DungeonStartMessage) {
     const caller = this.state.players.get(client.sessionId);
-    if (!caller) return;
+    const dungeon = DUNGEONS[message.dungeonId];
+    if (!caller || !dungeon) return;
 
     // No composition or full-party requirement on purpose: an appropriately-built group of
     // 4 (tank/healer/2dps) is how the dungeon is *designed* to be played, but someone
@@ -877,11 +885,11 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
     const members: [string, Player][] = caller.partyId
       ? [...this.state.players.entries()].filter(([, p]) => p.partyId === caller.partyId)
       : [[client.sessionId, caller]];
-    if (members.length < 1 || members.length > DUNGEON_PARTY_SIZE) return;
+    if (members.length < 1 || members.length > dungeon.partySize) return;
 
     let roomCache;
     try {
-      roomCache = await matchMaker.createRoom(DUNGEON_ROOM_NAME, {});
+      roomCache = await matchMaker.createRoom(DUNGEON_ROOM_NAME, { dungeonId: message.dungeonId });
     } catch (err) {
       console.error("[WorldRoom] failed to create dungeon room:", err);
       return;
@@ -895,7 +903,7 @@ export class WorldRoom extends Room<WorldState> implements SocialCapableRoom {
 
       try {
         const reservation = await matchMaker.reserveSeatFor(roomCache, { token, characterId, partyId: caller.partyId });
-        memberClient.send("dungeon_ready", reservation);
+        memberClient.send("dungeon_ready", { reservation, dungeonId: message.dungeonId });
       } catch (err) {
         console.error(`[WorldRoom] failed to reserve a dungeon seat for ${sessionId}:`, err);
       }

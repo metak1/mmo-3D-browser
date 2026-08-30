@@ -2,6 +2,7 @@ import { boot, ColyseusTestServer } from "@colyseus/testing";
 import {
   ActionFailedMessage,
   BuyItemMessage,
+  DungeonStartMessage,
   LearnProfessionMessage,
   SwapInventorySlotsMessage,
   WORLD_ROOM_NAME,
@@ -144,5 +145,41 @@ describe("swap_inventory_slots", () => {
 
     const after = [...(room.state.players.get(client.sessionId)?.inventory ?? [])];
     expect(after).toEqual([before[1], before[0]]);
+  });
+});
+
+// The actual novel wiring the many-portals-many-dungeons refactor added: a portal click carries
+// a dungeonId all the way from the client's dungeon_start message through to which DungeonRoom
+// instance actually gets created - DungeonRoom.test.ts already covers that a room scoped to a
+// given dungeonId seeds only that dungeon's own spawns; this covers the message plumbing in front
+// of it, through the real WorldRoom handler (see WorldRoom.handleDungeonStart).
+describe("dungeon_start", () => {
+  it("creates a DungeonRoom scoped to the requested dungeonId and reports it back in dungeon_ready", async () => {
+    const account = await testAccount();
+    const room = await colyseus.createRoom(WORLD_ROOM_NAME, {});
+    const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
+
+    const message: DungeonStartMessage = { dungeonId: "frostbound_hollow" };
+    client.send("dungeon_start", message);
+    const [, payload] = await client.waitForNextMessage();
+
+    expect(payload.dungeonId).toBe("frostbound_hollow");
+    const dungeonRoom = colyseus.getRoomById(payload.reservation.room.roomId);
+    // frostbound_hollow's own seed content (2 trash + 1 boss) - proves this instance seeded from
+    // its own dungeonId, not ashen_ruins' (9 spawns) or an empty/shared list.
+    expect((dungeonRoom.state as unknown as { enemies: Map<string, unknown> }).enemies.size).toBe(3);
+  });
+
+  it("silently ignores an unknown dungeonId instead of creating a room", async () => {
+    const account = await testAccount();
+    const room = await colyseus.createRoom(WORLD_ROOM_NAME, {});
+    const client = await colyseus.connectTo(room, { token: account.token, characterId: account.characterId });
+
+    const message: DungeonStartMessage = { dungeonId: "not_a_real_dungeon" };
+    client.send("dungeon_start", message);
+
+    // No dungeon_ready ever arrives for a bogus id - handleDungeonStart returns before touching
+    // matchMaker at all (see its own DUNGEONS[message.dungeonId] guard).
+    await expect(client.waitForMessage("dungeon_ready", 500)).rejects.toThrow();
   });
 });

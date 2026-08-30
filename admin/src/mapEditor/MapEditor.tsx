@@ -3,6 +3,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import {
+  BUILDING_FOOTPRINT,
+  BUILDING_TARGET_HEIGHT,
   classifyHexCell,
   COAST_TILE_MODEL_PATHS,
   findStructureLoops,
@@ -39,14 +41,15 @@ type SelectableType =
   | "furniture"
   | "hex-tiles"
   | "gathering-nodes"
-  // Not list entities like the others - each is one of the active map's own single point fields
-  // (portal_x/z or spawn_x/z), always rendered rather than placed/deleted (see the two always-on
-  // markers built in the content-sync effect below and their special-cased commitTransformRef
-  // branches, since a drag here PATCHes "maps", not a list row of its own). Two distinct
-  // SelectableTypes rather than one generic "maps" so the marker/inspector/commit code can tell
-  // which field a given drag/edit belongs to - see mapPointField().
-  | "map-portal"
-  | "map-spawn";
+  | "dungeon-portals"
+  // Not list entities like the others - each is one of the active map's own single-row fields
+  // (spawn_x/z or boss_arena_x/z/radius), always rendered rather than placed/deleted (see the
+  // always-on markers built in the content-sync effect below and their special-cased
+  // commitTransformRef branches, since a drag here PATCHes "maps", not a list row of its own).
+  // Distinct SelectableTypes rather than one generic "maps" so the marker/inspector/commit code
+  // can tell which field(s) a given drag/edit belongs to - see isMapFieldType/mapEntityKey below.
+  | "map-spawn"
+  | "map-boss-arena";
 type GizmoMode = "translate" | "rotate" | "scale";
 
 interface Selected {
@@ -54,15 +57,15 @@ interface Selected {
   row: RowData;
 }
 
-// Both "map-portal" and "map-spawn" resolve to the same "maps" table/entity underneath (they're
-// two fields on one map row, not rows of their own) - centralizing that mapping here so every
-// call site that needs the real table name (updateEntity/ENTITIES lookup) or the field pair to
-// read/write agrees, rather than re-deriving it ad hoc in four different places.
-function isMapPointType(type: SelectableType): type is "map-portal" | "map-spawn" {
-  return type === "map-portal" || type === "map-spawn";
+// "map-spawn"/"map-boss-arena" both resolve to the same "maps" table/entity underneath (they're
+// fields on one map row, not rows of their own) - centralizing that mapping
+// here so every call site that needs the real table name (updateEntity/ENTITIES lookup) or the
+// field(s) to read/write agrees, rather than re-deriving it ad hoc in several different places.
+function isMapFieldType(type: SelectableType): type is "map-spawn" | "map-boss-arena" {
+  return type === "map-spawn" || type === "map-boss-arena";
 }
 function mapEntityKey(type: SelectableType): string {
-  return isMapPointType(type) ? "maps" : type;
+  return isMapFieldType(type) ? "maps" : type;
 }
 
 // A "tool" is what a click in the 3D view does while it's active: paint/erase a hex tile, or drop
@@ -75,7 +78,7 @@ type ActiveTool =
   | { mode: "structure"; structureModelId: string }
   | { mode: "lamp"; lampModelId: string }
   | { mode: "wallKind"; wallKind: (typeof STRUCTURE_KINDS)[number] }
-  | { mode: "marker"; markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node" }
+  | { mode: "marker"; markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node" | "dungeon-portal" }
   | { mode: "zone" }
   | { mode: "elevation"; level: number }
   | { mode: "ramp" }
@@ -280,12 +283,17 @@ const WALL_PALETTE: { wallKind: (typeof STRUCTURE_KINDS)[number]; label: string 
 // etc.) with a round swatch instead of a thumbnail, same reasoning WALL_PALETTE uses flat swatches
 // over renders. NPCs get a real model in-scene (populateNpcShape) but keep the same round swatch
 // here in the placement toolbar - a tiny yellow ball is still a fine "place an NPC" tool icon.
-const MARKER_PALETTE: { markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node"; label: string; color: string }[] = [
+const MARKER_PALETTE: {
+  markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node" | "dungeon-portal";
+  label: string;
+  color: string;
+}[] = [
   { markerKind: "npc", label: "NPC", color: "#f5d76e" },
   { markerKind: "enemy-spawn", label: "Enemy Spawn", color: "#e05a4e" },
   { markerKind: "waypoint", label: "Waypoint", color: "#f5c451" },
   { markerKind: "respawn-point", label: "Respawn Point", color: "#a78bfa" },
   { markerKind: "gathering-node", label: "Gathering Node", color: "#7bc47f" },
+  { markerKind: "dungeon-portal", label: "Dungeon Portal", color: "#4ac0e8" },
 ];
 
 // A zone is placed with these defaults and then configured in the inspector (pick its enemy type
@@ -339,12 +347,30 @@ const RESPAWN_POINT_MARKER_COLOR = 0xa78bfa;
 const PORTAL_MARKER_COLOR = 0x4ac0e8; // matches PortalAvatar's own in-game color (client/src/game/Portal.ts)
 const CHARACTER_SPAWN_MARKER_COLOR = 0xffa552;
 const GATHERING_NODE_MARKER_COLOR = 0x7bc47f;
+const BOSS_ARENA_MARKER_COLOR = 0x9333ea; // distinct from ZONE_MARKER_COLOR's red so the two circle types don't read as the same thing
 const GRID_COLOR = 0x4a5578;
 const GRID_COLOR_DARK = 0x3a4260;
 
 function round(n: number, decimals = 2): number {
   const f = 10 ** decimals;
   return Math.round(n * f) / f;
+}
+
+// TransformControls' scale mode has no built-in floor OR ceiling - dragging a handle back past
+// the object's own origin (easy to do mid-drag, especially when scaling something down) produces
+// a NEGATIVE scale factor, and a small-enough positive one can still round to exactly 0; dragging
+// far the other way has no upper limit at all. Every field derived from scale (structures' width/
+// depth/height, zones'/boss-arena's radius) is server-validated `.positive()`, so an unclamped-low
+// value here silently fails to save (see commitTransformRef's own error handling for why that used
+// to leave the mesh visibly stuck at the bad scale) - and an unclamped-high one, even though it
+// DOES save, feeds isNearProtectedContent's terrain-flattening radius (shared/src/hex.ts), so one
+// wild drag can force a huge stretch of the map to flat grass. Clamping both ends at the source is
+// what actually prevents either bad value from ever being computed. MAX comfortably covers every
+// legitimate structure in this game's seeded content today (the largest is 22).
+const MIN_SCALED_DIMENSION = 0.1;
+const MAX_SCALED_DIMENSION = 100;
+function scaledDimension(base: number, scaleFactor: number): number {
+  return round(Math.min(MAX_SCALED_DIMENSION, Math.max(MIN_SCALED_DIMENSION, base * scaleFactor)));
 }
 
 function toStructureDefs(rows: RowData[]): StructureDef[] {
@@ -566,6 +592,8 @@ export function MapEditor() {
   const [enemyTypes, setEnemyTypes] = useState<RowData[]>([]);
   const [gatheringNodes, setGatheringNodes] = useState<RowData[]>([]);
   const [gatheringNodeTypes, setGatheringNodeTypes] = useState<RowData[]>([]);
+  const [dungeonPortals, setDungeonPortals] = useState<RowData[]>([]);
+  const [dungeons, setDungeons] = useState<RowData[]>([]);
   const [selected, setSelected] = useState<Selected | null>(null);
   const [gizmoMode, setGizmoMode] = useState<GizmoMode>("translate");
   const [activeTool, setActiveTool] = useState<ActiveTool>(null);
@@ -601,15 +629,16 @@ export function MapEditor() {
     });
     listEntities<RowData>("enemy-types").then((res) => setEnemyTypes(res.items));
     listEntities<RowData>("gathering-node-types").then((res) => setGatheringNodeTypes(res.items));
+    listEntities<RowData>("dungeons").then((res) => setDungeons(res.items));
   }, []);
 
   const reloadContent = useCallback(() => {
     if (!mapId) return;
     // Doesn't touch mapId itself (unlike the mount effect above, which also auto-selects the
-    // active overworld map on first load) - just refreshes each row's own fields, so a portal/
-    // spawn marker drag/save (the "map-portal"/"map-spawn" SelectableTypes - see
+    // active overworld map on first load) - just refreshes each row's own fields, so a spawn/
+    // boss-arena marker drag/save (the "map-spawn"/"map-boss-arena" SelectableTypes - see
     // commitTransformRef/handleFormSubmit) actually shows its new position instead of the marker/
-    // form silently reverting to stale portal_x/z or spawn_x/z on the next render.
+    // form silently reverting to stale spawn_x/z or boss_arena_x/z on the next render.
     listEntities<RowData>("maps").then((res) => setMaps(res.items));
     listEntities<RowData>("structures").then((res) => setStructures(res.items.filter((s) => s.map_id === mapId)));
     listEntities<RowData>("npcs").then((res) => setNpcs(res.items.filter((n) => n.map_id === mapId)));
@@ -620,6 +649,7 @@ export function MapEditor() {
     listEntities<RowData>("furniture").then((res) => setFurniture(res.items.filter((f) => f.map_id === mapId)));
     listEntities<RowData>("hex-tiles").then((res) => setHexTiles(res.items.filter((h) => h.map_id === mapId)));
     listEntities<RowData>("gathering-nodes").then((res) => setGatheringNodes(res.items.filter((n) => n.map_id === mapId)));
+    listEntities<RowData>("dungeon-portals").then((res) => setDungeonPortals(res.items.filter((p) => p.map_id === mapId)));
   }, [mapId]);
 
   useEffect(() => {
@@ -775,6 +805,7 @@ export function MapEditor() {
   const furnitureRef = useRef<RowData[]>([]);
   const hexTilesRef = useRef<RowData[]>([]);
   const gatheringNodesRef = useRef<RowData[]>([]);
+  const dungeonPortalsRef = useRef<RowData[]>([]);
   const mapsRef = useRef<RowData[]>([]);
   // Session-local overlay of hex-tile row ids not yet confirmed by a reload - see its one use
   // site, the "elevation" tool branch in placeAtRef, for why this exists (fixes a real race a
@@ -804,6 +835,7 @@ export function MapEditor() {
   furnitureRef.current = furniture;
   hexTilesRef.current = hexTiles;
   gatheringNodesRef.current = gatheringNodes;
+  dungeonPortalsRef.current = dungeonPortals;
 
   function refsByType(type: SelectableType): RowData[] {
     switch (type) {
@@ -825,8 +857,10 @@ export function MapEditor() {
         return hexTilesRef.current;
       case "gathering-nodes":
         return gatheringNodesRef.current;
-      case "map-portal":
+      case "dungeon-portals":
+        return dungeonPortalsRef.current;
       case "map-spawn":
+      case "map-boss-arena":
         return mapsRef.current;
     }
   }
@@ -840,7 +874,7 @@ export function MapEditor() {
   // effect's ground/marker building) ---
 
   // Same content the live game's hex classifier reads (STRUCTURES/NPCS/WAYPOINTS/SPAWN_POINTS/
-  // BOSS_ARENA_*/PORTAL_POSITION/hex tile overrides), but this map's own fetched-and-filtered rows
+  // BOSS_ARENA_*/DUNGEON_PORTALS/hex tile overrides), but this map's own fetched-and-filtered rows
   // rather than those global bindings - admin may be previewing a map that isn't the currently-
   // active one, which loadGameContent's filtering would otherwise silently exclude (see hex.ts's
   // HexTerrainContent doc comment).
@@ -855,10 +889,7 @@ export function MapEditor() {
         z: activeMap?.boss_arena_z != null ? Number(activeMap.boss_arena_z) : 0,
       },
       bossArenaRadius: activeMap?.boss_arena_radius != null ? Number(activeMap.boss_arena_radius) : 0,
-      portalPosition: {
-        x: activeMap?.portal_x != null ? Number(activeMap.portal_x) : 0,
-        z: activeMap?.portal_z != null ? Number(activeMap.portal_z) : 0,
-      },
+      portals: dungeonPortals.map((p) => ({ x: Number(p.x), z: Number(p.z) })),
       overrides: hexTiles.map((h) => ({
         q: Number(h.q),
         r: Number(h.r),
@@ -880,15 +911,33 @@ export function MapEditor() {
     if (!three || !sel || !mesh) return;
 
     const changes: RowData = {};
-    if (sel.type === "structures" && gizmoModeRef.current === "scale") {
-      changes.width = round(Number(sel.row.width) * mesh.scale.x);
-      changes.depth = round(Number(sel.row.depth) * mesh.scale.z);
-      changes.height = round(Number(sel.row.height) * mesh.scale.y);
+    if (sel.type === "structures" && sel.row.kind === "building" && gizmoModeRef.current === "scale") {
+      // One degree of freedom (height, see the gizmo-attach effect's own comment - only the
+      // y-handle is exposed for a building, so scale.x/z are always 1 here) - width/depth ride
+      // along proportionally so isNearProtectedContent's terrain-flatten radius (kind-agnostic,
+      // reads width/depth off every structure) stays correct for the building's real new size
+      // without that generic code needing to know anything about buildings specifically.
+      const newHeight = scaledDimension(Number(sel.row.height), mesh.scale.y);
+      const ratio = newHeight / Number(sel.row.height);
+      changes.height = newHeight;
+      changes.width = scaledDimension(Number(sel.row.width), ratio);
+      changes.depth = scaledDimension(Number(sel.row.depth), ratio);
+    } else if (sel.type === "structures" && gizmoModeRef.current === "scale") {
+      changes.width = scaledDimension(Number(sel.row.width), mesh.scale.x);
+      changes.depth = scaledDimension(Number(sel.row.depth), mesh.scale.z);
+      changes.height = scaledDimension(Number(sel.row.height), mesh.scale.y);
     } else if (sel.type === "enemy-spawn-zones" && gizmoModeRef.current === "scale") {
       // A zone is a flat circle, not a box - only the x-axis handle is meaningful (dragging it
       // scales the disc uniformly in the scene too, see the gizmo-attach effect's showZ: false
       // for this type), so radius is derived from scale.x alone.
-      changes.radius = round(Number(sel.row.radius) * mesh.scale.x);
+      changes.radius = scaledDimension(Number(sel.row.radius), mesh.scale.x);
+    } else if (sel.type === "map-boss-arena" && gizmoModeRef.current === "scale") {
+      // Same "circle, x-handle only" reasoning as the zone branch above, but writing the active
+      // map's own boss_arena_radius field instead of a list row's radius - see the map-spawn
+      // branch below for why boss arena's translate case needs the same field-name detour
+      // (checked first here since it only applies while in scale mode; a translate drag on this
+      // same marker falls through to that later branch).
+      changes.boss_arena_radius = scaledDimension(Number(sel.row.boss_arena_radius), mesh.scale.x);
     } else if ((sel.type === "structures" || sel.type === "furniture") && gizmoModeRef.current === "rotate") {
       changes.rotation_y = round(mesh.rotation.y, 3);
     } else if (sel.type === "hex-tiles") {
@@ -904,18 +953,20 @@ export function MapEditor() {
       // this drag's result belongs to.
       if (isRampEligible(kind, elevation)) changes.ramp_rotation = normalized;
       else changes.rotation = normalized;
-    } else if (sel.type === "map-portal" || sel.type === "map-spawn") {
-      // The portal/spawn markers drag the active map's own portal_x/z or spawn_x/z fields
-      // directly (see the two markers built in the content-sync effect below) - not a list row's
-      // x/z like every other marker, so this branch writes different field names before falling
-      // through to the same generic updateEntity(mapEntityKey(sel.type), ...) call every other
-      // branch already ends in.
-      if (sel.type === "map-portal") {
-        changes.portal_x = round(mesh.position.x);
-        changes.portal_z = round(mesh.position.z);
-      } else {
+    } else if (sel.type === "map-spawn" || sel.type === "map-boss-arena") {
+      // The spawn/boss-arena markers drag the active map's own spawn_x/z or boss_arena_x/z fields
+      // directly (see the markers built in the content-sync effect below) - not a list row's x/z
+      // like every other marker (dungeon-portals included, now a real list row), so this branch
+      // writes different field names before falling through to the same generic
+      // updateEntity(mapEntityKey(sel.type), ...) call every other branch already ends in. (Boss
+      // arena's own scale/radius case is handled by the dedicated branch above, checked first, so
+      // only a translate drag ever reaches here for it.)
+      if (sel.type === "map-spawn") {
         changes.spawn_x = round(mesh.position.x);
         changes.spawn_z = round(mesh.position.z);
+      } else {
+        changes.boss_arena_x = round(mesh.position.x);
+        changes.boss_arena_z = round(mesh.position.z);
       }
     } else {
       changes.x = round(mesh.position.x);
@@ -930,7 +981,16 @@ export function MapEditor() {
       }
     }
 
-    updateEntity(mapEntityKey(sel.type), String(sel.row.id), changes).then(() => reloadContent());
+    updateEntity(mapEntityKey(sel.type), String(sel.row.id), changes)
+      .then(() => reloadContent())
+      .catch((err) => {
+        // A failed commit must never leave the mesh's transform silently diverged from what's
+        // actually persisted (that's what used to make a rejected scale drag look like "nothing
+        // happened, but now the map editor is acting weird") - reload regardless, so the gizmo
+        // snaps back to the real, saved values instead of staying wherever the drag left it.
+        console.error("Failed to save gizmo transform:", err);
+        reloadContent();
+      });
   };
 
   // --- Placement tools: a click in the 3D view while a palette item is active paints/erases a
@@ -1024,9 +1084,15 @@ export function MapEditor() {
     }
 
     if (tool.mode === "structure") {
-      // width/depth/height/color are ignored for kind=building (see entities.ts's own field
-      // labels) - a whole pre-made exterior model has no use for them, but the DB row still
-      // carries the same shape as every other structure.
+      // color is ignored for kind=building (a whole pre-made exterior model has no use for it -
+      // see entities.ts's own field label) but width/depth/height are real now: start each new
+      // building at its own model's natural size (BUILDING_TARGET_HEIGHT/BUILDING_FOOTPRINT, the
+      // same values getStructureColliders/populateBuildingShape resolve to for an unscaled
+      // building) instead of an arbitrary placeholder, so it renders correctly before anyone even
+      // touches the scale gizmo. The `?? 4` fallback only matters for the handful of models with
+      // no BUILDING_FOOTPRINT entry (bridges/decals/gate pieces - see its own doc comment).
+      const targetHeight = BUILDING_TARGET_HEIGHT[tool.structureModelId] ?? 4;
+      const footprint = BUILDING_FOOTPRINT[tool.structureModelId];
       const row: RowData = {
         id: `structure_${Date.now()}`,
         name: `New ${tool.structureModelId}`,
@@ -1036,9 +1102,9 @@ export function MapEditor() {
         x: round(x),
         z: round(z),
         rotation_y: 0,
-        width: 4,
-        depth: 4,
-        height: 4,
+        width: footprint ? round(footprint.halfWidth * 2) : 4,
+        depth: footprint ? round(footprint.halfDepth * 2) : 4,
+        height: round(targetHeight),
         color: "#8a6d4b",
       };
       createEntity("structures", row).then(() => {
@@ -1132,7 +1198,7 @@ export function MapEditor() {
           reloadContent();
           setSelected({ type: "respawn-points", row });
         });
-      } else {
+      } else if (tool.markerKind === "gathering-node") {
         if (gatheringNodeTypes.length === 0) return;
         const row: RowData = {
           id: `gathernode_${Date.now()}`,
@@ -1144,6 +1210,19 @@ export function MapEditor() {
         createEntity("gathering-nodes", row).then(() => {
           reloadContent();
           setSelected({ type: "gathering-nodes", row });
+        });
+      } else {
+        if (dungeons.length === 0) return;
+        const row: RowData = {
+          id: `portal_${Date.now()}`,
+          map_id: mapId,
+          dungeon_id: String(dungeons[0].id),
+          x: round(x),
+          z: round(z),
+        };
+        createEntity("dungeon-portals", row).then(() => {
+          reloadContent();
+          setSelected({ type: "dungeon-portals", row });
         });
       }
       return;
@@ -1252,7 +1331,7 @@ export function MapEditor() {
     for (const def of structureDefs) {
       const group = new THREE.Group();
       group.add(buildStructureShape(def));
-      if (def.kind === "building" && def.modelId) populateBuildingShape(group, def.modelId);
+      if (def.kind === "building" && def.modelId) populateBuildingShape(group, def.modelId, def.height);
       group.position.set(def.x, terrainY(def.x, def.z) + def.yOffset, def.z);
       group.rotation.y = def.rotationY;
       group.userData = { entityType: "structures", entityId: def.id };
@@ -1314,29 +1393,31 @@ export function MapEditor() {
       three.content.add(marker);
     }
 
-    // The portal and spawn markers - unlike every marker above, neither is a list row of its own
-    // (there's no "place one" tool, no create/delete): every map already has exactly one
-    // portal_x/z pair and one spawn_x/z pair (each defaulting to 0,0), they've just been four
-    // blind number fields on the map's own form until now. Always rendered so they're draggable
-    // the moment a map is open. These are two DIFFERENT things easy to conflate (see
-    // shared's PORTAL_POSITION/SPAWN_POSITION doc comments): the portal is the clickable
-    // dungeon-entrance prop only the overworld ever renders in-game (client/src/game/Portal.ts),
-    // while spawn is plain coordinates - where a character actually appears on join
-    // (WorldRoom.onJoin/DungeonRoom.onJoin), with no world object of its own, on every map kind.
+    // The spawn marker - unlike every marker above, it isn't a list row of its own (there's no
+    // "place one" tool, no create/delete): every map already has exactly one spawn_x/z pair
+    // (defaulting to 0,0), it's just been two blind number fields on the map's own form until
+    // now. Always rendered so it's draggable the moment a map is open. Plain coordinates - where
+    // a character actually appears on join (WorldRoom.onJoin/DungeonRoom.onJoin), with no world
+    // object of its own, on every map kind (see SPAWN_POSITION's own doc comment - a distinct
+    // concept from the dungeon-entrance portal props rendered in the loop below).
     if (activeMap) {
-      const portalMarker = buildMarker(PORTAL_MARKER_COLOR);
-      const px = activeMap.portal_x != null ? Number(activeMap.portal_x) : 0;
-      const pz = activeMap.portal_z != null ? Number(activeMap.portal_z) : 0;
-      portalMarker.position.set(px, terrainY(px, pz), pz);
-      portalMarker.userData = { entityType: "map-portal", entityId: String(activeMap.id) };
-      three.content.add(portalMarker);
-
       const spawnMarker = buildMarker(CHARACTER_SPAWN_MARKER_COLOR);
       const sx = activeMap.spawn_x != null ? Number(activeMap.spawn_x) : 0;
       const sz = activeMap.spawn_z != null ? Number(activeMap.spawn_z) : 0;
       spawnMarker.position.set(sx, terrainY(sx, sz), sz);
       spawnMarker.userData = { entityType: "map-spawn", entityId: String(activeMap.id) };
       three.content.add(spawnMarker);
+
+      // Same always-on treatment as portal/spawn above, but shaped like a zone (buildZoneShape,
+      // not buildMarker) since boss_arena also carries a radius, not just a position - the
+      // ZONE_DEFAULT_RADIUS fallback keeps it visibly draggable/resizable even before an admin has
+      // ever set boss_arena_radius, same reasoning the zones list itself already uses.
+      const arenaMarker = buildZoneShape(BOSS_ARENA_MARKER_COLOR, Number(activeMap.boss_arena_radius) || ZONE_DEFAULT_RADIUS);
+      const ax = activeMap.boss_arena_x != null ? Number(activeMap.boss_arena_x) : 0;
+      const az = activeMap.boss_arena_z != null ? Number(activeMap.boss_arena_z) : 0;
+      arenaMarker.position.set(ax, terrainY(ax, az), az);
+      arenaMarker.userData = { entityType: "map-boss-arena", entityId: String(activeMap.id) };
+      three.content.add(arenaMarker);
     }
 
     for (const row of gatheringNodes) {
@@ -1345,6 +1426,17 @@ export function MapEditor() {
       const z = Number(row.z);
       marker.position.set(x, terrainY(x, z), z);
       marker.userData = { entityType: "gathering-nodes", entityId: String(row.id) };
+      three.content.add(marker);
+    }
+
+    // A real, removable, list-backed marker (unlike the old single always-on portal field) - many
+    // can exist on one map, each pointing at its own dungeon (see DungeonPortalDef).
+    for (const row of dungeonPortals) {
+      const marker = buildMarker(PORTAL_MARKER_COLOR);
+      const x = Number(row.x);
+      const z = Number(row.z);
+      marker.position.set(x, terrainY(x, z), z);
+      marker.userData = { entityType: "dungeon-portals", entityId: String(row.id) };
       three.content.add(marker);
     }
 
@@ -1366,26 +1458,11 @@ export function MapEditor() {
     // if the row no longer exists at all (e.g. it just got deleted).
     if (selectedRef.current) {
       const { type, row } = selectedRef.current;
-      const list =
-        type === "structures"
-          ? structures
-          : type === "npcs"
-            ? npcs
-            : type === "enemy-spawns"
-              ? spawns
-              : type === "enemy-spawn-zones"
-                ? zones
-                : type === "waypoints"
-                  ? waypoints
-                  : type === "respawn-points"
-                    ? respawnPoints
-                    : type === "hex-tiles"
-                      ? hexTiles
-                      : type === "gathering-nodes"
-                        ? gatheringNodes
-                        : isMapPointType(type)
-                          ? maps
-                          : furniture;
+      // refsByType (not a hand-rolled type->list chain here) so every SelectableType is covered
+      // in exactly one place - a case missing from a second, separately-maintained chain here
+      // used to silently fall through to the wrong list (e.g. dungeon-portals reading furniture's
+      // rows) and detach/deselect the marker after every drag instead of actually failing loudly.
+      const list = refsByType(type);
       const freshRow = list.find((r) => String(r.id) === String(row.id));
       if (freshRow) {
         const match = three.content.children.find(
@@ -1398,7 +1475,7 @@ export function MapEditor() {
         setSelected(null);
       }
     }
-  }, [structures, npcs, spawns, zones, waypoints, respawnPoints, furniture, hexTiles, gatheringNodes, maps, activeMap]);
+  }, [structures, npcs, spawns, zones, waypoints, respawnPoints, furniture, hexTiles, gatheringNodes, dungeonPortals, maps, activeMap]);
 
   // --- Attach the gizmo to the current selection + set its mode/axis constraints ---
   // (Separate from the scene-sync effect below: that one only re-runs when the fetched content
@@ -1491,12 +1568,18 @@ export function MapEditor() {
 
     // Furniture supports rotate (orienting a chair toward a table matters) but not scale - it has
     // no width/depth/height column to persist a scale change to (see commitTransformRef). A zone
-    // supports scale (radius) but not rotate - a circle has no orientation.
+    // (or the boss arena marker, the same circle shape) supports scale (radius) but not rotate -
+    // a circle has one degree of freedom, only the x-handle is exposed. A "building" kind
+    // structure is a fixed external model (populateBuildingShape loads it fit to `height`) - like
+    // a circle, it has one meaningful scale degree of freedom (height; width/depth just ride
+    // along proportionally, see commitTransformRef), so only the y-handle is exposed for it.
+    const isBuildingKind = selected.type === "structures" && selected.row.kind === "building";
     const canRotate = selected.type === "structures" || selected.type === "furniture";
+    const isCircle = selected.type === "enemy-spawn-zones" || selected.type === "map-boss-arena";
     const mode: GizmoMode =
       selected.type === "structures"
         ? gizmoMode
-        : selected.type === "enemy-spawn-zones"
+        : isCircle
           ? gizmoMode === "scale"
             ? "scale"
             : "translate"
@@ -1516,11 +1599,17 @@ export function MapEditor() {
       three.transform.showX = false;
       three.transform.showY = true; // only yaw exists in this game (StructureDef.rotationY)
       three.transform.showZ = false;
-    } else if (selected.type === "enemy-spawn-zones") {
+    } else if (isCircle) {
       // A circle has one degree of freedom (radius) - only the x-handle is exposed, and
-      // commitTransformRef's zone branch reads scale.x alone.
+      // commitTransformRef's zone/boss-arena branches both read scale.x alone.
       three.transform.showX = true;
       three.transform.showY = false;
+      three.transform.showZ = false;
+    } else if (isBuildingKind) {
+      // One degree of freedom (height) - see the comment above, and commitTransformRef's building
+      // branch, which reads scale.y alone.
+      three.transform.showX = false;
+      three.transform.showY = true;
       three.transform.showZ = false;
     } else {
       three.transform.showX = true;
@@ -1589,7 +1678,7 @@ export function MapEditor() {
     setActiveTool((prev) => (prev?.mode === "wallKind" && prev.wallKind === wallKind ? null : { mode: "wallKind", wallKind }));
   }
 
-  function toggleMarkerTool(markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node") {
+  function toggleMarkerTool(markerKind: "npc" | "enemy-spawn" | "waypoint" | "respawn-point" | "gathering-node" | "dungeon-portal") {
     setSelected(null);
     setActiveTool((prev) => (prev?.mode === "marker" && prev.markerKind === markerKind ? null : { mode: "marker", markerKind }));
   }
@@ -1684,13 +1773,16 @@ export function MapEditor() {
     disabled:
       !mapId ||
       (item.markerKind === "enemy-spawn" && enemyTypes.length === 0) ||
-      (item.markerKind === "gathering-node" && gatheringNodeTypes.length === 0),
+      (item.markerKind === "gathering-node" && gatheringNodeTypes.length === 0) ||
+      (item.markerKind === "dungeon-portal" && dungeons.length === 0),
     title:
       item.markerKind === "enemy-spawn" && enemyTypes.length === 0
         ? "No enemy types defined yet"
         : item.markerKind === "gathering-node" && gatheringNodeTypes.length === 0
           ? "No gathering node types defined yet"
-          : undefined,
+          : item.markerKind === "dungeon-portal" && dungeons.length === 0
+            ? "No dungeons defined yet"
+            : undefined,
     onClick: () => toggleMarkerTool(item.markerKind),
   }));
 
@@ -1803,7 +1895,7 @@ export function MapEditor() {
                 ))}
               </span>
             )}
-            {selected?.type === "enemy-spawn-zones" && (
+            {(selected?.type === "enemy-spawn-zones" || selected?.type === "map-boss-arena") && (
               <span className="map-editor-toolbar-group">
                 {(["translate", "scale"] as GizmoMode[]).map((mode) => (
                   <button key={mode} className={mode === gizmoMode ? "active" : ""} onClick={() => setGizmoMode(mode)}>
@@ -1841,19 +1933,21 @@ export function MapEditor() {
           {selected && inspectorSchema && (
             <div className="map-editor-inspector">
               <div className="entity-table-header">
-                {/* The portal/spawn markers' "row" is the whole active map, not a leaf marker of
-                    their own (see isMapPointType's doc comment) - deleting a map is already a
+                {/* The spawn/boss-arena markers' "row" is the whole active map, not a leaf marker
+                    of their own (see isMapFieldType's doc comment) - deleting a map is already a
                     dedicated, guarded flow from the Maps table, not something reachable by
-                    dragging a point around, so this hides Delete rather than risk it reading as
-                    "delete this point". */}
+                    dragging a marker around, so this hides Delete rather than risk it reading as
+                    "delete this point". Dungeon portals are a real list row now (see
+                    DungeonPortalDef), so they fall through to the generic Delete button below like
+                    every other placeable marker. */}
                 <h3>
-                  {selected.type === "map-portal"
-                    ? "Dungeon Portal"
-                    : selected.type === "map-spawn"
-                      ? "Spawn Point"
+                  {selected.type === "map-spawn"
+                    ? "Spawn Point"
+                    : selected.type === "map-boss-arena"
+                      ? "Boss Arena"
                       : inspectorSchema.label.replace(/s$/, "")}
                 </h3>
-                {!isMapPointType(selected.type) && <button onClick={handleDelete}>Delete</button>}
+                {!isMapFieldType(selected.type) && <button onClick={handleDelete}>Delete</button>}
               </div>
               <EntityForm
                 // EntityForm seeds its internal state from `initial` only once, on mount (see its

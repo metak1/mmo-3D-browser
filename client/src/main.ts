@@ -15,6 +15,9 @@ import {
   CLASSES,
   ClassId,
   CombatTextEvent,
+  DUNGEON_PORTALS,
+  DUNGEONS,
+  DungeonId,
   ENEMY_TYPES,
   EnemyBehavior,
   EQUIP_SLOT_LABEL,
@@ -34,8 +37,8 @@ import {
   NPC_QUEST_IDS,
   PLAYER_SPEED,
   MOUNT_SPEED_MULTIPLIER,
-  PORTAL_POSITION,
   RARITY_COLOR,
+  setActiveDungeonForClient,
   isHexPassable,
   resolveStructureCollisions,
   SPELLS,
@@ -264,8 +267,13 @@ makeDraggable(dungeonStatusPanel, "dungeon-status");
 
 type Connector = () => ReturnType<typeof connectToWorld>;
 
-async function main(token: string, characterId: number, connectOverride?: Connector, restorePartyId?: string) {
+async function main(token: string, characterId: number, connectOverride?: Connector, restorePartyId?: string, dungeonId?: DungeonId) {
   const isDungeon = !!connectOverride;
+  // Points DUNGEON_HALF_EXTENT/dungeonHexContent() (read by GameScene/Minimap/HexGround below,
+  // unchanged) at this specific dungeon's own content - a no-op reset to overworld defaults when
+  // dungeonId is undefined. Must run before GameScene is constructed, since its ground/fog setup
+  // reads those bindings synchronously.
+  setActiveDungeonForClient(dungeonId);
   const gameScene = new GameScene(container, isDungeon);
   const input = new InputController();
 
@@ -304,7 +312,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
   const lootBagSchemaById = new Map<string, { x: number; z: number; items: Iterable<string> }>();
   const gatheringNodes = new Map<string, GatheringNodeAvatar>();
   const gatheringNodeSchemaById = new Map<string, { x: number; z: number; available: boolean }>();
-  const dungeonListingSchemaById = new Map<string, { partyId: string; leaderSessionId: string; createdAt: number }>();
+  const dungeonListingSchemaById = new Map<string, { partyId: string; leaderSessionId: string; createdAt: number; dungeonId: string }>();
 
   // NPCs are static shared data (no hp, no server-synced position), so they're spawned once
   // from NPCS rather than synced through room state like enemies/players/loot bags. One with
@@ -391,14 +399,20 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     structures.push(enclosure);
   }
 
-  // The portal only exists in the overworld - it's how a dungeon instance is entered in
-  // the first place, so it has no reason to be present once already inside one.
-  let portal: PortalAvatar | undefined;
+  // Portals only exist in the overworld - they're how a dungeon instance is entered in the first
+  // place, so they have no reason to be present once already inside one. Many can exist at once,
+  // each linking to its own dungeon (see DungeonPortalDef) - mirrors the NPCS spawn loop above,
+  // just keyed by portal id instead of npc id, with dungeonId carried on userData so a click knows
+  // which dungeon to open the finder for.
+  const portals = new Map<string, PortalAvatar>();
   if (!isDungeon) {
-    portal = new PortalAvatar();
-    portal.group.userData.isPortal = true;
-    portal.setPosition(PORTAL_POSITION.x, PORTAL_POSITION.z);
-    portal.addTo(gameScene.scene);
+    for (const def of DUNGEON_PORTALS) {
+      const avatar = new PortalAvatar();
+      avatar.group.userData.dungeonId = def.dungeonId;
+      avatar.setPosition(def.x, def.z);
+      avatar.addTo(gameScene.scene);
+      portals.set(def.id, avatar);
+    }
   }
 
   // Follows the cursor while a ground-targeted spell (Explosive Trap, Blizzard) is pending
@@ -1060,7 +1074,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       ...[...npcs.values()].map((avatar) => avatar.group),
       ...[...waypoints.values()].map((avatar) => avatar.group),
       ...[...gatheringNodes.values()].map((avatar) => avatar.group),
-      ...(portal ? [portal.group] : []),
+      ...[...portals.values()].map((avatar) => avatar.group),
     ];
     const hits = raycaster.intersectObjects(clickable, true);
 
@@ -1078,7 +1092,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       !obj.userData.npcId &&
       !obj.userData.waypointId &&
       !obj.userData.gatheringNodeId &&
-      !obj.userData.isPortal
+      !obj.userData.dungeonId
     ) {
       obj = obj.parent;
     }
@@ -1099,8 +1113,8 @@ async function main(token: string, characterId: number, connectOverride?: Connec
       handleGatherClick(obj.userData.gatheringNodeId as string);
       return;
     }
-    if (obj?.userData.isPortal) {
-      openDungeonFinder(session);
+    if (obj?.userData.dungeonId) {
+      openDungeonFinder(session, obj.userData.dungeonId as string);
       return;
     }
 
@@ -1184,8 +1198,11 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     // Room transitions (overworld <-> dungeon) are a reservation + full page reload rather
     // than an in-place scene rebuild - main() only ever fully sets up one room connection
     // per page load, so switching rooms just stashes what's needed and reloads into it.
-    room.onMessage("dungeon_ready", (reservation: SeatReservation) => {
-      sessionStorage.setItem("mmo:pendingConnect", JSON.stringify({ mode: "dungeon", reservation, token, characterId }));
+    room.onMessage("dungeon_ready", (payload: { reservation: SeatReservation; dungeonId: DungeonId }) => {
+      sessionStorage.setItem(
+        "mmo:pendingConnect",
+        JSON.stringify({ mode: "dungeon", reservation: payload.reservation, dungeonId: payload.dungeonId, token, characterId }),
+      );
       window.location.reload();
     });
 
@@ -1238,9 +1255,10 @@ async function main(token: string, characterId: number, connectOverride?: Connec
 
     dungeonStatusPanel.hidden = !isDungeon;
     if (isDungeon) {
+      const dungeonName = dungeonId ? (DUNGEONS[dungeonId]?.name ?? "Dungeon") : "Dungeon";
       const updateDungeonStatusPanel = () => {
         const dungeonState = room!.state as unknown as { cleared: boolean };
-        dungeonEncounterLabelEl.textContent = dungeonState.cleared ? "Cleared!" : "Fight your way to the boss.";
+        dungeonEncounterLabelEl.textContent = dungeonState.cleared ? `${dungeonName} - Cleared!` : `${dungeonName} - Fight your way to the boss.`;
         leaveDungeonBtn.hidden = !dungeonState.cleared;
       };
       $(room.state).onChange(updateDungeonStatusPanel);
@@ -1692,7 +1710,7 @@ async function main(token: string, characterId: number, connectOverride?: Connec
     for (const avatar of npcs.values()) avatar.update(dt);
     for (const avatar of waypoints.values()) avatar.update(dt);
     for (const avatar of projectiles.values()) avatar.update();
-    portal?.update(dt);
+    for (const avatar of portals.values()) avatar.update(dt);
     combatText.update(dt);
 
     if (session.localSessionId) {
@@ -1972,6 +1990,7 @@ interface PendingConnect {
   token: string;
   characterId: number;
   reservation?: SeatReservation;
+  dungeonId?: DungeonId;
   partyId?: string;
 }
 
@@ -1989,7 +2008,13 @@ function consumePendingConnect(): PendingConnect | null {
 const pendingConnect = consumePendingConnect();
 if (pendingConnect?.mode === "dungeon" && pendingConnect.reservation) {
   hideAllOverlays();
-  main(pendingConnect.token, pendingConnect.characterId, () => consumeDungeonReservation(pendingConnect.reservation!));
+  main(
+    pendingConnect.token,
+    pendingConnect.characterId,
+    () => consumeDungeonReservation(pendingConnect.reservation!),
+    undefined,
+    pendingConnect.dungeonId,
+  );
 } else if (pendingConnect?.mode === "world") {
   hideAllOverlays();
   main(pendingConnect.token, pendingConnect.characterId, undefined, pendingConnect.partyId);

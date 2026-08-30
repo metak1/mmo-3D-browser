@@ -9,8 +9,6 @@ const mapSchema = z.object({
   name: z.string().min(1).max(64),
   kind: z.enum(["overworld", "dungeon"]),
   half_extent: z.number().positive(),
-  portal_x: z.number().nullable().optional(),
-  portal_z: z.number().nullable().optional(),
   spawn_x: z.number().nullable().optional(),
   spawn_z: z.number().nullable().optional(),
   boss_arena_x: z.number().nullable().optional(),

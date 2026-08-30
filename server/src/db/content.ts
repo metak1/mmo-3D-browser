@@ -2,6 +2,7 @@ import {
   ClassDef,
   ContentSnapshot,
   DungeonDef,
+  DungeonPortalDef,
   DungeonSpawnDef,
   EffectDef,
   EnemySpawnDef,
@@ -102,7 +103,7 @@ interface TalentRow {
   name: string;
   description: string;
   max_rank: number;
-  effect: unknown;
+  effects: unknown;
   tier: number;
   column_index: number;
   prerequisite_talent_id: string | null;
@@ -151,8 +152,6 @@ interface GameMapRow {
   kind: string;
   half_extent: number;
   is_active: boolean;
-  portal_x: number | null;
-  portal_z: number | null;
   spawn_x: number | null;
   spawn_z: number | null;
   boss_arena_x: number | null;
@@ -190,10 +189,17 @@ interface DungeonRow {
   id: string;
   name: string;
   map_id: string;
-  is_active: boolean;
   party_size: number;
   composition: unknown;
   spawns: unknown;
+}
+
+interface DungeonPortalRow {
+  id: string;
+  map_id: string;
+  dungeon_id: string;
+  x: number;
+  z: number;
 }
 
 interface StructureRow {
@@ -275,6 +281,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     recipeRows,
     gatheringNodeTypeRows,
     gatheringNodeRows,
+    dungeonPortalRows,
   ] = await Promise.all([
     pool.query<GameClassRow>("SELECT * FROM game_classes").then((r) => r.rows),
     pool.query<SpellRow>("SELECT * FROM spells").then((r) => r.rows),
@@ -297,6 +304,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     pool.query<RecipeRow>("SELECT * FROM recipes").then((r) => r.rows),
     pool.query<GatheringNodeTypeRow>("SELECT * FROM gathering_node_types").then((r) => r.rows),
     pool.query<GatheringNodeRow>("SELECT * FROM gathering_nodes").then((r) => r.rows),
+    pool.query<DungeonPortalRow>("SELECT * FROM dungeon_portals").then((r) => r.rows),
   ]);
 
   const vendorItemIdsByNpc = new Map<string, string[]>();
@@ -351,7 +359,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     name: t.name,
     description: t.description,
     maxRank: t.max_rank,
-    effect: t.effect as TalentDef["effect"],
+    effects: t.effects as TalentDef["effects"],
     tier: t.tier,
     column: t.column_index,
     prerequisiteTalentId: t.prerequisite_talent_id ?? undefined,
@@ -396,8 +404,6 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     kind: m.kind as GameMapDef["kind"],
     halfExtent: m.half_extent,
     isActive: m.is_active,
-    portalX: nullToUndefined(m.portal_x),
-    portalZ: nullToUndefined(m.portal_z),
     spawnX: nullToUndefined(m.spawn_x),
     spawnZ: nullToUndefined(m.spawn_z),
     bossArenaX: nullToUndefined(m.boss_arena_x),
@@ -431,7 +437,6 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     id: d.id,
     name: d.name,
     mapId: d.map_id,
-    isActive: d.is_active,
     partySize: d.party_size,
     composition: d.composition as Record<ClassRole, number>,
     spawns: d.spawns as unknown as DungeonSpawnDef[],
@@ -524,6 +529,14 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     z: n.z,
   }));
 
+  const dungeonPortals: DungeonPortalDef[] = dungeonPortalRows.map((p) => ({
+    id: p.id,
+    mapId: p.map_id,
+    dungeonId: p.dungeon_id,
+    x: p.x,
+    z: p.z,
+  }));
+
   return {
     classes,
     spells,
@@ -544,6 +557,7 @@ export async function getContentSnapshot(): Promise<ContentSnapshot> {
     recipes,
     gatheringNodeTypes,
     gatheringNodes,
+    dungeonPortals,
   };
 }
 

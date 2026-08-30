@@ -3,13 +3,13 @@ import {
   BOSS_ARENA_RADIUS,
   computeHexTerrainGrid,
   DUNGEON_HALF_EXTENT,
+  DUNGEON_PORTALS,
   dungeonHexContent,
   HexCellPlacement,
   HexTerrainKind,
   HEX_CIRCUMRADIUS,
   MAP_HALF_EXTENT,
   NPCS,
-  PORTAL_POSITION,
   STRUCTURES,
   WAYPOINTS,
   WaypointDef,
@@ -350,8 +350,8 @@ export class Minimap {
     return closestId;
   }
 
-  // showOverworldLandmarks is false inside a dungeon - NPCs/structures/portal/waypoints/boss arena
-  // are all overworld-only content, per STRUCTURES/NPCS/PORTAL_POSITION/WAYPOINTS's own contracts.
+  // showOverworldLandmarks is false inside a dungeon - NPCs/structures/portals/waypoints/boss arena
+  // are all overworld-only content, per STRUCTURES/NPCS/DUNGEON_PORTALS/WAYPOINTS's own contracts.
   // No other players/enemies are drawn (a deliberate declutter choice - this map is for terrain/
   // landmark navigation, not live combat awareness), so update() only ever needs static content
   // plus the local player's own position/facing. travelFromWaypointId switches on the waypoint
@@ -452,7 +452,7 @@ export class Minimap {
         const questState = npcQuestStates.get(n.id);
         if (questState) this.questIcon(n.x, n.z, questState, npcDotRadius, dotScale);
       }
-      this.dot(PORTAL_POSITION.x, PORTAL_POSITION.z, COLOR_PORTAL, 3 * dotScale);
+      for (const p of DUNGEON_PORTALS) this.dot(p.x, p.z, COLOR_PORTAL, 3 * dotScale);
     }
 
     // Waypoints draw regardless of waypointsOnly (that flag only strips everything ELSE) - both

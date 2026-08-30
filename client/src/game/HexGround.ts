@@ -12,10 +12,12 @@ import {
   HexTerrainKind,
   HEX_ELEVATION_STEP_WORLD,
   HEX_TILE_SCALE,
+  rampBaseFill,
   RiverPieceKind,
   RIVER_PIECE_MODEL_PATHS,
   ROAD_PIECE_MODEL_PATHS,
   RoadPieceKind,
+  stackedPlacements,
   WATER_MODEL_PATH,
 } from "@mmo/shared";
 import { loadModelGeometry } from "./models";
@@ -43,12 +45,10 @@ function deterministicRotation(x: number, z: number): number {
 
 // Elevation applies to any kind, not just grass (see HexTileOverrideDef's own doc comment) - a
 // hand-painted water/road/river/coast tile sits at its own height like a raised pond or an
-// elevated road, same as grass. Only the RAMP mesh (grassRamp below) is grass-specific, since
-// that's the only sloped piece the asset pack has - every other elevated kind just renders as a
-// flat instance translated up, with a plain (unramped) edge toward a lower neighbor.
-function elevationY(cell: HexCellPlacement): number {
-  return cell.elevation * HEX_ELEVATION_STEP_WORLD;
-}
+// elevated road, same as grass, and (since every kind's cell list is expanded through shared's
+// stackedPlacements/rampBaseFill below) stacks solid down to the ground the same way too. Only the
+// RAMP mesh (grassRamp below) is grass-specific, since that's the only sloped piece the asset pack
+// has - every other elevated kind is a stack of flat instances, one per level.
 
 function buildKindMesh(
   geometry: THREE.BufferGeometry,
@@ -265,13 +265,19 @@ export async function buildHexGround(halfExtent: number, content?: HexTerrainCon
   for (const { cell, pieceKind } of rivers) riverCellsByPiece[pieceKind].push(cell);
 
   const group = new THREE.Group();
+  // Every kind's cell list is expanded into one placement per (cell, level) pair below - a cell at
+  // elevation N contributes N+1 stacked instances instead of one floating at the top (see shared's
+  // stackedPlacements/rampBaseFill). yOf reads the level back by INDEX into the same expanded
+  // array, the identical pattern the ramp mesh's own rotation callback already uses just below
+  // (rotationOf stays a plain function of the cell - unaffected by which level an instance is).
+  const grassPlacements = [...stackedPlacements(byKind.grass), ...rampBaseFill(ramps)];
   group.add(
     buildKindMesh(
       grass.geometry,
       grass.material,
-      byKind.grass,
+      grassPlacements.map((p) => p.cell),
       (cell) => deterministicRotation(cell.x, cell.z),
-      elevationY,
+      (_cell, i) => grassPlacements[i].level * HEX_ELEVATION_STEP_WORLD,
     ),
   );
   group.add(
@@ -292,23 +298,59 @@ export async function buildHexGround(halfExtent: number, content?: HexTerrainCon
   // pointing a different direction on every tile, fracturing a lake into a field of stray dark
   // spikes instead of one continuous surface. A single fixed orientation for every water tile
   // keeps the crest direction consistent across a whole body of water instead.
-  group.add(buildKindMesh(water.geometry, water.material, byKind.water, () => 0, elevationY));
+  const waterPlacements = stackedPlacements(byKind.water);
+  group.add(
+    buildKindMesh(
+      water.geometry,
+      water.material,
+      waterPlacements.map((p) => p.cell),
+      () => 0,
+      (_cell, i) => waterPlacements[i].level * HEX_ELEVATION_STEP_WORLD,
+    ),
+  );
   for (const kind of Object.keys(roadCellsByPiece) as RoadPieceKind[]) {
     const placed = roadCellsByPiece[kind];
     const { geometry, material } = roadGeometry[kind];
     const rotationByCell = new Map(placed.map(({ cell, rotation }) => [cell, rotation]));
-    group.add(buildKindMesh(geometry, material, placed.map((p) => p.cell), (cell) => rotationByCell.get(cell) ?? 0, elevationY));
+    const placements = stackedPlacements(placed.map((p) => p.cell));
+    group.add(
+      buildKindMesh(
+        geometry,
+        material,
+        placements.map((p) => p.cell),
+        (cell) => rotationByCell.get(cell) ?? 0,
+        (_cell, i) => placements[i].level * HEX_ELEVATION_STEP_WORLD,
+      ),
+    );
   }
   // Coast tiles are hand-placed and hand-rotated (see HexTerrainKind's own doc comment) - each
   // cell already carries its own stored rotation directly, no piece-selection/connectivity step
   // needed at all.
   for (const kind of COAST_TILE_KINDS) {
-    group.add(buildKindMesh(coastGeometry[kind].geometry, coastGeometry[kind].material, byKind[kind], (cell) => cell.rotation, elevationY));
+    const placements = stackedPlacements(byKind[kind]);
+    group.add(
+      buildKindMesh(
+        coastGeometry[kind].geometry,
+        coastGeometry[kind].material,
+        placements.map((p) => p.cell),
+        (cell) => cell.rotation,
+        (_cell, i) => placements[i].level * HEX_ELEVATION_STEP_WORLD,
+      ),
+    );
   }
   for (const kind of Object.keys(riverCellsByPiece) as RiverPieceKind[]) {
     const cells = riverCellsByPiece[kind];
     const { geometry, material } = riverGeometry[kind];
-    group.add(buildKindMesh(geometry, material, cells, (cell) => riverByCell.get(cell)?.rotationRadians ?? 0, elevationY));
+    const placements = stackedPlacements(cells);
+    group.add(
+      buildKindMesh(
+        geometry,
+        material,
+        placements.map((p) => p.cell),
+        (cell) => riverByCell.get(cell)?.rotationRadians ?? 0,
+        (_cell, i) => placements[i].level * HEX_ELEVATION_STEP_WORLD,
+      ),
+    );
   }
   return group;
 }

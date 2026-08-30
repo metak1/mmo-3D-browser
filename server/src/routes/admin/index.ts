@@ -20,6 +20,7 @@ import { hexTilesRouter } from "./hexTiles.js";
 import { recipesRouter } from "./recipes.js";
 import { gatheringNodeTypesRouter } from "./gatheringNodeTypes.js";
 import { gatheringNodesRouter } from "./gatheringNodes.js";
+import { dungeonPortalsRouter } from "./dungeonPortals.js";
 
 export const adminRouter = Router();
 
@@ -42,6 +43,7 @@ adminRouter.use("/hex-tiles", hexTilesRouter);
 adminRouter.use("/recipes", recipesRouter);
 adminRouter.use("/gathering-node-types", gatheringNodeTypesRouter);
 adminRouter.use("/gathering-nodes", gatheringNodesRouter);
+adminRouter.use("/dungeon-portals", dungeonPortalsRouter);
 
 // Manual escape hatch - every CRUD mutation already reloads on its own, but this is useful
 // after a direct DB edit or for the admin UI to force-refresh the live server's view of content.

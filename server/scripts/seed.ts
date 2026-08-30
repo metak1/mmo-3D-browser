@@ -541,10 +541,19 @@ async function main() {
   type TalentEffectSeed =
     | { kind: "statBonus"; stat: string; perRank: number }
     | { kind: "extraCharges"; spellId: string; perRank: number }
-    | { kind: "onCastBuff"; spellId: string; buffId: string };
+    | { kind: "onCastBuff"; spellId: string; buffId: string }
+    // Resolves `effect` (the same composable {shape, actions[]} spells/boss abilities use)
+    // against the triggering spell's own already-resolved target/impact - see shared's
+    // TalentEffect doc comment for why this is kept separate from onCastBuff.
+    | { kind: "onCastEffect"; spellId: string; effect: { shape: unknown; actions: unknown[] } };
   const statBonus = (stat: string, perRank: number): TalentEffectSeed => ({ kind: "statBonus", stat, perRank });
   const extraCharges = (spellId: string, perRank = 1): TalentEffectSeed => ({ kind: "extraCharges", spellId, perRank });
   const onCastBuff = (spellId: string, buffId: string): TalentEffectSeed => ({ kind: "onCastBuff", spellId, buffId });
+  const onCastEffect = (spellId: string, effect: { shape: unknown; actions: unknown[] }): TalentEffectSeed => ({
+    kind: "onCastEffect",
+    spellId,
+    effect,
+  });
 
   interface TalentDefSeed {
     classId: string;
@@ -552,7 +561,7 @@ async function main() {
     name: string;
     description: string;
     maxRank: number;
-    effect: TalentEffectSeed;
+    effects: TalentEffectSeed[];
     tier: number;
     column: number;
     prerequisiteSlug?: string;
@@ -565,7 +574,7 @@ async function main() {
       name: "Iron Skin",
       description: "Years of taking hits taught your body to shrug them off.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("armorBonus", 1),
+      effects: [statBonus("armorBonus", 1)],
       tier: 1,
       column: 0,
     },
@@ -575,7 +584,7 @@ async function main() {
       name: "Crushing Blows",
       description: "Every swing carries a little more weight.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("damagePercent", 1.5),
+      effects: [statBonus("damagePercent", 1.5)],
       tier: 1,
       column: 1,
     },
@@ -585,7 +594,7 @@ async function main() {
       name: "Stalwart Heart",
       description: "Your resolve keeps you standing after lesser warriors would fall.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("maxHpPercent", 1.25),
+      effects: [statBonus("maxHpPercent", 1.25)],
       tier: 1,
       column: 2,
     },
@@ -595,7 +604,7 @@ async function main() {
       name: "Momentum",
       description: "The first swing of Whirlwind is never the last you have in you.",
       maxRank: 1,
-      effect: extraCharges("warrior_whirlwind"),
+      effects: [extraCharges("warrior_whirlwind")],
       tier: 2,
       column: 1,
       prerequisiteSlug: "crushing_blows",
@@ -606,10 +615,26 @@ async function main() {
       name: "Battle Fury",
       description: "A well-placed Shield Bash leaves you charged with momentum.",
       maxRank: 1,
-      effect: onCastBuff("warrior_shield_bash", "battleFury"),
+      effects: [onCastBuff("warrior_shield_bash", "battleFury")],
       tier: 2,
       column: 2,
       prerequisiteSlug: "stalwart_heart",
+    },
+    {
+      classId: "warrior",
+      slug: "second_wind",
+      name: "Second Wind",
+      description: "Landing Shield Bash lets you spin back into the fray immediately.",
+      maxRank: 1,
+      effects: [
+        onCastEffect("warrior_shield_bash", {
+          shape: { kind: "singleTarget" },
+          actions: [{ kind: "resetCooldown", spellId: "warrior_whirlwind" }],
+        }),
+      ],
+      tier: 2,
+      column: 0,
+      prerequisiteSlug: "iron_skin",
     },
     // --- Rogue ---
     {
@@ -618,7 +643,7 @@ async function main() {
       name: "Cutthroat",
       description: "You don't need much of an opening.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("critChanceBonus", 0.6),
+      effects: [statBonus("critChanceBonus", 0.6)],
       tier: 1,
       column: 0,
     },
@@ -628,7 +653,7 @@ async function main() {
       name: "Vicious Strikes",
       description: "Precision over brute force.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("damagePercent", 1.5),
+      effects: [statBonus("damagePercent", 1.5)],
       tier: 1,
       column: 1,
     },
@@ -638,7 +663,7 @@ async function main() {
       name: "Grim Endurance",
       description: "A life of close calls builds a thick skin.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("maxHpPercent", 1.25),
+      effects: [statBonus("maxHpPercent", 1.25)],
       tier: 1,
       column: 2,
     },
@@ -648,7 +673,7 @@ async function main() {
       name: "Opportunist",
       description: "One blade finds the opening; the second is already moving.",
       maxRank: 1,
-      effect: extraCharges("rogue_backstab"),
+      effects: [extraCharges("rogue_backstab")],
       tier: 2,
       column: 1,
       prerequisiteSlug: "vicious_strikes",
@@ -659,10 +684,26 @@ async function main() {
       name: "Fleet Footed",
       description: "Garrote a target and you're already three steps from where they think you are.",
       maxRank: 1,
-      effect: onCastBuff("rogue_garrote", "shadowStep"),
+      effects: [onCastBuff("rogue_garrote", "shadowStep")],
       tier: 2,
       column: 2,
       prerequisiteSlug: "grim_endurance",
+    },
+    {
+      classId: "rogue",
+      slug: "bleeding_cut",
+      name: "Bleeding Cut",
+      description: "Backstab leaves a wound that keeps bleeding long after the blade is gone.",
+      maxRank: 1,
+      effects: [
+        onCastEffect("rogue_backstab", {
+          shape: { kind: "singleTarget" },
+          actions: [{ kind: "dot", amount: 3, tickIntervalMs: 1000, durationMs: 4000 }],
+        }),
+      ],
+      tier: 2,
+      column: 0,
+      prerequisiteSlug: "cutthroat",
     },
     // --- Ranger ---
     {
@@ -671,7 +712,7 @@ async function main() {
       name: "Marksman's Eye",
       description: "You aim for the gaps others don't even see.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("critChanceBonus", 0.6),
+      effects: [statBonus("critChanceBonus", 0.6)],
       tier: 1,
       column: 0,
     },
@@ -681,7 +722,7 @@ async function main() {
       name: "Camouflage",
       description: "Half-seen is half-hit.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("armorBonus", 1),
+      effects: [statBonus("armorBonus", 1)],
       tier: 1,
       column: 1,
     },
@@ -691,7 +732,7 @@ async function main() {
       name: "Wilderness Vigor",
       description: "Years in the field harden more than just your aim.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("maxHpPercent", 1.25),
+      effects: [statBonus("maxHpPercent", 1.25)],
       tier: 1,
       column: 2,
     },
@@ -701,7 +742,7 @@ async function main() {
       name: "Quickdraw",
       description: "Nocked, drawn, loosed — before they've registered the threat. An Aimed Shot always has one more arrow behind it.",
       maxRank: 1,
-      effect: extraCharges("ranger_aimed_shot"),
+      effects: [extraCharges("ranger_aimed_shot")],
       tier: 2,
       column: 1,
       prerequisiteSlug: "camouflage",
@@ -712,7 +753,7 @@ async function main() {
       name: "Hunter's Focus",
       description: "The trap springs, and everything after it feels slower.",
       maxRank: 1,
-      effect: onCastBuff("ranger_explosive_trap", "huntersFocus"),
+      effects: [onCastBuff("ranger_explosive_trap", "huntersFocus")],
       tier: 2,
       column: 2,
       prerequisiteSlug: "wilderness_vigor",
@@ -724,7 +765,7 @@ async function main() {
       name: "Focused Mind",
       description: "Clarity finds the weak point in anything.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("critChanceBonus", 0.6),
+      effects: [statBonus("critChanceBonus", 0.6)],
       tier: 1,
       column: 0,
     },
@@ -734,7 +775,7 @@ async function main() {
       name: "Arcane Insight",
       description: "Understanding is its own weapon.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("damagePercent", 1.5),
+      effects: [statBonus("damagePercent", 1.5)],
       tier: 1,
       column: 1,
     },
@@ -744,7 +785,7 @@ async function main() {
       name: "Vital Current",
       description: "Life force ebbs and flows — you've learned to hold onto more of it.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("maxHpPercent", 1.25),
+      effects: [statBonus("maxHpPercent", 1.25)],
       tier: 1,
       column: 2,
     },
@@ -754,7 +795,7 @@ async function main() {
       name: "Swift Rites",
       description: "The words come easier with practice — Renew is never fully spent.",
       maxRank: 1,
-      effect: extraCharges("oracle_renew"),
+      effects: [extraCharges("oracle_renew")],
       tier: 2,
       column: 1,
       prerequisiteSlug: "arcane_insight",
@@ -765,7 +806,7 @@ async function main() {
       name: "Warding Sigil",
       description: "Smite carves an opening, and a shimmer of protection follows you through it.",
       maxRank: 1,
-      effect: onCastBuff("oracle_smite", "divineFavor"),
+      effects: [onCastBuff("oracle_smite", "divineFavor")],
       tier: 2,
       column: 2,
       prerequisiteSlug: "vital_current",
@@ -777,7 +818,7 @@ async function main() {
       name: "Piercing Cold",
       description: "Ice finds every crack.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("critChanceBonus", 0.6),
+      effects: [statBonus("critChanceBonus", 0.6)],
       tier: 1,
       column: 0,
     },
@@ -787,7 +828,7 @@ async function main() {
       name: "Arcane Power",
       description: "Raw force, barely contained.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("damagePercent", 1.5),
+      effects: [statBonus("damagePercent", 1.5)],
       tier: 1,
       column: 1,
     },
@@ -797,7 +838,7 @@ async function main() {
       name: "Mana Shield",
       description: "A thin barrier is still a barrier.",
       maxRank: TALENT_MAX_RANK,
-      effect: statBonus("armorBonus", 1),
+      effects: [statBonus("armorBonus", 1)],
       tier: 1,
       column: 2,
     },
@@ -807,7 +848,7 @@ async function main() {
       name: "Overchannel",
       description: "You've stopped waiting for the mana to settle — Frostbolt can be loosed twice before it does.",
       maxRank: 1,
-      effect: extraCharges("mage_frostbolt"),
+      effects: [extraCharges("mage_frostbolt")],
       tier: 2,
       column: 1,
       prerequisiteSlug: "arcane_power",
@@ -818,7 +859,7 @@ async function main() {
       name: "Deep Reserves",
       description: "Blizzard draws from a well deeper than you let on.",
       maxRank: 1,
-      effect: onCastBuff("mage_blizzard", "arcaneSurge"),
+      effects: [onCastBuff("mage_blizzard", "arcaneSurge")],
       tier: 2,
       column: 2,
       prerequisiteSlug: "mana_shield",
@@ -832,12 +873,12 @@ async function main() {
       name: def.name,
       description: def.description,
       max_rank: def.maxRank,
-      effect: def.effect,
+      effects: def.effects,
       tier: def.tier,
       column_index: def.column,
       prerequisite_talent_id: def.prerequisiteSlug ? `${def.classId}_${def.prerequisiteSlug}` : null,
     };
-    await upsert("talents", row, ["effect"]);
+    await upsert("talents", row, ["effects"]);
   }
 
   // --- Enemy types ---
@@ -1030,8 +1071,6 @@ async function main() {
     kind: "overworld",
     half_extent: 250,
     is_active: true,
-    portal_x: -24,
-    portal_z: -24,
     boss_arena_x: 0,
     boss_arena_z: 28,
     boss_arena_radius: 10,
@@ -1252,10 +1291,12 @@ async function main() {
   // Starting-town buildings below are real KayKit "Medieval Hexagon Pack" models (kind:"building",
   // see shared's StructureKind/client/src/game/Structure.ts's BUILDING_MODELS) instead of
   // hand-assembled wall/door loops - a trial run for replacing this game's procedural-box
-  // buildings with off-the-shelf whole-building assets. width/depth/height/color are unused for
-  // this kind (still required by the schema) so every row below just carries nominal placeholder
-  // values. Millbrook/Ashford Keep/Frosthold below are untouched, still the original wall+door
-  // pattern - see that comment further down for how to build a room by hand.
+  // buildings with off-the-shelf whole-building assets. color is unused for this kind (still
+  // required by the schema); width/depth/height are real (each model's own natural, unscaled size
+  // - shared's BUILDING_TARGET_HEIGHT/BUILDING_FOOTPRINT - same numbers the corresponding DB
+  // migration backfills existing rows to), since the map editor's scale gizmo now actually resizes
+  // a building via these columns. Millbrook/Ashford Keep/Frosthold below are untouched, still the
+  // original wall+door pattern - see that comment further down for how to build a room by hand.
   const structures = [
     {
       id: "house_1",
@@ -1266,9 +1307,9 @@ async function main() {
       x: 3,
       z: -13,
       rotation_y: 0,
-      width: 1,
-      depth: 1,
-      height: 1,
+      width: 2.36,
+      depth: 2.544,
+      height: 3.26,
       color: "#ffffff",
     },
     {
@@ -1280,9 +1321,9 @@ async function main() {
       x: -15,
       z: -13,
       rotation_y: 0,
-      width: 1,
-      depth: 1,
-      height: 1,
+      width: 2.602,
+      depth: 3.268,
+      height: 4.48,
       color: "#ffffff",
     },
     {
@@ -1294,9 +1335,9 @@ async function main() {
       x: -14,
       z: 1,
       rotation_y: 0,
-      width: 1,
-      depth: 1,
-      height: 1,
+      width: 5.36,
+      depth: 3.918,
+      height: 3.44,
       color: "#ffffff",
     },
     { id: "town_wall", name: "Town Wall", map_id: "overworld", kind: "wall", x: -3, z: -19, rotation_y: 0, width: 22, depth: 1.2, height: 4, color: "#7d7d7d" },
@@ -1310,9 +1351,9 @@ async function main() {
       x: 6,
       z: 22,
       rotation_y: 0,
-      width: 1,
-      depth: 1,
-      height: 1,
+      width: 2.466,
+      depth: 2.862,
+      height: 6.4,
       color: "#ffffff",
     },
     {
@@ -1324,9 +1365,9 @@ async function main() {
       x: 20,
       z: -13,
       rotation_y: 0,
-      width: 1,
-      depth: 1,
-      height: 1,
+      width: 3.832,
+      depth: 3.706,
+      height: 3.45,
       color: "#ffffff",
     },
     // --- Millbrook (trading outpost, x~70/z~-10) - one room, no perimeter, matches its role as
@@ -1447,11 +1488,10 @@ async function main() {
   // in a rough line from the entrance (0,0) out to the boss at the far end, so clearing a path
   // through the trash is what "reaching the boss" actually means, rather than a location that's
   // just decorative.) ---
-  const dungeon = {
+  const ashenRuins = {
     id: "ashen_ruins",
     name: "The Ashen Ruins",
     map_id: "dungeon_ground",
-    is_active: true,
     party_size: 4,
     composition: { tank: 1, healer: 1, dps: 2 },
     spawns: [
@@ -1466,7 +1506,34 @@ async function main() {
       { id: "dungeon-boss", enemyTypeId: "dungeon_boss", x: 0, z: 62 },
     ],
   };
-  await upsert("dungeons", dungeon, ["composition", "spawns"]);
+  await upsert("dungeons", ashenRuins, ["composition", "spawns"]);
+
+  // A second, minimal dungeon proving a portal can lead somewhere genuinely different (own id,
+  // own spawns/composition) - reuses dungeon_ground's own map row rather than authoring a whole
+  // new hex layout, since the point is exercising per-dungeon selection, not new art.
+  const frostboundHollow = {
+    id: "frostbound_hollow",
+    name: "Frostbound Hollow",
+    map_id: "dungeon_ground",
+    party_size: 2,
+    composition: { tank: 1, dps: 1 },
+    spawns: [
+      { id: "trash-1", enemyTypeId: "caster", x: 0, z: 14 },
+      { id: "trash-2", enemyTypeId: "melee", x: 0, z: 28 },
+      { id: "dungeon-boss", enemyTypeId: "dungeon_boss", x: 0, z: 40 },
+    ],
+  };
+  await upsert("dungeons", frostboundHollow, ["composition", "spawns"]);
+
+  // --- Dungeon portals - many can exist on one map, each linking to its own dungeon (see
+  // DungeonPortalDef) - same one-row-per-placement pattern as gathering_nodes/enemy_spawns.
+  const dungeonPortals = [
+    { id: "portal_ashen_ruins", map_id: "overworld", dungeon_id: "ashen_ruins", x: -24, z: -24 },
+    { id: "portal_frostbound_hollow", map_id: "overworld", dungeon_id: "frostbound_hollow", x: -40, z: -40 },
+  ];
+  for (const p of dungeonPortals) {
+    await upsert("dungeon_portals", p);
+  }
 
   console.log("Seed complete.");
 }

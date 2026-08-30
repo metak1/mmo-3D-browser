@@ -25,6 +25,7 @@ export const effectActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("dispel") }),
   z.object({ kind: z.literal("interrupt") }),
   z.object({ kind: z.literal("summon"), enemyTypeId: z.string().min(1), count: z.number().int().positive() }),
+  z.object({ kind: z.literal("resetCooldown"), spellId: z.string().min(1) }),
 ]);
 
 export const effectDefSchema = z.object({ shape: effectShapeSchema, actions: z.array(effectActionSchema).min(1) });

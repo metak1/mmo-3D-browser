@@ -89,8 +89,8 @@ describe("content-backed functions", () => {
       },
     ],
     talents: [
-      { id: "root_talent", classId: "warrior", name: "Root", description: "", maxRank: 1, effect: { kind: "statBonus", stat: "damagePercent", perRank: 5 }, tier: 1, column: 0 },
-      { id: "child_talent", classId: "warrior", name: "Child", description: "", maxRank: 1, effect: { kind: "statBonus", stat: "damagePercent", perRank: 5 }, tier: 2, column: 0, prerequisiteTalentId: "root_talent" },
+      { id: "root_talent", classId: "warrior", name: "Root", description: "", maxRank: 1, effects: [{ kind: "statBonus", stat: "damagePercent", perRank: 5 }], tier: 1, column: 0 },
+      { id: "child_talent", classId: "warrior", name: "Child", description: "", maxRank: 1, effects: [{ kind: "statBonus", stat: "damagePercent", perRank: 5 }], tier: 2, column: 0, prerequisiteTalentId: "root_talent" },
     ],
     enemyTypes: [],
     npcs: [],
@@ -107,6 +107,7 @@ describe("content-backed functions", () => {
     recipes: [],
     gatheringNodeTypes: [],
     gatheringNodes: [],
+    dungeonPortals: [],
   };
 
   beforeAll(() => {

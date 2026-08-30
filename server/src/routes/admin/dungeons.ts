@@ -1,8 +1,6 @@
 import { z } from "zod";
-import { pool, withTransaction } from "../../db/client.js";
+import { countWhere } from "../../db/client.js";
 import { createCrudRouter } from "../../http/createCrudRouter.js";
-import { asyncHandler } from "../../http/asyncHandler.js";
-import { reloadGameContent } from "../../db/content.js";
 
 // One fixed spawn point, live for the whole run from the moment the instance is created (see
 // DungeonRoom.spawnDungeonEnemy) - no wave gating. The one entry whose enemyTypeId resolves to a
@@ -25,33 +23,19 @@ const dungeonSchema = z.object({
   composition: z.record(z.string(), z.number()),
   spawns: z.array(spawnSpecSchema),
 });
-// is_active is exclusively managed via POST /:id/activate below, same reasoning as maps.ts.
 const updateSchema = dungeonSchema.omit({ id: true }).partial();
 
+// A dungeon simply exists or doesn't now (no more is_active/"exactly one active dungeon" flag -
+// many can be reachable at once, each through its own dungeon_portals row(s)), so checkDeletable
+// is the one guard left: a dungeon still pointed at by a portal can't just vanish out from under
+// it (mirrors maps.ts's own checkDeletable pattern).
 export const dungeonsRouter = createCrudRouter("dungeons", {
   createSchema: dungeonSchema,
   updateSchema,
   jsonColumns: ["composition", "spawns"],
+  checkDeletable: async (id) => {
+    const portalCount = await countWhere("dungeon_portals", "dungeon_id = $1", [id]);
+    if (portalCount > 0) return `${portalCount} portal(s) still lead to this dungeon`;
+    return null;
+  },
 });
-
-// Activating one dungeon clears every other dungeon's flag in the same transaction, so
-// "exactly one active dungeon" always holds (the overworld portal always leads to whichever
-// dungeon has is_active=true).
-dungeonsRouter.post(
-  "/:id/activate",
-  asyncHandler(async (req, res) => {
-    const { rows } = await pool.query("SELECT * FROM dungeons WHERE id = $1", [req.params.id]);
-    if (rows.length === 0) {
-      res.status(404).json({ error: "Not found" });
-      return;
-    }
-
-    await withTransaction(async (client) => {
-      await client.query("UPDATE dungeons SET is_active = false");
-      await client.query("UPDATE dungeons SET is_active = true WHERE id = $1", [req.params.id]);
-    });
-    await reloadGameContent();
-    const { rows: updated } = await pool.query("SELECT * FROM dungeons WHERE id = $1", [req.params.id]);
-    res.json({ item: updated[0] });
-  }),
-);

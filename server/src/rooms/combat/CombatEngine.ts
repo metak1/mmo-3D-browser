@@ -60,6 +60,7 @@ import {
   getActiveBuffBonus,
   getEffectiveStats,
   getOnCastBuffs,
+  getOnCastEffects,
   getSpellCharges,
   getTalentBonus,
   resolveClassId,
@@ -221,6 +222,7 @@ const ACTION_POLARITY: Record<EffectAction["kind"], "enemy" | "ally" | "self"> =
   buff: "ally",
   dispel: "ally",
   summon: "self",
+  resetCooldown: "self",
 };
 
 // Pure geometry - does (ux,uz) fall inside `shape`, given where the caster is standing and where
@@ -739,25 +741,31 @@ export class CombatEngine {
     for (const action of selfActions) this.applySelfAction(casterCtx, action, impact);
   }
 
-  // Actions with no unit target at all - just "summon" for now, spawning near the impact point
-  // rather than the caster (a ground-targeted summon spell should drop its adds where it was
-  // aimed, not at the caster's own feet) using the exact same Enemy-construction shape
-  // tickBossAddSpawns already uses for reinforcement waves.
+  // Actions with no unit target at all - "summon" spawns near the impact point rather than the
+  // caster (a ground-targeted summon spell should drop its adds where it was aimed, not at the
+  // caster's own feet) using the exact same Enemy-construction shape tickBossAddSpawns already
+  // uses for reinforcement waves. "resetCooldown" only makes sense for a player's own tracked
+  // cooldowns (lastCastAt is keyed by sessionId, enemies don't have one), so it's a no-op for a
+  // boss-cast effect - primarily meant for talents' onCastEffect (see castSpellEffects) but, like
+  // every EffectAction, reachable from any composable effect (a spell, an item) for free.
   private applySelfAction(casterCtx: CasterContext, action: EffectAction, impact: { x: number; z: number }) {
-    if (action.kind !== "summon") return;
-    const addType = ENEMY_TYPES[action.enemyTypeId];
-    if (!addType) return;
-    for (let i = 0; i < action.count; i++) {
-      const add = new Enemy();
-      add.enemyTypeId = action.enemyTypeId;
-      add.behavior = addType.behavior;
-      add.x = impact.x + (Math.random() * 4 - 2);
-      add.z = impact.z + (Math.random() * 4 - 2);
-      add.homeX = impact.x;
-      add.homeZ = impact.z;
-      add.hp = addType.stats.maxHp;
-      add.maxHp = addType.stats.maxHp;
-      this.state.enemies.set(`summon-${casterCtx.sourceId}-${this.addSeq++}`, add);
+    if (action.kind === "summon") {
+      const addType = ENEMY_TYPES[action.enemyTypeId];
+      if (!addType) return;
+      for (let i = 0; i < action.count; i++) {
+        const add = new Enemy();
+        add.enemyTypeId = action.enemyTypeId;
+        add.behavior = addType.behavior;
+        add.x = impact.x + (Math.random() * 4 - 2);
+        add.z = impact.z + (Math.random() * 4 - 2);
+        add.homeX = impact.x;
+        add.homeZ = impact.z;
+        add.hp = addType.stats.maxHp;
+        add.maxHp = addType.stats.maxHp;
+        this.state.enemies.set(`summon-${casterCtx.sourceId}-${this.addSeq++}`, add);
+      }
+    } else if (action.kind === "resetCooldown" && casterCtx.isPlayer) {
+      this.lastCastAt.delete(`${casterCtx.sourceId}:${action.spellId}`);
     }
   }
 
@@ -857,13 +865,19 @@ export class CombatEngine {
   // (the same composable system boss abilities use), so this just applies any onCastBuff talents
   // for this spell first (kept as its own unconditional step here, not folded into resolveEffect,
   // since it's about the caster regardless of what the effect's shape/actions actually hit), then
-  // runs each of the spell's effects through resolveEffect exactly like a boss ability does.
+  // resolves any onCastEffect talents against this same cast's own target/impact (so e.g. a talent
+  // DOT lands on the same enemy the spell itself hit, for free from the existing shape-matching),
+  // then runs each of the spell's own effects through resolveEffect exactly like a boss ability does.
   private castSpellEffects(caster: Player, casterSessionId: string, spell: SpellDef, target: ResolvedTarget, impact: { x: number; z: number }) {
-    for (const buffId of getOnCastBuffs(resolveClassId(caster.classId), spell.id, caster.talentRanks)) {
+    const classId = resolveClassId(caster.classId);
+    for (const buffId of getOnCastBuffs(classId, spell.id, caster.talentRanks)) {
       this.applyBuff(caster, buffId);
     }
     const casterCtx = this.makePlayerCasterCtx(caster, casterSessionId, spell.id);
     const hint = this.targetHintId(casterSessionId, target);
+    for (const talentEffect of getOnCastEffects(classId, spell.id, caster.talentRanks)) {
+      this.resolveEffect(casterCtx, talentEffect, impact, hint);
+    }
     for (const effect of spell.effects) this.resolveEffect(casterCtx, effect, impact, hint);
   }
 
